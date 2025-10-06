@@ -14,6 +14,7 @@ from moonraker_owl.config import (
     LoggingConfig,
     MoonrakerConfig,
     OwlConfig,
+    ResilienceConfig,
     TelemetryConfig,
 )
 from moonraker_owl.telemetry import TelemetryConfigurationError, TelemetryPublisher
@@ -75,6 +76,7 @@ def build_config(
         ),
         commands=CommandConfig(),
         logging=LoggingConfig(),
+        resilience=ResilienceConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -155,6 +157,7 @@ def test_telemetry_configuration_requires_device_id():
         telemetry=TelemetryConfig(),
         commands=CommandConfig(),
         logging=LoggingConfig(),
+        resilience=ResilienceConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )

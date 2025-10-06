@@ -68,6 +68,15 @@ class FakeMqttClient:
         self._events.setdefault("subscribed", []).append((topic, qos))
         return self._subscribe_rc, 1
 
+    def reconnect(self):
+        self._events["reconnect_called"] = self._events.get("reconnect_called", 0) + 1
+        if self.on_connect:
+            self._loop.call_soon(self.on_connect, self, None, None, self._rc_connect)
+        return mqtt.MQTT_ERR_SUCCESS
+
+    def reconnect_async(self):  # pragma: no cover - optional path
+        return self.reconnect()
+
 
 @pytest_asyncio.fixture
 async def mqtt_client(monkeypatch):
@@ -150,7 +159,7 @@ async def test_message_handler_dispatches_async(monkeypatch):
     await client.connect()
 
     message = SimpleNamespace(topic="owl/topic", payload=b"data")
-    client._on_message(client._client, None, message)
+    client._on_message(client._client, None, message)  # type: ignore[arg-type]
 
     await asyncio.wait_for(message_event.wait(), timeout=1.0)
     await client.disconnect()
@@ -183,6 +192,43 @@ async def test_publish_failure_raises(monkeypatch):
         client.publish("test", b"payload")
 
     await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_triggers_paho(mqtt_client):
+    client, events = mqtt_client
+
+    await client.reconnect()
+
+    assert events.get("reconnect_called") == 1
+
+
+@pytest.mark.asyncio
+async def test_disconnect_handler_invoked(monkeypatch):
+    loop = asyncio.get_running_loop()
+    events: dict = {}
+
+    def factory(*args, **kwargs):
+        return FakeMqttClient(loop, events, rc_disconnect=1, *args, **kwargs)
+
+    monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
+
+    config = CloudConfig(broker_host="broker.owl.dev", broker_port=1883)
+    client = MQTTClient(config, client_id="printer-123")
+
+    disconnect_event = asyncio.Event()
+
+    def _handler(rc: int) -> None:
+        events["disconnect_rc"] = rc
+        disconnect_event.set()
+
+    client.register_disconnect_handler(_handler)
+
+    await client.connect()
+    await client.disconnect()
+
+    await asyncio.wait_for(disconnect_event.wait(), timeout=1.0)
+    assert events.get("disconnect_rc") == 1
 
 
 @pytest.mark.asyncio

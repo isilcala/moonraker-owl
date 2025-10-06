@@ -35,8 +35,10 @@ pytest
 - ✅ Configuration loader with defaults
 - ✅ CLI scaffolding (start/link/show-config commands)
 - ✅ Logging bootstrapper
-- ⏳ Moonraker and MQTT adapters (planned)
-- ⏳ Device linking workflow
-- ⏳ Telemetry and command pipelines
+- ✅ Moonraker and MQTT adapters
+- ✅ Device linking workflow with persisted credentials
+- ✅ Telemetry publisher and command processor (pause/resume/cancel) with unit tests
+- ✅ Resilience supervisor (MQTT reconnect/backoff, health endpoint, CI workflow)
+- ⏳ Deployment polish (installer upgrades, packaging, soak testing)
 
 Track progress in `docs/plans/moonraker-owl-plugin-plan.md`.

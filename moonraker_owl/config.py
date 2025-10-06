@@ -49,12 +49,22 @@ class LoggingConfig:
 
 
 @dataclass(slots=True)
+class ResilienceConfig:
+    reconnect_initial_seconds: float = 1.0
+    reconnect_max_seconds: float = 30.0
+    health_enabled: bool = False
+    health_host: str = "127.0.0.1"
+    health_port: int = 0
+
+
+@dataclass(slots=True)
 class OwlConfig:
     cloud: CloudConfig
     moonraker: MoonrakerConfig
     telemetry: TelemetryConfig
     commands: CommandConfig
     logging: LoggingConfig
+    resilience: ResilienceConfig
     raw: ConfigParser
     path: Path
 
@@ -96,6 +106,13 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "level": "INFO",
                 "path": str(constants.DEFAULT_LOG_PATH),
                 "log_network": "false",
+            },
+            "resilience": {
+                "reconnect_initial_seconds": "1.0",
+                "reconnect_max_seconds": "30.0",
+                "health_enabled": "false",
+                "health_host": "127.0.0.1",
+                "health_port": "0",
             },
         }
     )
@@ -141,12 +158,27 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         log_network=parser.getboolean("logging", "log_network", fallback=False),
     )
 
+    resilience = ResilienceConfig(
+        reconnect_initial_seconds=parser.getfloat(
+            "resilience", "reconnect_initial_seconds", fallback=1.0
+        ),
+        reconnect_max_seconds=parser.getfloat(
+            "resilience", "reconnect_max_seconds", fallback=30.0
+        ),
+        health_enabled=parser.getboolean(
+            "resilience", "health_enabled", fallback=False
+        ),
+        health_host=parser.get("resilience", "health_host", fallback="127.0.0.1"),
+        health_port=parser.getint("resilience", "health_port", fallback=0),
+    )
+
     return OwlConfig(
         cloud=cloud,
         moonraker=moonraker,
         telemetry=telemetry,
         commands=commands,
         logging=logging_config,
+        resilience=resilience,
         raw=parser,
         path=config_path,
     )

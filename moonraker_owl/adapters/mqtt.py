@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, List, Optional
 
 import paho.mqtt.client as mqtt
 
@@ -39,6 +39,9 @@ class MQTTClient:
         self._disconnect_event: Optional[asyncio.Event] = None
         self._message_handler: Optional[MessageHandler] = None
         self._last_connect_rc: Optional[int] = None
+        self._connected: bool = False
+        self._disconnect_handlers: List[Callable[[int], None]] = []
+        self._connect_handlers: List[Callable[[int], None]] = []
 
     async def connect(self, timeout: float = 30.0) -> None:
         """Connect to the MQTT broker and wait for acknowledgement."""
@@ -99,6 +102,7 @@ class MQTTClient:
         finally:
             self._client.loop_stop()
             self._client = None
+        self._connected = False
 
     def publish(
         self, topic: str, payload: bytes, qos: int = 1, retain: bool = False
@@ -128,6 +132,41 @@ class MQTTClient:
         if result != mqtt.MQTT_ERR_SUCCESS:
             raise MQTTConnectionError(f"Unsubscribe failed with rc={result}")
 
+    def register_disconnect_handler(self, handler: Callable[[int], None]) -> None:
+        self._disconnect_handlers.append(handler)
+
+    def register_connect_handler(self, handler: Callable[[int], None]) -> None:
+        self._connect_handlers.append(handler)
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    async def reconnect(self, timeout: float = 30.0) -> None:
+        if not self._client:
+            raise RuntimeError("MQTT client not initialised")
+
+        self._connected_event = asyncio.Event()
+        self._last_connect_rc = None
+
+        reconnect_async = getattr(self._client, "reconnect_async", None)
+
+        if reconnect_async is not None:
+            reconnect_async()
+        else:
+            rc = self._client.reconnect()
+            if rc != mqtt.MQTT_ERR_SUCCESS:
+                raise MQTTConnectionError(f"MQTT reconnect failed with rc={rc}")
+
+        try:
+            await asyncio.wait_for(self._connected_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise MQTTConnectionError("Timed out reconnecting to MQTT broker") from exc
+
+        if self._last_connect_rc is None or self._last_connect_rc != 0:
+            raise MQTTConnectionError(
+                f"MQTT broker rejected reconnection (rc={self._last_connect_rc})"
+            )
+
     # ------------------------------------------------------------------
     # Internal callbacks bridging the threaded paho callbacks into asyncio
     # ------------------------------------------------------------------
@@ -135,10 +174,15 @@ class MQTTClient:
         self._last_connect_rc = rc
         if rc == 0:
             LOGGER.info("Connected to MQTT broker")
+            self._connected = True
             if self._connected_event:
                 self._connected_event.set()
+            if self._loop:
+                for handler in self._connect_handlers:
+                    self._loop.call_soon_threadsafe(handler, rc)
         else:
             LOGGER.error("MQTT connection failed with rc=%s", rc)
+            self._connected = False
             if self._connected_event:
                 self._connected_event.set()
 
@@ -146,6 +190,10 @@ class MQTTClient:
         LOGGER.info("Disconnected from MQTT broker (rc=%s)", rc)
         if self._disconnect_event:
             self._disconnect_event.set()
+        self._connected = False
+        if self._loop:
+            for handler in self._disconnect_handlers:
+                self._loop.call_soon_threadsafe(handler, rc)
 
     def _on_message(
         self, client: mqtt.Client, userdata, message: mqtt.MQTTMessage
