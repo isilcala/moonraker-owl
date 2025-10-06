@@ -1,0 +1,16 @@
+# Systemd service template for moonraker-owl (scaffolding)
+[Unit]
+Description=moonraker-owl bridge service
+After=network-online.target moonraker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=%h/moonraker-owl
+ExecStart=%h/moonraker-owl-env/bin/python3 -m moonraker_owl.cli --config %h/printer_data/config/moonraker-owl.cfg start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

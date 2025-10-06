@@ -1,0 +1,178 @@
+"""Device linking workflow."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+import aiohttp
+
+from .config import OwlConfig, save_config
+from .constants import DEFAULT_CREDENTIALS_PATH
+
+LOGGER = logging.getLogger(__name__)
+
+DEFAULT_TIMEOUT_SECONDS = 120.0
+DEFAULT_POLL_INTERVAL_SECONDS = 5.0
+
+
+class DeviceLinkingError(RuntimeError):
+    """Raised when the linking flow fails."""
+
+
+@dataclass(slots=True)
+class DeviceCredentials:
+    tenant_id: str
+    printer_id: str
+    device_id: str
+    device_token: str
+    linked_at: str
+
+
+async def link_device(
+    base_url: str,
+    link_code: str,
+    *,
+    session: Optional[aiohttp.ClientSession] = None,
+    poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> DeviceCredentials:
+    """Request credentials from Owl Cloud, polling until accepted or timeout."""
+
+    if not link_code:
+        raise DeviceLinkingError("Link code cannot be empty")
+
+    url = base_url.rstrip("/") + "/device/link"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+
+    owns_session = session is None
+    if session is None:
+        client_timeout = aiohttp.ClientTimeout(total=timeout + 30)
+        session = aiohttp.ClientSession(timeout=client_timeout)
+
+    try:
+        assert session is not None  # narrow type for linters
+        while True:
+            async with session.post(url, json={"linkCode": link_code}) as response:
+                if response.status == 200:
+                    payload = await response.json()
+                    try:
+                        return DeviceCredentials(
+                            tenant_id=str(payload["tenantId"]),
+                            printer_id=str(payload["printerId"]),
+                            device_id=str(payload["deviceId"]),
+                            device_token=str(payload["deviceToken"]),
+                            linked_at=str(payload.get("linkedAt", "")),
+                        )
+                    except KeyError as exc:
+                        raise DeviceLinkingError(
+                            f"Response missing expected field: {exc.args[0]}"
+                        ) from exc
+
+                if response.status == 404:
+                    if loop.time() >= deadline:
+                        raise DeviceLinkingError(
+                            "Linking timed out waiting for acceptance"
+                        )
+                    await asyncio.sleep(poll_interval)
+                    continue
+
+                detail = await response.text()
+                raise DeviceLinkingError(
+                    f"Unexpected response {response.status} from Owl Cloud: {detail.strip()}"
+                )
+    finally:
+        if owns_session and session is not None:
+            await session.close()
+
+
+def perform_linking(
+    config: OwlConfig,
+    *,
+    force: bool = False,
+    link_code: Optional[str] = None,
+    credentials_path: Optional[Path] = None,
+    poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> DeviceCredentials:
+    """Run the interactive linking workflow and persist credentials."""
+
+    target_path = _resolve_credentials_path(credentials_path)
+
+    if target_path.exists() and not force:
+        raise DeviceLinkingError(
+            f"Credentials already exist at {target_path}. Use --force to re-link."
+        )
+
+    code = link_code or input("Enter printer link code: ").strip()
+    if not code:
+        raise DeviceLinkingError("Link code cannot be empty")
+
+    LOGGER.info("Linking printer via Owl Cloud at %s", config.cloud.base_url)
+
+    try:
+        credentials = asyncio.run(
+            link_device(
+                config.cloud.base_url,
+                code,
+                poll_interval=poll_interval,
+                timeout=timeout,
+            )
+        )
+    except DeviceLinkingError:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        raise DeviceLinkingError(f"Linking failed unexpectedly: {exc}") from exc
+
+    _persist_credentials(target_path, credentials)
+    _update_config_with_credentials(config, credentials)
+    save_config(config)
+
+    LOGGER.info(
+        "Linked printer %s (device %s) to tenant %s",
+        credentials.printer_id,
+        credentials.device_id,
+        credentials.tenant_id,
+    )
+
+    return credentials
+
+
+def _resolve_credentials_path(path: Optional[Path]) -> Path:
+    credentials_path = path or DEFAULT_CREDENTIALS_PATH
+    credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    return credentials_path
+
+
+def _persist_credentials(path: Path, credentials: DeviceCredentials) -> None:
+    payload = {
+        "tenantId": credentials.tenant_id,
+        "printerId": credentials.printer_id,
+        "deviceId": credentials.device_id,
+        "deviceToken": credentials.device_token,
+        "linkedAt": credentials.linked_at,
+    }
+    with path.open("w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2)
+
+
+def _update_config_with_credentials(
+    config: OwlConfig, credentials: DeviceCredentials
+) -> None:
+    broker_username = f"{credentials.tenant_id}:{credentials.device_id}"
+    config.cloud.username = broker_username
+    config.cloud.password = credentials.device_token
+
+    if not config.raw.has_section("cloud"):
+        config.raw.add_section("cloud")
+
+    config.raw.set("cloud", "username", broker_username)
+    config.raw.set("cloud", "password", credentials.device_token)
+    config.raw.set("cloud", "tenant_id", credentials.tenant_id)
+    config.raw.set("cloud", "device_id", credentials.device_id)
+    config.raw.set("cloud", "printer_id", credentials.printer_id)
