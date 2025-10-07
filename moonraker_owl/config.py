@@ -9,6 +9,35 @@ from typing import Iterable, List, Optional
 
 from . import constants
 
+DEFAULT_TELEMETRY_FIELDS = [
+    "print_stats",
+    "toolhead",
+    "gcode_move",
+    "heater_bed",
+    "extruder",
+    "fan",
+    "display_status",
+    "virtual_sdcard",
+    "temperature_sensor ambient",
+    "temperature_sensor chamber",
+    "moonraker_stats",
+    "cpu_temp",
+    "system_cpu_usage",
+    "system_memory",
+    "network",
+    "websocket_connections",
+]
+
+
+DEFAULT_TELEMETRY_EXCLUDE_FIELDS: list[str] = [
+    "moonraker_stats",
+    "cpu_temp",
+    "system_cpu_usage",
+    "system_memory",
+    "network",
+    "websocket_connections",
+]
+
 
 @dataclass(slots=True)
 class CloudConfig:
@@ -32,7 +61,10 @@ class MoonrakerConfig:
 class TelemetryConfig:
     rate_hz: float = 1.0
     include_fields: List[str] = field(
-        default_factory=lambda: ["status", "progress", "telemetry"]
+        default_factory=lambda: list(DEFAULT_TELEMETRY_FIELDS)
+    )
+    exclude_fields: List[str] = field(
+        default_factory=lambda: list(DEFAULT_TELEMETRY_EXCLUDE_FIELDS)
     )
 
 
@@ -72,6 +104,10 @@ class OwlConfig:
     def include_fields(self) -> List[str]:
         return list(self.telemetry.include_fields)
 
+    @property
+    def exclude_fields(self) -> List[str]:
+        return list(self.telemetry.exclude_fields)
+
 
 def _parse_list(value: str, *, default: Iterable[str]) -> List[str]:
     if not value:
@@ -97,7 +133,8 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             },
             "telemetry": {
                 "rate_hz": "1.0",
-                "include_fields": ",".join(["status", "progress", "telemetry"]),
+                "include_fields": ",".join(DEFAULT_TELEMETRY_FIELDS),
+                "exclude_fields": ",".join(DEFAULT_TELEMETRY_EXCLUDE_FIELDS),
             },
             "commands": {
                 "ack_timeout_seconds": "30.0",
@@ -120,10 +157,25 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
     if config_path.exists():
         parser.read(config_path)
 
+    broker_host_value = parser.get("cloud", "broker_host")
+    broker_port_value = parser.getint("cloud", "broker_port", fallback=8883)
+
+    if ":" in broker_host_value:
+        host_part, port_part = broker_host_value.rsplit(":", 1)
+        try:
+            parsed_port = int(port_part)
+        except ValueError:
+            pass
+        else:
+            broker_host_value = host_part
+            broker_port_value = parsed_port
+            parser.set("cloud", "broker_host", host_part)
+            parser.set("cloud", "broker_port", str(parsed_port))
+
     cloud = CloudConfig(
         base_url=parser.get("cloud", "base_url"),
-        broker_host=parser.get("cloud", "broker_host"),
-        broker_port=parser.getint("cloud", "broker_port", fallback=8883),
+        broker_host=broker_host_value,
+        broker_port=broker_port_value,
         username=parser.get("cloud", "username", fallback=None),
         password=parser.get("cloud", "password", fallback=None),
     )
@@ -138,9 +190,19 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         rate_hz=parser.getfloat("telemetry", "rate_hz", fallback=1.0),
         include_fields=_parse_list(
             parser.get(
-                "telemetry", "include_fields", fallback="status,progress,telemetry"
+                "telemetry",
+                "include_fields",
+                fallback=",".join(DEFAULT_TELEMETRY_FIELDS),
             ),
-            default=["status", "progress", "telemetry"],
+            default=DEFAULT_TELEMETRY_FIELDS,
+        ),
+        exclude_fields=_parse_list(
+            parser.get(
+                "telemetry",
+                "exclude_fields",
+                fallback=",".join(DEFAULT_TELEMETRY_EXCLUDE_FIELDS),
+            ),
+            default=DEFAULT_TELEMETRY_EXCLUDE_FIELDS,
         ),
     )
 

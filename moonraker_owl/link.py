@@ -62,17 +62,23 @@ async def link_device(
                 if response.status == 200:
                     payload = await response.json()
                     try:
-                        return DeviceCredentials(
-                            tenant_id=str(payload["tenantId"]),
-                            printer_id=str(payload["printerId"]),
-                            device_id=str(payload["deviceId"]),
-                            device_token=str(payload["deviceToken"]),
-                            linked_at=str(payload.get("linkedAt", "")),
-                        )
+                        printer_id = str(payload["printerId"])
+                        device_id = str(payload["deviceId"])
+                        device_token = str(payload["deviceToken"])
                     except KeyError as exc:
                         raise DeviceLinkingError(
                             f"Response missing expected field: {exc.args[0]}"
                         ) from exc
+
+                    tenant_id = str(payload.get("tenantId", ""))
+
+                    return DeviceCredentials(
+                        tenant_id=tenant_id,
+                        printer_id=printer_id,
+                        device_id=device_id,
+                        device_token=device_token,
+                        linked_at=str(payload.get("linkedAt", "")),
+                    )
 
                 if response.status == 404:
                     if loop.time() >= deadline:
@@ -151,12 +157,15 @@ def _resolve_credentials_path(path: Optional[Path]) -> Path:
 
 def _persist_credentials(path: Path, credentials: DeviceCredentials) -> None:
     payload = {
-        "tenantId": credentials.tenant_id,
         "printerId": credentials.printer_id,
         "deviceId": credentials.device_id,
         "deviceToken": credentials.device_token,
         "linkedAt": credentials.linked_at,
     }
+
+    if credentials.tenant_id:
+        payload["tenantId"] = credentials.tenant_id
+
     with path.open("w", encoding="utf-8") as stream:
         json.dump(payload, stream, indent=2)
 
@@ -164,7 +173,12 @@ def _persist_credentials(path: Path, credentials: DeviceCredentials) -> None:
 def _update_config_with_credentials(
     config: OwlConfig, credentials: DeviceCredentials
 ) -> None:
-    broker_username = f"{credentials.tenant_id}:{credentials.device_id}"
+    tenant_id = credentials.tenant_id
+    if tenant_id:
+        broker_username = f"{tenant_id}:{credentials.device_id}"
+    else:
+        broker_username = credentials.device_id
+
     config.cloud.username = broker_username
     config.cloud.password = credentials.device_token
 
@@ -173,6 +187,10 @@ def _update_config_with_credentials(
 
     config.raw.set("cloud", "username", broker_username)
     config.raw.set("cloud", "password", credentials.device_token)
-    config.raw.set("cloud", "tenant_id", credentials.tenant_id)
     config.raw.set("cloud", "device_id", credentials.device_id)
     config.raw.set("cloud", "printer_id", credentials.printer_id)
+
+    if tenant_id:
+        config.raw.set("cloud", "tenant_id", tenant_id)
+    elif config.raw.has_option("cloud", "tenant_id"):
+        config.raw.remove_option("cloud", "tenant_id")

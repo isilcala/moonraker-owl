@@ -12,8 +12,8 @@ DEFAULT_VENV_PATH = Path.home() / f"{APP_NAME}-env"
 
 DEFAULT_LOG_PATH = Path.home() / "printer_data" / "logs" / f"{APP_NAME}.log"
 
-DEFAULT_MOONRAKER_HOST = "127.0.0.1"
+DEFAULT_MOONRAKER_HOST = "192.168.50.231"
 DEFAULT_MOONRAKER_PORT = 7125
 
-DEFAULT_BROKER_HOST = "mqtt.owl.dev"
-DEFAULT_LINK_BASE_URL = "https://api.owl.dev"
+DEFAULT_BROKER_HOST = "localhost:61198"
+DEFAULT_LINK_BASE_URL = "http://localhost:5024"

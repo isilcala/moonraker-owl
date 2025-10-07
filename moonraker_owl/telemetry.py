@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, Optional, Protocol
+from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Protocol
 
 from .adapters import MQTTConnectionError
 from .config import OwlConfig
@@ -28,7 +29,9 @@ class MoonrakerClientLike(Protocol):
         self, callback: Callable[[Dict[str, Any]], Awaitable[None] | None]
     ) -> None: ...
 
-    async def fetch_printer_state(self) -> Dict[str, Any]: ...
+    async def fetch_printer_state(
+        self, objects: Optional[Dict[str, Optional[list[str]]]] = None
+    ) -> Dict[str, Any]: ...
 
 
 class MQTTClientLike(Protocol):
@@ -58,7 +61,15 @@ class TelemetryPublisher:
         self._topic = f"owl/printers/{self._device_id}/telemetry"
 
         self._min_interval = _derive_interval_seconds(config.telemetry.rate_hz)
-        self._include_fields = tuple(config.include_fields)
+        self._include_fields = _normalise_fields(config.include_fields)
+        self._exclude_fields = _normalise_fields(config.exclude_fields)
+        self._subscription_objects: dict[str, Optional[list[str]]] = (
+            build_subscription_manifest(self._include_fields, self._exclude_fields)
+        )
+
+        set_subscription = getattr(self._moonraker, "set_subscription_objects", None)
+        if callable(set_subscription):
+            set_subscription(self._subscription_objects)
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=max(queue_size, 1))
@@ -101,7 +112,9 @@ class TelemetryPublisher:
 
     async def _prime_initial_state(self) -> None:
         try:
-            snapshot = await self._moonraker.fetch_printer_state()
+            snapshot = await self._moonraker.fetch_printer_state(
+                self._subscription_objects
+            )
         except Exception as exc:  # pragma: no cover - defensive logging
             LOGGER.warning("Fetching initial Moonraker state failed: %s", exc)
             return
@@ -137,6 +150,7 @@ class TelemetryPublisher:
                 sample = _build_payload(
                     payload,
                     include_fields=self._include_fields,
+                    exclude_fields=self._exclude_fields,
                     tenant_id=self._tenant_id,
                     printer_id=self._printer_id,
                     device_id=self._device_id,
@@ -174,16 +188,21 @@ class TelemetryPublisher:
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str]:
     raw = config.raw
 
-    tenant_id = raw.get("cloud", "tenant_id", fallback=config.cloud.username or "")
+    tenant_id = raw.get("cloud", "tenant_id", fallback="")
     device_id = raw.get("cloud", "device_id", fallback="")
     printer_id = raw.get("cloud", "printer_id", fallback="")
 
-    if not device_id and config.cloud.username and ":" in config.cloud.username:
-        _, maybe_device = config.cloud.username.split(":", 1)
-        device_id = maybe_device
+    username = config.cloud.username or ""
 
-    if not tenant_id and config.cloud.username:
-        tenant_id = config.cloud.username.split(":", 1)[0]
+    if not device_id and username:
+        if ":" in username:
+            _, maybe_device = username.split(":", 1)
+            device_id = maybe_device
+        else:
+            device_id = username
+
+    if not tenant_id and username and ":" in username:
+        tenant_id = username.split(":", 1)[0]
 
     if not device_id:
         raise TelemetryConfigurationError(
@@ -208,11 +227,16 @@ def _build_payload(
     raw_payload: Dict[str, Any],
     *,
     include_fields: tuple[str, ...],
+    exclude_fields: tuple[str, ...],
     tenant_id: Optional[str],
     printer_id: Optional[str],
     device_id: str,
 ) -> Optional[Dict[str, Any]]:
     channels = _extract_channels(raw_payload, include_fields)
+    if exclude_fields:
+        channels = _apply_exclude_fields(channels, exclude_fields)
+        if not channels:
+            return None
     if not channels:
         return None
 
@@ -249,11 +273,21 @@ def _extract_channels(
             if isinstance(item, dict):
                 candidates.update(item)
 
+    expanded = dict(candidates)
+    pending = [value for value in candidates.values() if isinstance(value, dict)]
+    while pending:
+        nested = pending.pop()
+        for key, value in nested.items():
+            if key not in expanded:
+                expanded[key] = value
+                if isinstance(value, dict):
+                    pending.append(value)
+
     channels: Dict[str, Any] = {}
     if not include_fields:
-        include_iterable = candidates.items()
+        include_iterable = expanded.items()
     else:
-        include_iterable = ((field, candidates.get(field)) for field in include_fields)
+        include_iterable = ((field, expanded.get(field)) for field in include_fields)
 
     for key, value in include_iterable:
         if value is None:
@@ -261,6 +295,114 @@ def _extract_channels(
         channels[key] = value
 
     return channels
+
+
+def _apply_exclude_fields(
+    channels: Dict[str, Any], exclude_fields: tuple[str, ...]
+) -> Dict[str, Any]:
+    filtered = copy.deepcopy(channels)
+    for path in exclude_fields:
+        parts = [segment.strip() for segment in path.split(".") if segment.strip()]
+        if not parts:
+            continue
+        _remove_path(filtered, parts)
+
+    return {
+        key: value
+        for key, value in filtered.items()
+        if not (isinstance(value, dict) and not value)
+    }
+
+
+def _remove_path(target: Any, parts: list[str]) -> None:
+    if not parts or not isinstance(target, dict):
+        return
+
+    key = parts[0]
+
+    if key == "*":
+        remaining = parts[1:]
+        for sub_key in list(target.keys()):
+            if not remaining:
+                target.pop(sub_key, None)
+            else:
+                _remove_path(target.get(sub_key), remaining)
+                _cleanup_empty(target, sub_key)
+        return
+
+    if key not in target:
+        return
+
+    if len(parts) == 1:
+        target.pop(key, None)
+        return
+
+    _remove_path(target.get(key), parts[1:])
+    _cleanup_empty(target, key)
+
+
+def _cleanup_empty(target: Dict[str, Any], key: str) -> None:
+    value = target.get(key)
+    if isinstance(value, dict) and not value:
+        target.pop(key, None)
+
+
+def build_subscription_manifest(
+    include_fields: Iterable[str], exclude_fields: Iterable[str]
+) -> dict[str, Optional[list[str]]]:
+    excluded_objects = {
+        _normalise_field(field)
+        for field in exclude_fields
+        if field and "." not in field and "*" not in field
+    }
+
+    subscribe_all: set[str] = set()
+    attribute_map: dict[str, set[str]] = {}
+
+    for field in include_fields:
+        field = _normalise_field(field)
+        if not field:
+            continue
+
+        base, has_dot, attribute = field.partition(".")
+        base = base.strip()
+        if not base or base in excluded_objects:
+            continue
+
+        if not has_dot:
+            subscribe_all.add(base)
+            continue
+
+        attribute = attribute.strip()
+        if not attribute:
+            subscribe_all.add(base)
+            continue
+
+        attribute_map.setdefault(base, set()).add(attribute)
+
+    objects: dict[str, Optional[list[str]]] = {}
+    for base in sorted(subscribe_all | attribute_map.keys()):
+        if base in subscribe_all:
+            objects[base] = None
+        else:
+            objects[base] = sorted(attribute_map.get(base, set()))
+
+    return objects
+
+
+def _normalise_fields(fields: Iterable[str]) -> tuple[str, ...]:
+    return tuple(
+        normalised
+        for normalised in (_normalise_field(field) for field in fields)
+        if normalised
+    )
+
+
+def _normalise_field(field: str) -> str:
+    field = field.strip()
+    if len(field) >= 2 and field[0] == field[-1] and field[0] in {'"', "'"}:
+        field = field[1:-1].strip()
+    return field
 
 
 def _json_default(value: Any) -> Any:

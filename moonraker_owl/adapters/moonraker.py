@@ -43,6 +43,8 @@ class MoonrakerClient:
         self._callbacks: list[CallbackType] = []
         self._listener_task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
+        self._subscription_objects: Optional[dict[str, Optional[list[str]]]] = None
+        self._rpc_id = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -104,6 +106,20 @@ class MoonrakerClient:
             response.raise_for_status()
             return await response.json()
 
+    def set_subscription_objects(
+        self, objects: Mapping[str, Optional[list[str]]] | None
+    ) -> None:
+        """Declare which Moonraker objects should be subscribed to on connect."""
+
+        if objects is None:
+            self._subscription_objects = None
+        else:
+            # ensure payload is JSON-serialisable and lists are copied
+            self._subscription_objects = {
+                key: (list(value) if isinstance(value, list) else None)
+                for key, value in objects.items()
+            }
+
     async def execute_print_action(self, action: str) -> None:
         """Invoke pause/resume/cancel actions on Moonraker."""
 
@@ -147,6 +163,8 @@ class MoonrakerClient:
                 async with session.ws_connect(ws_url, headers=self._headers) as ws:
                     LOGGER.info("Connected to Moonraker websocket at %s", ws_url)
                     backoff = self.reconnect_initial
+
+                    await self._send_subscription(ws)
                     async for message in ws:
                         if self._stop_event.is_set():
                             break
@@ -179,6 +197,23 @@ class MoonrakerClient:
                     await result
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception("Moonraker callback failed")
+
+    async def _send_subscription(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        if not self._subscription_objects:
+            return
+
+        self._rpc_id += 1
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "printer.objects.subscribe",
+            "id": self._rpc_id,
+            "params": {"objects": self._subscription_objects},
+        }
+
+        try:
+            await ws.send_json(payload)
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.exception("Failed to send Moonraker subscription request")
 
 
 def _build_ws_url(http_url: str) -> str:
