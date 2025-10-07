@@ -230,6 +230,10 @@ class MoonrakerOwlApp:
                 pass
             else:
                 await self._health.update("telemetry", True, None)
+                LOGGER.info(
+                    "Telemetry publisher started on topic %s",
+                    self._telemetry_publisher.topic,
+                )
 
         if self._command_processor is not None:
             try:

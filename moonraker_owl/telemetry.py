@@ -8,30 +8,17 @@ import copy
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Protocol
+from typing import Any, Dict, Iterable, Optional, Protocol
 
 from .adapters import MQTTConnectionError
 from .config import OwlConfig
+from .core import PrinterAdapter
 
 LOGGER = logging.getLogger(__name__)
 
 
 class TelemetryConfigurationError(RuntimeError):
     """Raised when required telemetry configuration values are missing."""
-
-
-class MoonrakerClientLike(Protocol):
-    async def start(
-        self, callback: Callable[[Dict[str, Any]], Awaitable[None] | None]
-    ) -> None: ...
-
-    def remove_callback(
-        self, callback: Callable[[Dict[str, Any]], Awaitable[None] | None]
-    ) -> None: ...
-
-    async def fetch_printer_state(
-        self, objects: Optional[Dict[str, Optional[list[str]]]] = None
-    ) -> Dict[str, Any]: ...
 
 
 class MQTTClientLike(Protocol):
@@ -46,7 +33,7 @@ class TelemetryPublisher:
     def __init__(
         self,
         config: OwlConfig,
-        moonraker: MoonrakerClientLike,
+        moonraker: PrinterAdapter,
         mqtt: MQTTClientLike,
         *,
         queue_size: int = 1,
@@ -66,10 +53,7 @@ class TelemetryPublisher:
         self._subscription_objects: dict[str, Optional[list[str]]] = (
             build_subscription_manifest(self._include_fields, self._exclude_fields)
         )
-
-        set_subscription = getattr(self._moonraker, "set_subscription_objects", None)
-        if callable(set_subscription):
-            set_subscription(self._subscription_objects)
+        self._moonraker.set_subscription_objects(self._subscription_objects)
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=max(queue_size, 1))

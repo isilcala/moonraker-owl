@@ -6,19 +6,18 @@ import asyncio
 import contextlib
 import json
 import logging
-from typing import Awaitable, Callable, Mapping, Optional
+from typing import Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 
 from ..config import MoonrakerConfig
+from ..core import CallbackType, PrinterAdapter
 
 LOGGER = logging.getLogger(__name__)
 
-CallbackType = Callable[[dict], Awaitable[None] | None]
 
-
-class MoonrakerClient:
+class MoonrakerClient(PrinterAdapter):
     """Non-blocking utility for Moonraker connectivity."""
 
     def __init__(
@@ -94,7 +93,7 @@ class MoonrakerClient:
             self._callbacks.remove(callback)
 
     async def fetch_printer_state(
-        self, objects: Optional[Mapping[str, list[str]]] = None
+        self, objects: Optional[Mapping[str, Optional[list[str]]]] = None
     ) -> dict:
         """Fetch the current printer state via HTTP."""
 

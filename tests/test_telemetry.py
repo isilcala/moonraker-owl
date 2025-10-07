@@ -42,6 +42,12 @@ class FakeMoonrakerClient:
         self.subscription_objects = objects
         return self._initial_state
 
+    async def execute_print_action(self, action: str) -> None:
+        raise NotImplementedError
+
+    async def aclose(self) -> None:
+        pass
+
     async def emit(self, payload: Dict[str, Any]) -> None:
         if self._callback is None:
             return
