@@ -15,5 +15,5 @@ DEFAULT_LOG_PATH = Path.home() / "printer_data" / "logs" / f"{APP_NAME}.log"
 DEFAULT_MOONRAKER_HOST = "192.168.50.231"
 DEFAULT_MOONRAKER_PORT = 7125
 
-DEFAULT_BROKER_HOST = "localhost:61198"
+DEFAULT_BROKER_HOST = "localhost:51979"
 DEFAULT_LINK_BASE_URL = "http://localhost:5024"
