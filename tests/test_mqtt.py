@@ -47,7 +47,14 @@ class FakeMqttClient:
     def connect_async(self, host, port, keepalive):
         self._events["connect_args"] = (host, port, keepalive)
         if self.on_connect:
-            self._loop.call_soon(self.on_connect, self, None, None, self._rc_connect)
+            self._loop.call_soon(
+                self.on_connect,
+                self,
+                None,
+                None,
+                self._rc_connect,
+                None,
+            )
 
     def loop_start(self):
         self._events["loop_start"] = self._events.get("loop_start", 0) + 1
@@ -58,10 +65,18 @@ class FakeMqttClient:
     def disconnect(self):
         self._events["disconnect_called"] = True
         if self.on_disconnect:
-            self._loop.call_soon(self.on_disconnect, self, None, self._rc_disconnect)
+            self._loop.call_soon(
+                self.on_disconnect,
+                self,
+                None,
+                self._rc_disconnect,
+                None,
+            )
 
-    def publish(self, topic, payload, qos=0, retain=False):
-        self._events.setdefault("published", []).append((topic, payload, qos, retain))
+    def publish(self, topic, payload, qos=0, retain=False, properties=None):
+        self._events.setdefault("published", []).append(
+            (topic, payload, qos, retain, properties)
+        )
         return SimpleNamespace(rc=self._publish_rc)
 
     def subscribe(self, topic, qos=0):
@@ -71,7 +86,14 @@ class FakeMqttClient:
     def reconnect(self):
         self._events["reconnect_called"] = self._events.get("reconnect_called", 0) + 1
         if self.on_connect:
-            self._loop.call_soon(self.on_connect, self, None, None, self._rc_connect)
+            self._loop.call_soon(
+                self.on_connect,
+                self,
+                None,
+                None,
+                self._rc_connect,
+                None,
+            )
         return mqtt.MQTT_ERR_SUCCESS
 
     def reconnect_async(self):  # pragma: no cover - optional path
@@ -119,7 +141,7 @@ async def test_publish_delegates_to_client(mqtt_client):
 
     client.publish("test/topic", b"payload", qos=1, retain=True)
 
-    assert events["published"] == [("test/topic", b"payload", 1, True)]
+    assert events["published"] == [("test/topic", b"payload", 1, True, None)]
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,10 @@ from typing import Any, Dict, Iterable, Optional, Protocol
 from .adapters import MQTTConnectionError
 from .config import OwlConfig
 from .core import PrinterAdapter
+from . import constants
+
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.properties import Properties
 
 LOGGER = logging.getLogger(__name__)
 
@@ -23,7 +27,13 @@ class TelemetryConfigurationError(RuntimeError):
 
 class MQTTClientLike(Protocol):
     def publish(
-        self, topic: str, payload: bytes, qos: int = 1, retain: bool = False
+        self,
+        topic: str,
+        payload: bytes,
+        qos: int = 1,
+        retain: bool = False,
+        *,
+        properties=None,
     ) -> None: ...
 
 
@@ -42,9 +52,12 @@ class TelemetryPublisher:
         self._moonraker = moonraker
         self._mqtt = mqtt
 
-        self._tenant_id, self._device_id, self._printer_id = _resolve_printer_identity(
-            config
-        )
+        (
+            self._tenant_id,
+            self._device_id,
+            self._printer_id,
+            self._device_token,
+        ) = _resolve_printer_identity(config)
         self._topic = f"owl/printers/{self._device_id}/telemetry"
 
         self._min_interval = _derive_interval_seconds(config.telemetry.rate_hz)
@@ -159,7 +172,18 @@ class TelemetryPublisher:
                     payload_bytes = json.dumps(sample, default=_json_default).encode(
                         "utf-8"
                     )
-                    self._mqtt.publish(self._topic, payload_bytes, qos=1, retain=False)
+                    properties = Properties(PacketTypes.PUBLISH)
+                    properties.UserProperty = [
+                        (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, self._device_token)
+                    ]
+
+                    self._mqtt.publish(
+                        self._topic,
+                        payload_bytes,
+                        qos=1,
+                        retain=False,
+                        properties=properties,
+                    )
                     last_sent = loop.time()
                 except MQTTConnectionError as exc:
                     LOGGER.warning("Telemetry publish failed: %s", exc)
@@ -169,12 +193,15 @@ class TelemetryPublisher:
         LOGGER.debug("TelemetryPublisher loop terminated")
 
 
-def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str]:
+def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
     raw = config.raw
 
     tenant_id = raw.get("cloud", "tenant_id", fallback="")
     device_id = raw.get("cloud", "device_id", fallback="")
     printer_id = raw.get("cloud", "printer_id", fallback="")
+    device_token = (config.cloud.password or "").strip()
+    if not device_token:
+        device_token = raw.get("cloud", "password", fallback="").strip()
 
     username = config.cloud.username or ""
 
@@ -198,7 +225,12 @@ def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str]:
             "Printer ID missing from configuration; telemetry payload will omit it"
         )
 
-    return tenant_id, device_id, printer_id
+    if not device_token:
+        raise TelemetryConfigurationError(
+            "Device token is required for telemetry publishing"
+        )
+
+    return tenant_id, device_id, printer_id, device_token
 
 
 def _derive_interval_seconds(rate_hz: float) -> float:

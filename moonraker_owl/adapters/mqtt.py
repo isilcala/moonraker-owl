@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, List, Optional
+from typing import Any, Awaitable, Callable, List, Optional
 
 import paho.mqtt.client as mqtt
 
@@ -51,7 +51,16 @@ class MQTTClient:
         self._disconnect_event = asyncio.Event()
         self._last_connect_rc = None
 
-        client = mqtt.Client(client_id=self.client_id)
+        client_kwargs: dict[str, Any] = {
+            "client_id": self.client_id,
+            "protocol": mqtt.MQTTv5,
+        }
+
+        callback_api_version = getattr(mqtt, "CallbackAPIVersion", None)
+        if callback_api_version is not None:
+            client_kwargs["callback_api_version"] = callback_api_version.VERSION2
+
+        client = mqtt.Client(**client_kwargs)
         client.enable_logger(LOGGER)
 
         if self.config.username:
@@ -105,12 +114,20 @@ class MQTTClient:
         self._connected = False
 
     def publish(
-        self, topic: str, payload: bytes, qos: int = 1, retain: bool = False
+        self,
+        topic: str,
+        payload: bytes,
+        qos: int = 1,
+        retain: bool = False,
+        *,
+        properties=None,
     ) -> None:
         if not self._client:
             raise RuntimeError("MQTT client not connected")
 
-        info = self._client.publish(topic, payload, qos=qos, retain=retain)
+        info = self._client.publish(
+            topic, payload, qos=qos, retain=retain, properties=properties
+        )
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             raise MQTTConnectionError(f"Publish failed with rc={info.rc}")
 
@@ -170,30 +187,45 @@ class MQTTClient:
     # ------------------------------------------------------------------
     # Internal callbacks bridging the threaded paho callbacks into asyncio
     # ------------------------------------------------------------------
-    def _on_connect(self, client: mqtt.Client, userdata, flags, rc: int) -> None:
-        self._last_connect_rc = rc
-        if rc == 0:
+    def _on_connect(
+        self,
+        client: mqtt.Client,
+        userdata,
+        flags,
+        rc: int,
+        properties=None,
+    ) -> None:
+        reason = _normalise_reason_code(rc)
+        self._last_connect_rc = reason
+        if reason == 0:
             LOGGER.info("Connected to MQTT broker")
             self._connected = True
             if self._connected_event:
                 self._connected_event.set()
             if self._loop:
                 for handler in self._connect_handlers:
-                    self._loop.call_soon_threadsafe(handler, rc)
+                    self._loop.call_soon_threadsafe(handler, reason)
         else:
-            LOGGER.error("MQTT connection failed with rc=%s", rc)
+            LOGGER.error("MQTT connection failed with rc=%s", reason)
             self._connected = False
             if self._connected_event:
                 self._connected_event.set()
 
-    def _on_disconnect(self, client: mqtt.Client, userdata, rc: int) -> None:
-        LOGGER.info("Disconnected from MQTT broker (rc=%s)", rc)
+    def _on_disconnect(
+        self,
+        client: mqtt.Client,
+        userdata,
+        rc: int,
+        properties=None,
+    ) -> None:
+        reason = _normalise_reason_code(rc)
+        LOGGER.info("Disconnected from MQTT broker (rc=%s)", reason)
         if self._disconnect_event:
             self._disconnect_event.set()
         self._connected = False
         if self._loop:
             for handler in self._disconnect_handlers:
-                self._loop.call_soon_threadsafe(handler, rc)
+                self._loop.call_soon_threadsafe(handler, reason)
 
     def _on_message(
         self, client: mqtt.Client, userdata, message: mqtt.MQTTMessage
@@ -209,3 +241,28 @@ class MQTTClient:
                 asyncio.run_coroutine_threadsafe(result, loop)
         except Exception:  # pragma: no cover - defensive logging
             LOGGER.exception("MQTT message handler raised an exception")
+
+
+def _normalise_reason_code(code: Any) -> int:
+    if code is None:
+        return 0
+
+    if isinstance(code, int):
+        return code
+
+    try:
+        return int(code)
+    except (TypeError, ValueError):
+        pass
+
+    value = getattr(code, "value", None)
+    if value is None:
+        return 0
+
+    if isinstance(value, int):
+        return value
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0

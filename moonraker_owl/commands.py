@@ -43,7 +43,13 @@ class MQTTCommandsClient(Protocol):
     def unsubscribe(self, topic: str) -> None: ...
 
     def publish(
-        self, topic: str, payload: bytes, qos: int = 1, retain: bool = False
+        self,
+        topic: str,
+        payload: bytes,
+        qos: int = 1,
+        retain: bool = False,
+        *,
+        properties=None,
     ) -> None: ...
 
     def set_message_handler(self, handler): ...

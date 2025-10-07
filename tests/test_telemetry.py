@@ -19,6 +19,7 @@ from moonraker_owl.config import (
     DEFAULT_TELEMETRY_FIELDS,
     DEFAULT_TELEMETRY_EXCLUDE_FIELDS,
 )
+from moonraker_owl import constants
 from moonraker_owl.telemetry import TelemetryConfigurationError, TelemetryPublisher
 
 
@@ -56,12 +57,18 @@ class FakeMoonrakerClient:
 
 class FakeMQTTClient:
     def __init__(self) -> None:
-        self.messages: list[tuple[str, bytes, int, bool]] = []
+        self.messages: list[tuple[str, bytes, int, bool, Any]] = []
 
     def publish(
-        self, topic: str, payload: bytes, qos: int = 1, retain: bool = False
+        self,
+        topic: str,
+        payload: bytes,
+        qos: int = 1,
+        retain: bool = False,
+        *,
+        properties=None,
     ) -> None:
-        self.messages.append((topic, payload, qos, retain))
+        self.messages.append((topic, payload, qos, retain, properties))
 
 
 def build_config(
@@ -119,10 +126,14 @@ async def test_telemetry_publisher_emits_filtered_channels():
     await publisher.stop()
 
     assert mqtt.messages, "Expected at least one telemetry publish"
-    topic, payload, qos, retain = mqtt.messages[0]
+    topic, payload, qos, retain, properties = mqtt.messages[0]
     assert topic == "owl/printers/device-123/telemetry"
     assert qos == 1
     assert retain is False
+    assert properties is not None
+    assert getattr(properties, "UserProperty", None) == [
+        (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, "token")
+    ]
 
     document = json.loads(payload.decode("utf-8"))
     assert document["deviceId"] == "device-123"
@@ -173,7 +184,7 @@ async def test_telemetry_publisher_tracks_latest_update():
     await publisher.stop()
 
     assert len(mqtt.messages) >= 2
-    _, payload, _, _ = mqtt.messages[-1]
+    _, payload, _, _, _ = mqtt.messages[-1]
     document = json.loads(payload.decode("utf-8"))
     assert document["channels"]["print_stats"]["state"] == "printing"
     assert document["moonrakerEvent"] == "notify_status_update"
@@ -206,7 +217,7 @@ async def test_telemetry_publisher_captures_proc_stats():
     await publisher.stop()
 
     assert mqtt.messages, "Expected telemetry publish from proc stats"
-    _, payload, _, _ = mqtt.messages[-1]
+    _, payload, _, _, _ = mqtt.messages[-1]
     document = json.loads(payload.decode("utf-8"))
     channels = document["channels"]
     assert "moonraker_stats" in channels
@@ -257,7 +268,7 @@ async def test_telemetry_publisher_exclude_fields() -> None:
 
     assert mqtt.messages
     documents = [
-        json.loads(payload.decode("utf-8")) for _, payload, _, _ in mqtt.messages
+        json.loads(payload.decode("utf-8")) for _, payload, _, _, _ in mqtt.messages
     ]
 
     first_with_stats = next(
@@ -349,6 +360,26 @@ async def test_subscription_normalizes_field_names() -> None:
 def test_telemetry_configuration_requires_device_id():
     parser = ConfigParser()
     parser.add_section("cloud")
+
+    config = OwlConfig(
+        cloud=CloudConfig(),
+        moonraker=MoonrakerConfig(),
+        telemetry=TelemetryConfig(),
+        commands=CommandConfig(),
+        logging=LoggingConfig(),
+        resilience=ResilienceConfig(),
+        raw=parser,
+        path=Path("moonraker-owl.cfg"),
+    )
+
+    with pytest.raises(TelemetryConfigurationError):
+        TelemetryPublisher(config, FakeMoonrakerClient({}), FakeMQTTClient())
+
+
+def test_telemetry_configuration_requires_device_token():
+    parser = ConfigParser()
+    parser.add_section("cloud")
+    parser.set("cloud", "device_id", "device-123")
 
     config = OwlConfig(
         cloud=CloudConfig(),
