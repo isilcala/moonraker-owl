@@ -99,9 +99,7 @@ class MoonrakerOwlApp:
         self._last_disconnect_rc = None
 
         await self._health.update("mqtt", False, "initialising")
-        await self._health.update(
-            "telemetry", False, "awaiting mqtt connectivity"
-        )
+        await self._health.update("telemetry", False, "awaiting mqtt connectivity")
         await self._health.update("commands", False, "awaiting mqtt connectivity")
 
         self._moonraker_client = MoonrakerClient(self._config.moonraker)
@@ -252,7 +250,9 @@ class MoonrakerOwlApp:
             return
 
         backoff_initial = max(0.5, self._config.resilience.reconnect_initial_seconds)
-        backoff_max = max(backoff_initial, self._config.resilience.reconnect_max_seconds)
+        backoff_max = max(
+            backoff_initial, self._config.resilience.reconnect_max_seconds
+        )
         delay = backoff_initial
 
         while not self._supervisor_stop.is_set():
@@ -289,7 +289,9 @@ class MoonrakerOwlApp:
             try:
                 await self._restart_components()
             except Exception as exc:  # pragma: no cover - defensive restart handling
-                LOGGER.exception("Failed to restart components after reconnect: %s", exc)
+                LOGGER.exception(
+                    "Failed to restart components after reconnect: %s", exc
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, backoff_max)
                 continue

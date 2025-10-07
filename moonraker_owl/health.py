@@ -37,9 +37,13 @@ class HealthReporter:
         self._status: Dict[str, ComponentStatus] = {}
         self._lock = asyncio.Lock()
 
-    async def update(self, name: str, healthy: bool, detail: Optional[str] = None) -> None:
+    async def update(
+        self, name: str, healthy: bool, detail: Optional[str] = None
+    ) -> None:
         async with self._lock:
-            self._status[name] = ComponentStatus(name=name, healthy=healthy, detail=detail)
+            self._status[name] = ComponentStatus(
+                name=name, healthy=healthy, detail=detail
+            )
 
     async def snapshot(self) -> Dict[str, object]:
         async with self._lock:
@@ -67,7 +71,9 @@ class HealthServer:
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._host, self._port)
         await self._site.start()
-        LOGGER.info("Health endpoint listening on http://%s:%s/healthz", self._host, self._port)
+        LOGGER.info(
+            "Health endpoint listening on http://%s:%s/healthz", self._host, self._port
+        )
 
     async def stop(self) -> None:
         with contextlib.suppress(Exception):
