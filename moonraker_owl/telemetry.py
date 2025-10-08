@@ -7,12 +7,14 @@ import contextlib
 import copy
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional, Protocol
 
 from .adapters import MQTTConnectionError
 from .config import OwlConfig
 from .core import PrinterAdapter
+from .telemetry_normalizer import TelemetryNormalizer
 from . import constants
 
 from paho.mqtt.packettypes import PacketTypes
@@ -58,7 +60,13 @@ class TelemetryPublisher:
             self._printer_id,
             self._device_token,
         ) = _resolve_printer_identity(config)
-        self._topic = f"owl/printers/{self._device_id}/telemetry"
+        self._base_topic = f"owl/printers/{self._device_id}"
+        self._channel_topics = {
+            "status": f"{self._base_topic}/status",
+            "progress": f"{self._base_topic}/progress",
+            "telemetry": f"{self._base_topic}/telemetry",
+            "events": f"{self._base_topic}/events",
+        }
 
         self._min_interval = _derive_interval_seconds(config.telemetry.rate_hz)
         self._include_fields = _normalise_fields(config.include_fields)
@@ -74,6 +82,14 @@ class TelemetryPublisher:
         self._stop_event = asyncio.Event()
         self._worker: Optional[asyncio.Task[None]] = None
         self._callback_registered = False
+        self._normalizer = TelemetryNormalizer()
+        self._channel_snapshots: Dict[str, Optional[Dict[str, Any]]] = {
+            "status": None,
+            "progress": None,
+            "telemetry": None,
+        }
+        self._sequence_counter: Dict[str, int] = defaultdict(int)
+        self._force_full_publish = False
 
     async def start(self) -> None:
         if self._worker is not None:
@@ -85,6 +101,7 @@ class TelemetryPublisher:
         await self._moonraker.start(self._handle_moonraker_update)
         self._callback_registered = True
 
+        self._force_full_publish = True
         await self._prime_initial_state()
 
         self._worker = asyncio.create_task(self._run())
@@ -105,7 +122,12 @@ class TelemetryPublisher:
 
     @property
     def topic(self) -> str:
-        return self._topic
+        return self._channel_topics["telemetry"]
+
+    def request_full_snapshot(self) -> None:
+        """Force the next payload batch to be emitted as full snapshots."""
+
+        self._force_full_publish = True
 
     async def _prime_initial_state(self) -> None:
         try:
@@ -144,18 +166,6 @@ class TelemetryPublisher:
 
             while not self._queue.empty():
                 payload = await self._queue.get()
-                sample = _build_payload(
-                    payload,
-                    include_fields=self._include_fields,
-                    exclude_fields=self._exclude_fields,
-                    tenant_id=self._tenant_id,
-                    printer_id=self._printer_id,
-                    device_id=self._device_id,
-                )
-
-                if sample is None:
-                    continue
-
                 now = loop.time()
                 elapsed = now - last_sent
                 if elapsed < self._min_interval:
@@ -169,28 +179,167 @@ class TelemetryPublisher:
                         pass
 
                 try:
-                    payload_bytes = json.dumps(sample, default=_json_default).encode(
-                        "utf-8"
-                    )
-                    properties = Properties(PacketTypes.PUBLISH)
-                    properties.UserProperty = [
-                        (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, self._device_token)
-                    ]
-
-                    self._mqtt.publish(
-                        self._topic,
-                        payload_bytes,
-                        qos=1,
-                        retain=False,
-                        properties=properties,
-                    )
-                    last_sent = loop.time()
-                except MQTTConnectionError as exc:
-                    LOGGER.warning("Telemetry publish failed: %s", exc)
+                    self._process_payload(payload)
                 except Exception:  # pragma: no cover - defensive logging
-                    LOGGER.exception("Unexpected error publishing telemetry")
+                    LOGGER.exception("Telemetry normalization failed")
+
+                last_sent = loop.time()
+                self._force_full_publish = False
 
         LOGGER.debug("TelemetryPublisher loop terminated")
+
+    def _process_payload(self, payload: Dict[str, Any]) -> None:
+        normalized = self._normalizer.ingest(payload)
+        raw_json = json.dumps(payload, default=_json_default)
+
+        force_full = self._force_full_publish
+
+        self._publish_channel(
+            "status", normalized.status, raw_json, force_full=force_full
+        )
+        self._publish_channel(
+            "progress", normalized.progress, raw_json, force_full=force_full
+        )
+        self._publish_channel(
+            "telemetry", normalized.telemetry, raw_json, force_full=force_full
+        )
+
+        if normalized.events:
+            self._publish_channel(
+                "events",
+                {"events": normalized.events},
+                raw_json,
+                force_full=False,
+                ephemeral=True,
+            )
+
+    def _publish_channel(
+        self,
+        channel: str,
+        payload: Optional[Dict[str, Any]],
+        raw_payload: str,
+        *,
+        force_full: bool,
+        ephemeral: bool = False,
+    ) -> None:
+        if not payload:
+            return
+
+        if ephemeral:
+            kind = "delta"
+            body = payload
+        else:
+            previous = self._channel_snapshots.get(channel)
+            if force_full or previous is None:
+                kind = "full"
+                body = payload
+            else:
+                diff = _diff(previous, payload)
+                if not diff:
+                    return
+                kind = "delta"
+                body = diff
+
+            self._channel_snapshots[channel] = copy.deepcopy(payload)
+
+        document = self._build_envelope(channel, kind, body, raw_payload)
+        topic = self._channel_topics[channel]
+        self._publish(channel, topic, document)
+
+    def _build_envelope(
+        self,
+        channel: str,
+        kind: str,
+        payload: Dict[str, Any],
+        raw_payload: str,
+    ) -> Dict[str, Any]:
+        document: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "sequence": self._next_sequence(channel),
+            "schemaVersion": 1,
+            "kind": kind,
+            "deviceId": self._device_id,
+            "source": "moonraker",
+            "raw": raw_payload,
+        }
+
+        if self._printer_id:
+            document["printerId"] = self._printer_id
+        if self._tenant_id:
+            document["tenantId"] = self._tenant_id
+
+        document.update(payload)
+        return document
+
+    def _next_sequence(self, channel: str) -> int:
+        self._sequence_counter[channel] += 1
+        return self._sequence_counter[channel]
+
+    def _publish(self, channel: str, topic: str, document: Dict[str, Any]) -> None:
+        payload_bytes = json.dumps(document, default=_json_default).encode("utf-8")
+        properties = Properties(PacketTypes.PUBLISH)
+        properties.UserProperty = [
+            (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, self._device_token)
+        ]
+
+        try:
+            self._mqtt.publish(
+                topic,
+                payload_bytes,
+                qos=1,
+                retain=False,
+                properties=properties,
+            )
+        except MQTTConnectionError as exc:
+            LOGGER.warning("Telemetry publish failed: %s", exc)
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.exception(
+                "Unexpected error publishing telemetry for channel %s", channel
+            )
+
+
+def _diff(
+    previous: Optional[Dict[str, Any]], current: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    if previous is None:
+        return copy.deepcopy(current)
+
+    return _diff_dict(previous, current)
+
+
+def _diff_dict(
+    previous: Dict[str, Any], current: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    diff: Dict[str, Any] = {}
+
+    previous_keys = set(previous.keys())
+    current_keys = set(current.keys())
+
+    for key in current_keys:
+        current_value = current[key]
+        if key not in previous:
+            diff[key] = copy.deepcopy(current_value)
+            continue
+
+        previous_value = previous[key]
+        if isinstance(previous_value, dict) and isinstance(current_value, dict):
+            nested = _diff_dict(previous_value, current_value)
+            if nested:
+                diff[key] = nested
+            continue
+
+        if isinstance(previous_value, list) and isinstance(current_value, list):
+            if previous_value != current_value:
+                diff[key] = copy.deepcopy(current_value)
+            continue
+
+        if previous_value != current_value:
+            diff[key] = copy.deepcopy(current_value)
+
+    for key in previous_keys - current_keys:
+        diff[key] = None
+
+    return diff or None
 
 
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
@@ -237,130 +386,6 @@ def _derive_interval_seconds(rate_hz: float) -> float:
     if rate_hz <= 0:
         return 1.0
     return max(0.05, 1.0 / rate_hz)
-
-
-def _build_payload(
-    raw_payload: Dict[str, Any],
-    *,
-    include_fields: tuple[str, ...],
-    exclude_fields: tuple[str, ...],
-    tenant_id: Optional[str],
-    printer_id: Optional[str],
-    device_id: str,
-) -> Optional[Dict[str, Any]]:
-    channels = _extract_channels(raw_payload, include_fields)
-    if exclude_fields:
-        channels = _apply_exclude_fields(channels, exclude_fields)
-        if not channels:
-            return None
-    if not channels:
-        return None
-
-    document: Dict[str, Any] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "deviceId": device_id,
-        "channels": channels,
-    }
-
-    if tenant_id:
-        document["tenantId"] = tenant_id
-    if printer_id:
-        document["printerId"] = printer_id
-
-    method = raw_payload.get("method")
-    if isinstance(method, str):
-        document["moonrakerEvent"] = method
-
-    return document
-
-
-def _extract_channels(
-    payload: Dict[str, Any], include_fields: tuple[str, ...]
-) -> Dict[str, Any]:
-    candidates: Dict[str, Any] = {}
-
-    result = payload.get("result")
-    if isinstance(result, dict):
-        candidates.update(result)
-
-    params = payload.get("params")
-    if isinstance(params, list):
-        for item in params:
-            if isinstance(item, dict):
-                candidates.update(item)
-
-    expanded = dict(candidates)
-    pending = [value for value in candidates.values() if isinstance(value, dict)]
-    while pending:
-        nested = pending.pop()
-        for key, value in nested.items():
-            if key not in expanded:
-                expanded[key] = value
-                if isinstance(value, dict):
-                    pending.append(value)
-
-    channels: Dict[str, Any] = {}
-    if not include_fields:
-        include_iterable = expanded.items()
-    else:
-        include_iterable = ((field, expanded.get(field)) for field in include_fields)
-
-    for key, value in include_iterable:
-        if value is None:
-            continue
-        channels[key] = value
-
-    return channels
-
-
-def _apply_exclude_fields(
-    channels: Dict[str, Any], exclude_fields: tuple[str, ...]
-) -> Dict[str, Any]:
-    filtered = copy.deepcopy(channels)
-    for path in exclude_fields:
-        parts = [segment.strip() for segment in path.split(".") if segment.strip()]
-        if not parts:
-            continue
-        _remove_path(filtered, parts)
-
-    return {
-        key: value
-        for key, value in filtered.items()
-        if not (isinstance(value, dict) and not value)
-    }
-
-
-def _remove_path(target: Any, parts: list[str]) -> None:
-    if not parts or not isinstance(target, dict):
-        return
-
-    key = parts[0]
-
-    if key == "*":
-        remaining = parts[1:]
-        for sub_key in list(target.keys()):
-            if not remaining:
-                target.pop(sub_key, None)
-            else:
-                _remove_path(target.get(sub_key), remaining)
-                _cleanup_empty(target, sub_key)
-        return
-
-    if key not in target:
-        return
-
-    if len(parts) == 1:
-        target.pop(key, None)
-        return
-
-    _remove_path(target.get(key), parts[1:])
-    _cleanup_empty(target, key)
-
-
-def _cleanup_empty(target: Dict[str, Any], key: str) -> None:
-    value = target.get(key)
-    if isinstance(value, dict) and not value:
-        target.pop(key, None)
 
 
 def build_subscription_manifest(

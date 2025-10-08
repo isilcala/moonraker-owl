@@ -57,7 +57,7 @@ class FakeMoonrakerClient:
 
 class FakeMQTTClient:
     def __init__(self) -> None:
-        self.messages: list[tuple[str, bytes, int, bool, Any]] = []
+        self.messages: list[dict[str, Any]] = []
 
     def publish(
         self,
@@ -68,7 +68,21 @@ class FakeMQTTClient:
         *,
         properties=None,
     ) -> None:
-        self.messages.append((topic, payload, qos, retain, properties))
+        self.messages.append(
+            {
+                "topic": topic,
+                "payload": payload,
+                "qos": qos,
+                "retain": retain,
+                "properties": properties,
+            }
+        )
+
+    def by_topic(self) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for message in self.messages:
+            grouped.setdefault(message["topic"], []).append(message)
+        return grouped
 
 
 def build_config(
@@ -104,184 +118,119 @@ def build_config(
     return config
 
 
+def _load_sample(name: str) -> Dict[str, Any]:
+    sample_path = Path(__file__).resolve().parents[2] / "docs" / "examples" / name
+    return json.loads(sample_path.read_text(encoding="utf-8"))
+
+
+def _decode(message: dict[str, Any]) -> Dict[str, Any]:
+    return json.loads(message["payload"].decode("utf-8"))
+
+
 @pytest.mark.asyncio
-async def test_telemetry_publisher_emits_filtered_channels():
-    sample_path = (
-        Path(__file__).resolve().parents[2]
-        / "docs"
-        / "examples"
-        / "moonraker-sample-printing.json"
-    )
-    sample = json.loads(sample_path.read_text(encoding="utf-8"))
+async def test_publisher_emits_initial_full_snapshots() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(include_fields=list(DEFAULT_TELEMETRY_FIELDS), rate_hz=20.0)
-    config.telemetry.exclude_fields = list(DEFAULT_TELEMETRY_EXCLUDE_FIELDS)
-
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
-
-    await publisher.start()
-    await asyncio.sleep(0.1)
-    await publisher.stop()
-
-    assert mqtt.messages, "Expected at least one telemetry publish"
-    topic, payload, qos, retain, properties = mqtt.messages[0]
-    assert topic == "owl/printers/device-123/telemetry"
-    assert qos == 1
-    assert retain is False
-    assert properties is not None
-    assert getattr(properties, "UserProperty", None) == [
-        (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, "token")
-    ]
-
-    document = json.loads(payload.decode("utf-8"))
-    assert document["deviceId"] == "device-123"
-    assert document.get("tenantId") == "tenant-42"
-    assert document["printerId"] == "printer-99"
-    assert "timestamp" in document
-    expected_keys = {
-        "print_stats",
-        "toolhead",
-        "gcode_move",
-        "heater_bed",
-        "extruder",
-        "fan",
-        "display_status",
-        "virtual_sdcard",
-        "temperature_sensor ambient",
-        "temperature_sensor chamber",
-    }
-
-    assert set(document["channels"].keys()) == expected_keys
-    assert document["channels"]["print_stats"]["state"] == "printing"
-    assert document["channels"]["heater_bed"]["target"] == 80.0
-    assert document["channels"]["temperature_sensor ambient"]["temperature"] is None
-    for field in DEFAULT_TELEMETRY_EXCLUDE_FIELDS:
-        assert field not in document["channels"]
-
-
-@pytest.mark.asyncio
-async def test_telemetry_publisher_tracks_latest_update():
-    initial_state = {"result": {"status": {"print_stats": {"state": "idle"}}}}
-    moonraker = FakeMoonrakerClient(initial_state)
-    mqtt = FakeMQTTClient()
-    config = build_config(include_fields=["print_stats"], rate_hz=50.0)
+    config = build_config(rate_hz=20.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt)
 
     await publisher.start()
     await asyncio.sleep(0.05)
+    await publisher.stop()
+
+    messages = mqtt.by_topic()
+    assert messages, "Expected telemetry messages"
+
+    props = mqtt.messages[0]["properties"]
+    assert props is not None
+    assert getattr(props, "UserProperty", None) == [
+        (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, "token")
+    ]
+
+    for channel in ("status", "progress", "telemetry"):
+        topic = f"owl/printers/device-123/{channel}"
+        assert topic in messages, f"Missing channel {channel}"
+        document = _decode(messages[topic][0])
+        assert document["kind"] == "full"
+        assert document["schemaVersion"] == 1
+        assert document["deviceId"] == "device-123"
+        assert document.get("tenantId") == "tenant-42"
+        assert document.get("printerId") == "printer-99"
+        assert document["source"] == "moonraker"
+        assert document["raw"], "Expected raw Moonraker payload"
+
+    telemetry_doc = _decode(messages["owl/printers/device-123/telemetry"][0])
+    assert telemetry_doc["toolhead"]["position"]["x"] is not None
+    assert telemetry_doc["temperatures"], "Expected temperature readings"
+
+    progress_doc = _decode(messages["owl/printers/device-123/progress"][0])
+    assert progress_doc["job"]["progress"]["percent"] > 0
+
+
+@pytest.mark.asyncio
+async def test_publisher_emits_progress_delta() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=50.0)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+    mqtt.messages.clear()
 
     await moonraker.emit(
         {
             "method": "notify_status_update",
-            "params": [{"status": {"print_stats": {"state": "printing"}}}],
+            "params": [
+                {
+                    "status": {
+                        "display_status": {"progress": 0.55},
+                    }
+                }
+            ],
         }
     )
     await asyncio.sleep(0.05)
-
     await publisher.stop()
 
-    assert len(mqtt.messages) >= 2
-    _, payload, _, _, _ = mqtt.messages[-1]
-    document = json.loads(payload.decode("utf-8"))
-    assert document["channels"]["print_stats"]["state"] == "printing"
-    assert document["moonrakerEvent"] == "notify_status_update"
+    progress_messages = mqtt.by_topic().get("owl/printers/device-123/progress")
+    assert progress_messages, "Expected progress updates"
+    document = _decode(progress_messages[-1])
+    assert document["kind"] == "delta"
+    assert document["job"]["progress"]["percent"] == pytest.approx(55.0, rel=0.01)
 
 
 @pytest.mark.asyncio
-async def test_telemetry_publisher_captures_proc_stats():
+async def test_publisher_emits_events_channel() -> None:
     moonraker = FakeMoonrakerClient({"result": {}})
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=50.0)
-    config.telemetry.exclude_fields = []
 
     publisher = TelemetryPublisher(config, moonraker, mqtt)
 
     await publisher.start()
     await asyncio.sleep(0.05)
+    mqtt.messages.clear()
 
-    stream_path = (
-        Path(__file__).resolve().parents[2]
-        / "docs"
-        / "examples"
-        / "moonraker-stream-sample-trimmed.jsonl"
+    await moonraker.emit(
+        {
+            "method": "notify_gcode_response",
+            "params": ["File opened"],
+        }
     )
-    with stream_path.open("r", encoding="utf-8") as lines:
-        for line in lines:
-            payload = json.loads(line)
-            await moonraker.emit(payload)
-
     await asyncio.sleep(0.05)
     await publisher.stop()
 
-    assert mqtt.messages, "Expected telemetry publish from proc stats"
-    _, payload, _, _, _ = mqtt.messages[-1]
-    document = json.loads(payload.decode("utf-8"))
-    channels = document["channels"]
-    assert "moonraker_stats" in channels
-    assert "system_cpu_usage" in channels
-    assert "network" in channels
-    assert channels["moonraker_stats"]["cpu_usage"] >= 0
-
-
-@pytest.mark.asyncio
-async def test_telemetry_publisher_exclude_fields() -> None:
-    sample_path = (
-        Path(__file__).resolve().parents[2]
-        / "docs"
-        / "examples"
-        / "moonraker-sample-printing.json"
-    )
-    sample = json.loads(sample_path.read_text(encoding="utf-8"))
-
-    moonraker = FakeMoonrakerClient({"result": {}})
-    mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=20.0)
-    config.telemetry.exclude_fields = [
-        "print_stats.message",
-        "virtual_sdcard.file_position",
-        "network.*.bandwidth",
-    ]
-
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
-
-    await publisher.start()
-    await asyncio.sleep(0.05)
-    await moonraker.emit(sample)
-    await asyncio.sleep(0.1)
-
-    stream_path = (
-        Path(__file__).resolve().parents[2]
-        / "docs"
-        / "examples"
-        / "moonraker-stream-sample-trimmed.jsonl"
-    )
-    with stream_path.open("r", encoding="utf-8") as lines:
-        for line in lines:
-            payload = json.loads(line)
-            await moonraker.emit(payload)
-
-    await asyncio.sleep(0.1)
-    await publisher.stop()
-
-    assert mqtt.messages
-    documents = [
-        json.loads(payload.decode("utf-8")) for _, payload, _, _, _ in mqtt.messages
-    ]
-
-    first_with_stats = next(
-        doc for doc in documents if "print_stats" in doc["channels"]
-    )
-    assert "message" not in first_with_stats["channels"]["print_stats"]
-    assert "file_position" not in first_with_stats["channels"]["virtual_sdcard"]
-
-    last = documents[-1]
-    network = last["channels"].get("network")
-    assert network is not None
-    for iface in network.values():
-        assert "bandwidth" not in iface
+    events_messages = mqtt.by_topic().get("owl/printers/device-123/events")
+    assert events_messages, "Expected events payload"
+    document = _decode(events_messages[-1])
+    assert document["kind"] == "delta"
+    assert document["events"][0]["message"] == "File opened"
 
 
 @pytest.mark.asyncio
