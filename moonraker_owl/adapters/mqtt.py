@@ -215,9 +215,11 @@ class MQTTClient:
         self,
         client: mqtt.Client,
         userdata,
-        rc: int,
-        properties=None,
+        disconnect_flags: Any,
+        rc: Any,
+        properties: Any = None,
     ) -> None:
+        _ = disconnect_flags  # API compatibility placeholder
         reason = _normalise_reason_code(rc)
         LOGGER.info("Disconnected from MQTT broker (rc=%s)", reason)
         if self._disconnect_event:
