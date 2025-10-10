@@ -69,6 +69,7 @@ class FakeMqttClient:
                 self.on_disconnect,
                 self,
                 None,
+                None,
                 self._rc_disconnect,
                 None,
             )

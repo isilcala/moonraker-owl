@@ -230,16 +230,12 @@ class TelemetryPublisher:
             body = payload
         else:
             previous = self._channel_snapshots.get(channel)
-            if force_full or previous is None:
-                kind = "full"
-                body = payload
-            else:
-                diff = _diff(previous, payload)
-                if not diff:
-                    return
-                kind = "delta"
-                body = diff
 
+            if not force_full and previous is not None and previous == payload:
+                return
+
+            kind = "full"
+            body = payload
             self._channel_snapshots[channel] = copy.deepcopy(payload)
 
         document = self._build_envelope(channel, kind, body, raw_payload)
@@ -296,50 +292,6 @@ class TelemetryPublisher:
             LOGGER.exception(
                 "Unexpected error publishing telemetry for channel %s", channel
             )
-
-
-def _diff(
-    previous: Optional[Dict[str, Any]], current: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
-    if previous is None:
-        return copy.deepcopy(current)
-
-    return _diff_dict(previous, current)
-
-
-def _diff_dict(
-    previous: Dict[str, Any], current: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
-    diff: Dict[str, Any] = {}
-
-    previous_keys = set(previous.keys())
-    current_keys = set(current.keys())
-
-    for key in current_keys:
-        current_value = current[key]
-        if key not in previous:
-            diff[key] = copy.deepcopy(current_value)
-            continue
-
-        previous_value = previous[key]
-        if isinstance(previous_value, dict) and isinstance(current_value, dict):
-            nested = _diff_dict(previous_value, current_value)
-            if nested:
-                diff[key] = nested
-            continue
-
-        if isinstance(previous_value, list) and isinstance(current_value, list):
-            if previous_value != current_value:
-                diff[key] = copy.deepcopy(current_value)
-            continue
-
-        if previous_value != current_value:
-            diff[key] = copy.deepcopy(current_value)
-
-    for key in previous_keys - current_keys:
-        diff[key] = None
-
-    return diff or None
 
 
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:

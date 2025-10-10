@@ -171,7 +171,7 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publisher_emits_progress_delta() -> None:
+async def test_publisher_emits_progress_full_update() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
@@ -201,7 +201,7 @@ async def test_publisher_emits_progress_delta() -> None:
     progress_messages = mqtt.by_topic().get("owl/printers/device-123/progress")
     assert progress_messages, "Expected progress updates"
     document = _decode(progress_messages[-1])
-    assert document["kind"] == "delta"
+    assert document["kind"] == "full"
     assert document["job"]["progress"]["percent"] == pytest.approx(55.0, rel=0.01)
 
 
