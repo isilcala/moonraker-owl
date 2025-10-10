@@ -352,7 +352,7 @@ def _build_temperature_section(status_state: Dict[str, Any]) -> List[Dict[str, A
 
         temperatures.append(
             {
-                "channel": key.replace("temperature_sensor", "sensor").strip(),
+                "channel": key.strip(),
                 "actual": _safe_round(value.get("temperature")),
                 "target": _safe_round(value.get("target")),
             }
