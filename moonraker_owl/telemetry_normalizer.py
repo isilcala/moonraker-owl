@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import copy
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Dict, Iterable, List, Optional
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -415,18 +418,32 @@ def _merge_temperature_entry(
 ) -> None:
     previous = temperature_state.get(channel, {})
 
+    # Extract current values from Moonraker data
     actual_candidate = _safe_round(data.get("temperature"))
+    target_candidate = _safe_round(data.get("target"))
+
+    # Use new value if present, otherwise fall back to preserved state
+    # This handles cases where Moonraker omits target in rapid temperature updates
     actual = (
         actual_candidate if actual_candidate is not None else previous.get("actual")
     )
-
-    target_candidate = _safe_round(data.get("target"))
     target = (
         target_candidate if target_candidate is not None else previous.get("target")
     )
 
+    # Skip sensors with no data at all
     if actual is None and target is None:
         return
+
+    # Log when we're preserving a target value that wasn't in the current update
+    if target_candidate is None and target is not None:
+        LOGGER.debug(
+            "Preserving target for %s: actual=%s target=%s (from previous=%s)",
+            channel,
+            actual,
+            target,
+            previous.get("target"),
+        )
 
     entry = {
         "channel": channel,
@@ -435,9 +452,12 @@ def _merge_temperature_entry(
     }
 
     collection.append(entry)
+
+    # Persist both values for future reference
+    # This ensures target persists across updates where it may be omitted
     temperature_state[channel] = {
-        "actual": entry.get("actual"),
-        "target": entry.get("target"),
+        "actual": actual,
+        "target": target,
     }
 
 

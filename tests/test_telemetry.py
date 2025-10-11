@@ -343,3 +343,108 @@ def test_telemetry_configuration_requires_device_token():
 
     with pytest.raises(TelemetryConfigurationError):
         TelemetryPublisher(config, FakeMoonrakerClient({}), FakeMQTTClient())
+
+
+@pytest.mark.asyncio
+async def test_heater_subscriptions_include_temperature_and_target_fields() -> None:
+    """Test that heater objects are subscribed with explicit temperature and target fields."""
+    moonraker = FakeMoonrakerClient({"result": {}})
+    mqtt = FakeMQTTClient()
+    config = build_config(
+        include_fields=[
+            "extruder",
+            "heater_bed",
+            "temperature_sensor ambient",
+        ]
+    )
+    config.telemetry.exclude_fields = []
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+    await publisher.stop()
+
+    # Verify heater objects (not sensors) are subscribed with explicit fields
+    # Temperature sensors subscribe to all fields (None) since they don't have target
+    assert moonraker.subscription_objects == {
+        "extruder": ["temperature", "target"],
+        "heater_bed": ["temperature", "target"],
+        "temperature_sensor ambient": None,  # Sensors don't have target
+    }
+
+
+@pytest.mark.asyncio
+async def test_temperature_target_preserved_across_updates() -> None:
+    """Test that target temperature is preserved when omitted in subsequent updates."""
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {
+                    "temperature": 25.0,
+                    "target": 210.0,
+                },
+                "heater_bed": {
+                    "temperature": 22.0,
+                    "target": 60.0,
+                },
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=50.0, include_fields=["extruder", "heater_bed"])
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    # Initial message should have both temperature and target
+    mqtt.messages.clear()
+
+    # Emit update with only temperature (target omitted, simulating Moonraker behavior)
+    await moonraker.emit(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "status": {
+                        "extruder": {
+                            "temperature": 195.5,
+                            # target intentionally omitted
+                        },
+                        "heater_bed": {
+                            "temperature": 58.2,
+                            # target intentionally omitted
+                        },
+                    }
+                }
+            ],
+        }
+    )
+
+    await asyncio.sleep(0.05)
+    await publisher.stop()
+
+    # Verify the target was preserved
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    assert telemetry_messages, "Expected telemetry updates"
+
+    document = _decode(telemetry_messages[-1])
+    temps = document.get("temperatures", [])
+
+    extruder_temp = next((t for t in temps if t["channel"] == "extruder"), None)
+    assert extruder_temp is not None, "Expected extruder temperature"
+    assert extruder_temp["actual"] == pytest.approx(195.5, rel=0.01)
+    assert extruder_temp["target"] == pytest.approx(210.0, rel=0.01), (
+        "Target should be preserved"
+    )
+
+    bed_temp = next((t for t in temps if t["channel"] == "heater_bed"), None)
+    assert bed_temp is not None, "Expected bed temperature"
+    assert bed_temp["actual"] == pytest.approx(58.2, rel=0.01)
+    assert bed_temp["target"] == pytest.approx(60.0, rel=0.01), (
+        "Target should be preserved"
+    )

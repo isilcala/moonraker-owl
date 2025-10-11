@@ -198,21 +198,22 @@ class MoonrakerClient(PrinterAdapter):
                 LOGGER.exception("Moonraker callback failed")
 
     async def _send_subscription(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-        if not self._subscription_objects:
-            return
+        # Subscribe to printer status objects
+        if self._subscription_objects:
+            self._rpc_id += 1
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "printer.objects.subscribe",
+                "id": self._rpc_id,
+                "params": {"objects": self._subscription_objects},
+            }
 
-        self._rpc_id += 1
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "printer.objects.subscribe",
-            "id": self._rpc_id,
-            "params": {"objects": self._subscription_objects},
-        }
-
-        try:
-            await ws.send_json(payload)
-        except Exception:  # pragma: no cover - defensive logging
-            LOGGER.exception("Failed to send Moonraker subscription request")
+            try:
+                await ws.send_json(payload)
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.exception(
+                    "Failed to send Moonraker printer objects subscription"
+                )
 
 
 def _build_ws_url(http_url: str) -> str:

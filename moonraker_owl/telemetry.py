@@ -141,6 +141,37 @@ class TelemetryPublisher:
         await self._enqueue(snapshot)
 
     async def _handle_moonraker_update(self, payload: Dict[str, Any]) -> None:
+        # Obico strategy: When receiving notify_status_update, query heaters explicitly
+        # to ensure we always get fresh target values (Moonraker omits unchanged fields)
+        if payload.get("method") == "notify_status_update":
+            try:
+                # Query all heater objects with None (= all fields including target)
+                heater_objects = {
+                    obj: None
+                    for obj in self._subscription_objects or {}
+                    if obj in ("extruder", "heater_bed")
+                    or obj.startswith(("extruder", "heater_generic"))
+                }
+
+                if heater_objects:
+                    heater_state = await self._moonraker.fetch_printer_state(
+                        heater_objects
+                    )
+                    # Merge the heater state into the notification payload
+                    if "result" in heater_state and "status" in heater_state["result"]:
+                        if (
+                            "params" in payload
+                            and isinstance(payload["params"], list)
+                            and len(payload["params"]) > 0
+                        ):
+                            # Merge heater data into the first params entry
+                            if isinstance(payload["params"][0], dict):
+                                payload["params"][0].update(
+                                    heater_state["result"]["status"]
+                                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.debug("Failed to query heater state: %s", exc)
+
         await self._enqueue(payload)
 
     async def _enqueue(self, payload: Dict[str, Any]) -> None:
@@ -407,9 +438,20 @@ def build_subscription_manifest(
     objects: dict[str, Optional[list[str]]] = {}
     for base in sorted(subscribe_all | attribute_map.keys()):
         if base in subscribe_all:
-            objects[base] = None
+            # For heater objects (extruder, heater_bed), explicitly subscribe to temperature AND target fields
+            # to ensure we always get both values in every update, avoiding race conditions
+            # where target may be omitted in rapid temperature updates.
+            # Temperature sensors don't have target, so subscribe to all their fields.
+            if base in ("extruder", "heater_bed") or base.startswith("extruder"):
+                objects[base] = ["temperature", "target"]
+            else:
+                objects[base] = None
         else:
-            objects[base] = sorted(attribute_map.get(base, set()))
+            # If specific attributes were requested, ensure heaters always include both temp fields
+            attrs = attribute_map.get(base, set())
+            if base in ("extruder", "heater_bed") or base.startswith("extruder"):
+                attrs = attrs | {"temperature", "target"}
+            objects[base] = sorted(attrs)
 
     return objects
 
