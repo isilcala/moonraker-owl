@@ -86,7 +86,10 @@ class FakeMQTTClient:
 
 
 def build_config(
-    *, include_fields: Optional[list[str]] = None, rate_hz: float = 5.0
+    *,
+    include_fields: Optional[list[str]] = None,
+    rate_hz: float = 5.0,
+    include_raw_payload: bool = False,
 ) -> OwlConfig:
     parser = ConfigParser()
     parser.add_section("cloud")
@@ -106,6 +109,7 @@ def build_config(
         moonraker=MoonrakerConfig(url="http://localhost:7125"),
         telemetry=TelemetryConfig(
             rate_hz=rate_hz,
+            include_raw_payload=include_raw_payload,
             include_fields=include_fields or list(DEFAULT_TELEMETRY_FIELDS),
         ),
         commands=CommandConfig(),
@@ -160,7 +164,8 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         assert document.get("tenantId") == "tenant-42"
         assert document.get("printerId") == "printer-99"
         assert document["source"] == "moonraker"
-        assert document["raw"], "Expected raw Moonraker payload"
+        # Raw field is excluded by default (bandwidth optimization)
+        assert "raw" not in document, "Raw field should be excluded by default"
 
     telemetry_doc = _decode(messages["owl/printers/device-123/telemetry"][0])
     assert telemetry_doc["toolhead"]["position"]["x"] is not None
@@ -557,5 +562,75 @@ async def test_query_on_notification_ensures_target_values():
     assert extruder_temp["target"] == pytest.approx(50.0, rel=0.01), (
         "Target should be retrieved via HTTP query when omitted from WebSocket notification"
     )
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_raw_payload_excluded_by_default():
+    """Verify that raw Moonraker payload is excluded by default to save bandwidth."""
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {"temperature": 25.0, "target": 0.0},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config()  # Default: include_raw_payload=False
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    await publisher.start()
+    await asyncio.sleep(0.2)
+
+    # Verify messages were published
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    assert telemetry_messages, "Expected telemetry messages"
+
+    # Check that raw field is NOT present
+    document = _decode(telemetry_messages[-1])
+    assert "raw" not in document, (
+        "Raw field should be excluded by default to save bandwidth (~450 bytes)"
+    )
+
+    # Verify normalized data is still present
+    assert "temperatures" in document, "Expected normalized temperature data"
+    assert "deviceId" in document, "Expected device metadata"
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_raw_payload_included_when_configured():
+    """Verify that raw Moonraker payload is included when explicitly configured."""
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {"temperature": 25.0, "target": 0.0},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(include_raw_payload=True)  # Explicitly enable
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    await publisher.start()
+    await asyncio.sleep(0.2)
+
+    # Verify messages were published
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    assert telemetry_messages, "Expected telemetry messages"
+
+    # Check that raw field IS present
+    document = _decode(telemetry_messages[-1])
+    assert "raw" in document, "Raw field should be included when configured"
+    assert isinstance(document["raw"], str), "Raw field should be a JSON string"
+
+    # Verify normalized data is also present
+    assert "temperatures" in document, "Expected normalized temperature data"
 
     await publisher.stop()

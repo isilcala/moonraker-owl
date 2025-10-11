@@ -60,6 +60,7 @@ class MoonrakerConfig:
 @dataclass(slots=True)
 class TelemetryConfig:
     rate_hz: float = 1.0
+    include_raw_payload: bool = False  # Set to True to include raw Moonraker payload (adds ~450 bytes per message)
     include_fields: List[str] = field(
         default_factory=lambda: list(DEFAULT_TELEMETRY_FIELDS)
     )
@@ -188,6 +189,9 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
 
     telemetry = TelemetryConfig(
         rate_hz=parser.getfloat("telemetry", "rate_hz", fallback=1.0),
+        include_raw_payload=parser.getboolean(
+            "telemetry", "include_raw_payload", fallback=False
+        ),
         include_fields=_parse_list(
             parser.get(
                 "telemetry",
