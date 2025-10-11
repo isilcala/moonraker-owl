@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import copy
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Dict, Iterable, List, Optional
+
+from .core import deep_merge
 
 LOGGER = logging.getLogger(__name__)
 
@@ -596,8 +597,5 @@ def _coerce_int(value: Any) -> Optional[int]:
 
 
 def _deep_merge(target: Dict[str, Any], updates: Dict[str, Any]) -> None:
-    for key, value in updates.items():
-        if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _deep_merge(target[key], value)
-        else:
-            target[key] = copy.deepcopy(value)
+    """Legacy wrapper for shared deep_merge utility."""
+    deep_merge(target, updates)

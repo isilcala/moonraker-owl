@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, Optional, Protocol
 
 from .adapters import MQTTConnectionError
 from .config import OwlConfig
-from .core import PrinterAdapter
+from .core import PrinterAdapter, deep_merge
 from .telemetry_normalizer import TelemetryNormalizer
 from . import constants
 
@@ -21,6 +21,53 @@ from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
 LOGGER = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------------------
+# Heater detection utilities
+# ----------------------------------------------------------------------
+
+
+def is_heater_object(obj_name: str) -> bool:
+    """Check if an object name represents a heater (extruder, bed, or generic heater).
+
+    Args:
+        obj_name: Moonraker object name (e.g., "extruder", "heater_bed", "heater_generic chamber")
+
+    Returns:
+        True if the object is a heater, False otherwise
+
+    Examples:
+        >>> is_heater_object("extruder")
+        True
+        >>> is_heater_object("extruder1")
+        True
+        >>> is_heater_object("heater_bed")
+        True
+        >>> is_heater_object("heater_generic chamber")
+        True
+        >>> is_heater_object("fan")
+        False
+    """
+    return obj_name in ("extruder", "heater_bed") or obj_name.startswith(
+        ("extruder", "heater_generic")
+    )
+
+
+def get_heater_objects(objects: Dict[str, Any]) -> Dict[str, Optional[list[str]]]:
+    """Extract heater objects from a subscription manifest.
+
+    Args:
+        objects: Dictionary of Moonraker object subscriptions
+
+    Returns:
+        Dictionary containing only heater objects, with None values to query all fields
+
+    Examples:
+        >>> get_heater_objects({"extruder": ["temp"], "fan": ["speed"]})
+        {"extruder": None}
+    """
+    return {obj: None for obj in objects if is_heater_object(obj)}
 
 
 class TelemetryConfigurationError(RuntimeError):
@@ -146,16 +193,11 @@ class TelemetryPublisher:
         if payload.get("method") == "notify_status_update":
             try:
                 # Query all heater objects with None (= all fields including target)
-                heater_objects = {
-                    obj: None
-                    for obj in self._subscription_objects or {}
-                    if obj in ("extruder", "heater_bed")
-                    or obj.startswith(("extruder", "heater_generic"))
-                }
+                heater_objects = get_heater_objects(self._subscription_objects or {})
 
                 if heater_objects:
                     heater_state = await self._moonraker.fetch_printer_state(
-                        heater_objects
+                        heater_objects, timeout=5.0
                     )
                     # Merge the heater state into the notification payload
                     if "result" in heater_state and "status" in heater_state["result"]:
@@ -442,14 +484,14 @@ def build_subscription_manifest(
             # to ensure we always get both values in every update, avoiding race conditions
             # where target may be omitted in rapid temperature updates.
             # Temperature sensors don't have target, so subscribe to all their fields.
-            if base in ("extruder", "heater_bed") or base.startswith("extruder"):
+            if is_heater_object(base):
                 objects[base] = ["temperature", "target"]
             else:
                 objects[base] = None
         else:
             # If specific attributes were requested, ensure heaters always include both temp fields
             attrs = attribute_map.get(base, set())
-            if base in ("extruder", "heater_bed") or base.startswith("extruder"):
+            if is_heater_object(base):
                 attrs = attrs | {"temperature", "target"}
             objects[base] = sorted(attrs)
 
@@ -472,12 +514,8 @@ def _normalise_field(field: str) -> str:
 
 
 def _merge_payload_dicts(target: Dict[str, Any], updates: Dict[str, Any]) -> None:
-    for key, value in updates.items():
-        existing = target.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            _merge_payload_dicts(existing, value)
-        else:
-            target[key] = copy.deepcopy(value)
+    """Merge payload dictionaries using shared deep_merge utility."""
+    deep_merge(target, updates)
 
 
 def _json_default(value: Any) -> Any:

@@ -39,7 +39,7 @@ class FakeMoonrakerClient:
     def set_subscription_objects(self, objects):
         self.subscription_objects = objects
 
-    async def fetch_printer_state(self, objects=None):
+    async def fetch_printer_state(self, objects=None, timeout=5.0):
         self.subscription_objects = objects
         return self._initial_state
 
@@ -246,11 +246,16 @@ async def test_subscription_skips_excluded_objects() -> None:
     await asyncio.sleep(0.05)
     await publisher.stop()
 
-    expected_objects = {
+    expected_objects: dict[str, Optional[list[str]]] = {
         field: None
         for field in DEFAULT_TELEMETRY_FIELDS
         if field and field not in DEFAULT_TELEMETRY_EXCLUDE_FIELDS
     }
+
+    # Heaters explicitly subscribe to temperature and target fields
+    # (optimization to ensure both are always present)
+    expected_objects["extruder"] = ["temperature", "target"]
+    expected_objects["heater_bed"] = ["temperature", "target"]
 
     assert moonraker.subscription_objects == expected_objects
 
@@ -448,3 +453,109 @@ async def test_temperature_target_preserved_across_updates() -> None:
     assert bed_temp["target"] == pytest.approx(60.0, rel=0.01), (
         "Target should be preserved"
     )
+
+
+@pytest.mark.asyncio
+async def test_query_on_notification_ensures_target_values():
+    """Verify that query-on-notification strategy retrieves target values.
+
+    This test validates the Obico-inspired fix: when Moonraker omits the target
+    field in notify_status_update (which happens when setting target on a cold
+    extruder), we query heater state via HTTP to ensure we always have current
+    target values.
+    """
+    # Initial state with both temperature and target
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {"temperature": 40.0, "target": 40.0},
+                "heater_bed": {"temperature": 25.0, "target": 0.0},
+            }
+        }
+    }
+
+    # Create a fake client that can track queries
+    class QueryTrackingFakeClient(FakeMoonrakerClient):
+        def __init__(self, initial_state):
+            super().__init__(initial_state)
+            self.query_count = 0
+            self.last_query_objects = None
+            # State that will be returned by subsequent queries
+            self.current_state = initial_state
+
+        async def fetch_printer_state(self, objects=None, timeout=5.0):
+            self.query_count += 1
+            self.last_query_objects = objects
+            self.subscription_objects = objects
+            return self.current_state
+
+    moonraker = QueryTrackingFakeClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config()
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    await publisher.start()
+    await asyncio.sleep(0.1)
+
+    # Clear initial messages
+    mqtt.messages.clear()
+    initial_query_count = moonraker.query_count
+
+    # Simulate user setting target to 50°C in Mainsail
+    # Moonraker sends notify_status_update WITHOUT target field (the bug we're fixing)
+    moonraker.current_state = {
+        "result": {
+            "status": {
+                "extruder": {"temperature": 40.1, "target": 50.0},  # Target changed!
+                "heater_bed": {"temperature": 25.0, "target": 0.0},
+            }
+        }
+    }
+
+    await moonraker.emit(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "extruder": {
+                        "temperature": 40.1,
+                        # NOTE: target field is MISSING (Moonraker's field omission)
+                    }
+                }
+            ],
+        }
+    )
+
+    await asyncio.sleep(0.5)  # Wait for query + processing
+
+    # Verify that an HTTP query was executed
+    assert moonraker.query_count > initial_query_count, (
+        "Expected HTTP query to be executed on notify_status_update"
+    )
+
+    # Verify that only heaters were queried (efficiency check)
+    assert moonraker.last_query_objects is not None, "Expected query objects"
+    queried = set(moonraker.last_query_objects.keys())
+    assert "extruder" in queried, "Expected extruder to be queried"
+    # Verify we use None to get all fields
+    assert moonraker.last_query_objects["extruder"] is None, (
+        "Expected to query all heater fields (None)"
+    )
+
+    # Verify MQTT message includes the correct target (from query, not notification)
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    assert telemetry_messages, "Expected telemetry updates"
+
+    document = _decode(telemetry_messages[-1])
+    temps = document.get("temperatures", [])
+
+    extruder_temp = next((t for t in temps if t["channel"] == "extruder"), None)
+    assert extruder_temp is not None, "Expected extruder temperature"
+    assert extruder_temp["actual"] == pytest.approx(40.1, rel=0.01)
+    # This is the critical assertion: target should be 50.0 (from query),
+    # not missing or stuck at old value
+    assert extruder_temp["target"] == pytest.approx(50.0, rel=0.01), (
+        "Target should be retrieved via HTTP query when omitted from WebSocket notification"
+    )
+
+    await publisher.stop()

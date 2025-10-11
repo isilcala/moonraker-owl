@@ -26,9 +26,16 @@ class PrinterAdapter(Protocol):
         ...
 
     async def fetch_printer_state(
-        self, objects: Optional[Mapping[str, Optional[list[str]]]] = None
+        self,
+        objects: Optional[Mapping[str, Optional[list[str]]]] = None,
+        timeout: float = 5.0,
     ) -> dict[str, Any]:
-        """Retrieve the current printer status snapshot."""
+        """Retrieve the current printer status snapshot.
+
+        Args:
+            objects: Moonraker objects to query (None = all)
+            timeout: Request timeout in seconds
+        """
         ...
 
     async def execute_print_action(self, action: str) -> None:

@@ -93,17 +93,40 @@ class MoonrakerClient(PrinterAdapter):
             self._callbacks.remove(callback)
 
     async def fetch_printer_state(
-        self, objects: Optional[Mapping[str, Optional[list[str]]]] = None
+        self,
+        objects: Optional[Mapping[str, Optional[list[str]]]] = None,
+        timeout: float = 5.0,
     ) -> dict:
-        """Fetch the current printer state via HTTP."""
+        """Fetch the current printer state via HTTP.
+
+        Args:
+            objects: Moonraker objects to query (None = all subscribed objects)
+            timeout: Request timeout in seconds (default: 5.0)
+
+        Raises:
+            asyncio.TimeoutError: If request exceeds timeout
+            aiohttp.ClientError: If HTTP request fails
+        """
 
         session = await self._ensure_session()
         url = f"{self._base_url}/printer/objects/query"
         payload = {"objects": objects or {}}
 
-        async with session.post(url, json=payload, headers=self._headers) as response:
-            response.raise_for_status()
-            return await response.json()
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.post(
+                    url, json=payload, headers=self._headers
+                ) as response:
+                    response.raise_for_status()
+                    return await response.json()
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Moonraker query timed out after %.1fs (url=%s, objects=%d)",
+                timeout,
+                url,
+                len(objects) if objects else 0,
+            )
+            raise
 
     def set_subscription_objects(
         self, objects: Mapping[str, Optional[list[str]]] | None
