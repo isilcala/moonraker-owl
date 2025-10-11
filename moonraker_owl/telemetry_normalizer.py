@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Dict, Iterable, List, Optional
@@ -26,6 +27,11 @@ class TelemetryNormalizer:
         self._proc_state: Dict[str, Any] = {}
         self._file_metadata: Dict[str, Any] = {}
         self._pending_events: List[Dict[str, Any]] = []
+        self._temperature_state: Dict[str, Dict[str, Optional[float]]] = {}
+        self._gcode_temp_pattern = re.compile(
+            r"(?P<label>[TB]\d?):\s*(?P<actual>-?\d+(?:\.\d+)?)\s*/\s*(?P<target>-?\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        )
 
     def ingest(self, payload: Dict[str, Any]) -> NormalizedChannels:
         self._apply_payload(payload)
@@ -52,18 +58,23 @@ class TelemetryNormalizer:
             if isinstance(status, dict):
                 _deep_merge(self._status_state, status)
 
+        method = payload.get("method")
         params = payload.get("params")
         if isinstance(params, list):
             for entry in params:
-                if isinstance(entry, dict):
-                    status = entry.get("status")
-                    if isinstance(status, dict):
-                        _deep_merge(self._status_state, status)
+                if not isinstance(entry, dict):
+                    continue
 
-                    self._capture_proc_stats(entry)
-                    self._capture_file_metadata(entry)
+                status = entry.get("status")
+                if isinstance(status, dict):
+                    _deep_merge(self._status_state, status)
+                elif method == "notify_status_update" and entry:
+                    # Some Moonraker builds emit status fields directly without a wrapper.
+                    _deep_merge(self._status_state, entry)
 
-        method = payload.get("method")
+                self._capture_proc_stats(entry)
+                self._capture_file_metadata(entry)
+
         self._capture_events(method, params)
 
     def _capture_proc_stats(self, entry: Dict[str, Any]) -> None:
@@ -115,6 +126,7 @@ class TelemetryNormalizer:
             if isinstance(params, list):
                 for entry in params:
                     if isinstance(entry, str):
+                        self._update_temperatures_from_gcode(entry)
                         self._pending_events.append(
                             {
                                 "type": "gcode_response",
@@ -177,6 +189,46 @@ class TelemetryNormalizer:
         self._pending_events.clear()
         return events
 
+    def _update_temperatures_from_gcode(self, line: str) -> None:
+        for match in self._gcode_temp_pattern.finditer(line):
+            label = match.group("label")
+            actual = _safe_round(match.group("actual"))
+            target = _safe_round(match.group("target"))
+
+            channel = self._map_gcode_channel(label)
+            if channel is None:
+                continue
+
+            channel_state = self._status_state.setdefault(channel, {})
+            if actual is not None:
+                channel_state["temperature"] = actual
+            if target is not None:
+                channel_state["target"] = target
+
+            stored = self._temperature_state.setdefault(channel, {})
+            if actual is not None:
+                stored["actual"] = actual
+            if target is not None:
+                stored["target"] = target
+
+    @staticmethod
+    def _map_gcode_channel(label: str) -> Optional[str]:
+        if not label:
+            return None
+
+        label = label.upper()
+
+        if label.startswith("B"):
+            return "heater_bed"
+
+        if label.startswith("T"):
+            suffix = label[1:]
+            if not suffix or suffix == "0":
+                return "extruder"
+            return f"extruder{suffix}"
+
+        return None
+
     # ------------------------------------------------------------------
     # builders
     # ------------------------------------------------------------------
@@ -203,7 +255,9 @@ class TelemetryNormalizer:
 
     def _build_telemetry_payload(self) -> Optional[Dict[str, Any]]:
         toolhead = _build_toolhead_section(self._status_state)
-        temperatures = _build_temperature_section(self._status_state)
+        temperatures = _build_temperature_section(
+            self._status_state, self._temperature_state
+        )
         fans = _build_fan_section(self._status_state)
 
         payload: Dict[str, Any] = {}
@@ -321,27 +375,20 @@ def _build_toolhead_section(status_state: Dict[str, Any]) -> Optional[Dict[str, 
     }
 
 
-def _build_temperature_section(status_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_temperature_section(
+    status_state: Dict[str, Any],
+    temperature_state: Dict[str, Dict[str, Optional[float]]],
+) -> List[Dict[str, Any]]:
     temperatures: List[Dict[str, Any]] = []
 
     extruder = status_state.get("extruder")
     if isinstance(extruder, dict):
-        temperatures.append(
-            {
-                "channel": "tool0",
-                "actual": _safe_round(extruder.get("temperature")),
-                "target": _safe_round(extruder.get("target")),
-            }
-        )
+        _merge_temperature_entry(temperatures, "extruder", extruder, temperature_state)
 
     heater_bed = status_state.get("heater_bed")
     if isinstance(heater_bed, dict):
-        temperatures.append(
-            {
-                "channel": "bed",
-                "actual": _safe_round(heater_bed.get("temperature")),
-                "target": _safe_round(heater_bed.get("target")),
-            }
+        _merge_temperature_entry(
+            temperatures, "heater_bed", heater_bed, temperature_state
         )
 
     for key, value in status_state.items():
@@ -350,13 +397,7 @@ def _build_temperature_section(status_state: Dict[str, Any]) -> List[Dict[str, A
         if not key.startswith("temperature_sensor"):
             continue
 
-        temperatures.append(
-            {
-                "channel": key.strip(),
-                "actual": _safe_round(value.get("temperature")),
-                "target": _safe_round(value.get("target")),
-            }
-        )
+        _merge_temperature_entry(temperatures, key.strip(), value, temperature_state)
 
     return [
         temperature
@@ -364,6 +405,40 @@ def _build_temperature_section(status_state: Dict[str, Any]) -> List[Dict[str, A
         if temperature.get("actual") is not None
         or temperature.get("target") is not None
     ]
+
+
+def _merge_temperature_entry(
+    collection: List[Dict[str, Any]],
+    channel: str,
+    data: Dict[str, Any],
+    temperature_state: Dict[str, Dict[str, Optional[float]]],
+) -> None:
+    previous = temperature_state.get(channel, {})
+
+    actual_candidate = _safe_round(data.get("temperature"))
+    actual = (
+        actual_candidate if actual_candidate is not None else previous.get("actual")
+    )
+
+    target_candidate = _safe_round(data.get("target"))
+    target = (
+        target_candidate if target_candidate is not None else previous.get("target")
+    )
+
+    if actual is None and target is None:
+        return
+
+    entry = {
+        "channel": channel,
+        "actual": actual,
+        "target": target,
+    }
+
+    collection.append(entry)
+    temperature_state[channel] = {
+        "actual": entry.get("actual"),
+        "target": entry.get("target"),
+    }
 
 
 def _build_fan_section(status_state: Dict[str, Any]) -> List[Dict[str, Any]]:

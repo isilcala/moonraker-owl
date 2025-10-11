@@ -48,7 +48,7 @@ class TelemetryPublisher:
         moonraker: PrinterAdapter,
         mqtt: MQTTClientLike,
         *,
-        queue_size: int = 1,
+        queue_size: int = 16,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
@@ -160,33 +160,64 @@ class TelemetryPublisher:
         loop = self._loop or asyncio.get_running_loop()
         last_sent = 0.0
 
-        while not self._stop_event.is_set():
-            await self._event.wait()
-            self._event.clear()
+        pending: Optional[Dict[str, Any]] = None
 
-            while not self._queue.empty():
-                payload = await self._queue.get()
+        while not self._stop_event.is_set():
+            if pending is None:
+                await self._event.wait()
+                self._event.clear()
+                pending = self._gather_payloads()
+                if pending is None:
+                    continue
+
+            while not self._stop_event.is_set():
                 now = loop.time()
                 elapsed = now - last_sent
-                if elapsed < self._min_interval:
-                    remaining = self._min_interval - elapsed
-                    try:
-                        await asyncio.wait_for(
-                            self._stop_event.wait(), timeout=remaining
-                        )
-                        return
-                    except asyncio.TimeoutError:
-                        pass
+                if last_sent == 0.0 or elapsed >= self._min_interval:
+                    break
 
+                remaining = self._min_interval - elapsed
                 try:
-                    self._process_payload(payload)
-                except Exception:  # pragma: no cover - defensive logging
-                    LOGGER.exception("Telemetry normalization failed")
+                    await asyncio.wait_for(self._event.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
 
-                last_sent = loop.time()
-                self._force_full_publish = False
+                self._event.clear()
+                pending = self._gather_payloads(pending)
+                if pending is None:
+                    break
+
+            if pending is None:
+                continue
+
+            try:
+                self._process_payload(pending)
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.exception("Telemetry normalization failed")
+
+            last_sent = loop.time()
+            self._force_full_publish = False
+            pending = self._gather_payloads()
 
         LOGGER.debug("TelemetryPublisher loop terminated")
+
+    def _gather_payloads(
+        self, base: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        merged: Optional[Dict[str, Any]] = copy.deepcopy(base) if base else None
+
+        while True:
+            try:
+                payload = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            if merged is None:
+                merged = copy.deepcopy(payload)
+            else:
+                _merge_payload_dicts(merged, payload)
+
+        return merged
 
     def _process_payload(self, payload: Dict[str, Any]) -> None:
         normalized = self._normalizer.ingest(payload)
@@ -396,6 +427,15 @@ def _normalise_field(field: str) -> str:
     if len(field) >= 2 and field[0] == field[-1] and field[0] in {'"', "'"}:
         field = field[1:-1].strip()
     return field
+
+
+def _merge_payload_dicts(target: Dict[str, Any], updates: Dict[str, Any]) -> None:
+    for key, value in updates.items():
+        existing = target.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            _merge_payload_dicts(existing, value)
+        else:
+            target[key] = copy.deepcopy(value)
 
 
 def _json_default(value: Any) -> Any:
