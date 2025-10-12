@@ -561,7 +561,7 @@ def _build_contract_status_section(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     percent = progress.get("percent")
     if isinstance(percent, (int, float)):
-        contract["progressPercent"] = round(float(percent), 2)
+        contract["progressPercent"] = int(round(float(percent)))
 
     return contract
 
@@ -578,7 +578,7 @@ def _build_contract_progress_section(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     contract: Dict[str, Any] = {
         "jobId": _select_job_id(job, file_info),
-        "completionPercent": round(_coerce_float(progress.get("percent"), 0.0), 2),
+        "completionPercent": int(round(_coerce_float(progress.get("percent"), 0.0))),
         "elapsedSeconds": _coerce_int(progress.get("elapsedSeconds"), 0),
     }
 

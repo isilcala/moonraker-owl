@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, Iterable, List, Optional
 
 from .core import deep_merge
@@ -32,6 +33,7 @@ class TelemetryNormalizer:
         self._file_metadata: Dict[str, Any] = {}
         self._pending_events: List[Dict[str, Any]] = []
         self._temperature_state: Dict[str, Dict[str, Optional[float]]] = {}
+        self._last_progress_emit: Optional[Dict[str, Optional[int]]] = None
         self._gcode_temp_pattern = re.compile(
             r"(?P<label>[TB]\d?):\s*(?P<actual>-?\d+(?:\.\d+)?)\s*/\s*(?P<target>-?\d+(?:\.\d+)?)",
             re.IGNORECASE,
@@ -40,10 +42,13 @@ class TelemetryNormalizer:
     def ingest(self, payload: Dict[str, Any]) -> NormalizedChannels:
         self._apply_payload(payload)
 
-        status_payload = self._build_status_payload()
+        status_payload, timing_state, emitted_timings = self._build_status_payload()
         progress_payload = self._build_progress_payload()
         telemetry_payload = self._build_telemetry_payload()
         events_payload = self._drain_events()
+
+        if emitted_timings and timing_state is not None:
+            self._last_progress_emit = timing_state
 
         return NormalizedChannels(
             status=status_payload,
@@ -196,8 +201,8 @@ class TelemetryNormalizer:
     def _update_temperatures_from_gcode(self, line: str) -> None:
         for match in self._gcode_temp_pattern.finditer(line):
             label = match.group("label")
-            actual = _safe_round(match.group("actual"))
-            target = _safe_round(match.group("target"))
+            actual = _round_temperature(match.group("actual"))
+            target = _round_temperature(match.group("target"))
 
             channel = self._map_gcode_channel(label)
             if channel is None:
@@ -236,7 +241,9 @@ class TelemetryNormalizer:
     # ------------------------------------------------------------------
     # builders
     # ------------------------------------------------------------------
-    def _build_status_payload(self) -> Optional[Dict[str, Any]]:
+    def _build_status_payload(
+        self,
+    ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Optional[int]]], bool]:
         job = _build_job_section(self._status_state, self._file_metadata)
         alerts = _build_alerts_section(self._status_state)
 
@@ -246,7 +253,65 @@ class TelemetryNormalizer:
         if alerts:
             payload["alerts"] = alerts
 
-        return payload or None
+        timing_state: Optional[Dict[str, Optional[int]]] = None
+        emit_timings = False
+        if job:
+            progress_dict = job.get("progress")
+            if isinstance(progress_dict, dict):
+                elapsed = progress_dict.get("elapsedSeconds")
+                remaining = progress_dict.get("remainingSeconds")
+                percent = progress_dict.get("percent")
+
+                has_elapsed = isinstance(elapsed, int)
+                has_remaining = isinstance(remaining, int)
+
+                if has_elapsed or has_remaining:
+                    timing_state = {
+                        "elapsed": elapsed if has_elapsed else None,
+                        "remaining": remaining if has_remaining else None,
+                        "percent": percent if isinstance(percent, int) else None,
+                    }
+
+                emit_timings = self._should_emit_timings(timing_state)
+                if not emit_timings:
+                    progress_dict.pop("elapsedSeconds", None)
+                    progress_dict.pop("remainingSeconds", None)
+                    timing_state = self._last_progress_emit
+
+        return payload or None, timing_state, emit_timings
+
+    def _should_emit_timings(self, current: Optional[Dict[str, Optional[int]]]) -> bool:
+        if current is None:
+            return True
+
+        previous = self._last_progress_emit
+        if previous is None:
+            return True
+
+        current_percent = current.get("percent")
+        previous_percent = previous.get("percent") if previous else None
+        if isinstance(current_percent, int) and current_percent != previous_percent:
+            return True
+
+        if self._has_significant_delta(
+            current.get("elapsed"), previous.get("elapsed") if previous else None
+        ):
+            return True
+
+        if self._has_significant_delta(
+            current.get("remaining"), previous.get("remaining") if previous else None
+        ):
+            return True
+
+        return False
+
+    @staticmethod
+    def _has_significant_delta(
+        current: Optional[int], previous: Optional[int], threshold: int = 15
+    ) -> bool:
+        if not isinstance(current, int) or not isinstance(previous, int):
+            return False
+        return abs(current - previous) >= threshold
 
     def _build_progress_payload(self) -> Optional[Dict[str, Any]]:
         progress = _build_progress_section(self._status_state)
@@ -373,7 +438,7 @@ def _build_progress_section(status_state: Dict[str, Any]) -> Optional[Dict[str, 
     if percent is None:
         return None
 
-    progress: Dict[str, Any] = {"percent": round(percent, 2)}
+    progress: Dict[str, Any] = {"percent": int(round(percent))}
     return progress
 
 
@@ -441,8 +506,8 @@ def _merge_temperature_entry(
     previous = temperature_state.get(channel, {})
 
     # Extract current values from Moonraker data
-    actual_candidate = _safe_round(data.get("temperature"))
-    target_candidate = _safe_round(data.get("target"))
+    actual_candidate = _round_temperature(data.get("temperature"))
+    target_candidate = _round_temperature(data.get("target"))
 
     # Use new value if present, otherwise fall back to preserved state
     # This handles cases where Moonraker omits target in rapid temperature updates
@@ -548,6 +613,18 @@ def _safe_round(value: Any, digits: int = 2) -> Optional[float]:
     if numeric is None:
         return None
     return round(numeric, digits)
+
+
+def _round_temperature(value: Any) -> Optional[int]:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
+
+    try:
+        quantized = Decimal(str(numeric)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return int(quantized)
+    except (InvalidOperation, ValueError):
+        return int(round(numeric))
 
 
 def _safe_float_from_fraction(

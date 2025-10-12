@@ -259,7 +259,7 @@ async def test_publisher_emits_progress_full_update() -> None:
     assert document["kind"] == "full"
     progress = document.get("progress")
     assert isinstance(progress, dict)
-    assert progress.get("completionPercent") == pytest.approx(55.0, rel=0.01)
+    assert progress.get("completionPercent") == 55
 
 
 @pytest.mark.asyncio
@@ -432,8 +432,8 @@ async def test_subscription_normalizes_field_names() -> None:
         assert document.get("sequence", 0) > 1
 
         extruder_sensor = _get_sensor(document, "extruder")
-        assert extruder_sensor.get("target") == pytest.approx(100.0)
-        assert extruder_sensor.get("value") == pytest.approx(72.5, rel=0.01)
+        assert extruder_sensor.get("target") == 100
+        assert extruder_sensor.get("value") == 73
 
 
 def test_telemetry_configuration_requires_device_id():
@@ -564,16 +564,12 @@ async def test_temperature_target_preserved_across_updates() -> None:
 
     document = _decode(telemetry_messages[-1])
     extruder_sensor = _get_sensor(document, "extruder")
-    assert extruder_sensor.get("value") == pytest.approx(195.5, rel=0.01)
-    assert extruder_sensor.get("target") == pytest.approx(210.0, rel=0.01), (
-        "Target should be preserved"
-    )
+    assert extruder_sensor.get("value") == 196
+    assert extruder_sensor.get("target") == 210, "Target should be preserved"
 
     bed_sensor = _get_sensor(document, "heaterBed")
-    assert bed_sensor.get("value") == pytest.approx(58.2, rel=0.01)
-    assert bed_sensor.get("target") == pytest.approx(60.0, rel=0.01), (
-        "Target should be preserved"
-    )
+    assert bed_sensor.get("value") == 58
+    assert bed_sensor.get("target") == 60, "Target should be preserved"
 
 
 @pytest.mark.asyncio
@@ -669,10 +665,10 @@ async def test_query_on_notification_ensures_target_values():
 
     document = _decode(telemetry_messages[-1])
     extruder_sensor = _get_sensor(document, "extruder")
-    assert extruder_sensor.get("value") == pytest.approx(40.1, rel=0.01)
+    assert extruder_sensor.get("value") == 40
     # This is the critical assertion: target should be 50.0 (from query),
     # not missing or stuck at old value
-    assert extruder_sensor.get("target") == pytest.approx(50.0, rel=0.01), (
+    assert extruder_sensor.get("target") == 50, (
         "Target should be retrieved via HTTP query when omitted from WebSocket notification"
     )
 
