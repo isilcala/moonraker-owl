@@ -216,15 +216,6 @@ class TelemetryPublisher:
                                 payload["params"][0].update(
                                     heater_state["result"]["status"]
                                 )
-                                LOGGER.debug(
-                                    "Heater merge snapshot: extruder=%s heater_bed=%s",
-                                    _summarise_heater_state(
-                                        payload["params"][0].get("extruder")
-                                    ),
-                                    _summarise_heater_state(
-                                        payload["params"][0].get("heater_bed")
-                                    ),
-                                )
                                 self._state_cache.force_next_publish(
                                     "telemetry", reason="heater merge"
                                 )
@@ -349,7 +340,6 @@ class TelemetryPublisher:
         if ephemeral:
             kind = "delta"
             body = payload
-            diff_summary = "ephemeral"
             sequence: Optional[int] = None
         else:
             if not self._validate_contract_payload(channel, payload):
@@ -367,39 +357,11 @@ class TelemetryPublisher:
             )
 
             if not decision.should_publish:
-                if channel == "telemetry" and isinstance(payload, dict):
-                    extruder_entry = next(
-                        (
-                            entry
-                            for entry in payload.get("temperatures", [])
-                            if isinstance(entry, dict)
-                            and entry.get("channel") == "extruder"
-                        ),
-                        None,
-                    )
-                    LOGGER.debug(
-                        "Skipping publish for channel %s: %s (hash=%s, extruder=%s)",
-                        channel,
-                        decision.reason or "payload unchanged",
-                        decision.current_hash,
-                        extruder_entry,
-                    )
-                else:
-                    LOGGER.debug(
-                        "Skipping publish for channel %s: %s",
-                        channel,
-                        decision.reason or "payload unchanged",
-                    )
                 return
 
             kind = "full"
             body = payload
-            diff_summary = decision.diff_summary
-            if decision.reason:
-                diff_summary = f"{diff_summary} ({decision.reason})"
             sequence = decision.sequence
-
-        LOGGER.debug("Publishing channel %s (%s): %s", channel, kind, diff_summary)
 
         document = self._build_envelope(
             channel, kind, body, raw_payload, sequence=sequence
