@@ -306,6 +306,14 @@ def _build_job_section(
                 pass
         job["file"] = file_info
 
+    job_id = _derive_job_id(filename)
+    if job_id:
+        job["id"] = job_id
+
+    message = print_stats.get("message")
+    if isinstance(message, str) and message:
+        job["message"] = message
+
     progress = _build_progress_section(status_state)
     if progress:
         job["progress"] = progress
@@ -315,6 +323,7 @@ def _build_job_section(
 
     if print_duration is not None:
         job.setdefault("progress", {})["elapsed"] = _format_duration(print_duration)
+        job["progress"]["elapsedSeconds"] = max(int(print_duration), 0)
 
     if (
         total_duration is not None
@@ -325,8 +334,23 @@ def _build_job_section(
         job.setdefault("progress", {})["remaining"] = _format_duration(
             remaining_seconds
         )
+        job["progress"]["remainingSeconds"] = max(int(remaining_seconds), 0)
 
     return job or None
+
+
+def _derive_job_id(filename: Optional[str]) -> Optional[str]:
+    if not isinstance(filename, str):
+        return None
+
+    candidate = filename.strip()
+    if not candidate:
+        return None
+
+    candidate = candidate.replace("\\", "/")
+    name = candidate.split("/")[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return stem or None
 
 
 def _build_progress_section(status_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:

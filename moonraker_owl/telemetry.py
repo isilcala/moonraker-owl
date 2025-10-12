@@ -7,20 +7,24 @@ import contextlib
 import copy
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional, Protocol
+from typing import Any, Dict, Iterable, Optional, Protocol, Union, List
 
 from .adapters import MQTTConnectionError
 from .config import OwlConfig
 from .core import PrinterAdapter, deep_merge
 from .telemetry_normalizer import TelemetryNormalizer
 from . import constants
+from .version import __version__
 
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
 LOGGER = logging.getLogger(__name__)
+
+_ORIGIN = f"moonraker-owl@{__version__}"
 
 
 # ----------------------------------------------------------------------
@@ -311,7 +315,7 @@ class TelemetryPublisher:
         if normalized.events:
             self._publish_channel(
                 "events",
-                {"events": normalized.events},
+                normalized.events,
                 raw_json,
                 force_full=False,
                 ephemeral=True,
@@ -320,7 +324,7 @@ class TelemetryPublisher:
     def _publish_channel(
         self,
         channel: str,
-        payload: Optional[Dict[str, Any]],
+        payload: Optional[Union[Dict[str, Any], list[Any]]],
         raw_payload: str,
         *,
         force_full: bool,
@@ -350,16 +354,22 @@ class TelemetryPublisher:
         self,
         channel: str,
         kind: str,
-        payload: Dict[str, Any],
+        payload: Union[Dict[str, Any], list[Any]],
         raw_payload: str,
     ) -> Dict[str, Any]:
+        captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        sequence = self._next_sequence(channel)
+
         document: Dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "sequence": self._next_sequence(channel),
+            "timestamp": captured_at,
+            "_ts": captured_at,
+            "sequence": sequence,
+            "_seq": sequence,
             "schemaVersion": 1,
             "kind": kind,
             "deviceId": self._device_id,
             "source": "moonraker",
+            "_origin": _ORIGIN,
         }
 
         # Only include raw Moonraker payload if configured
@@ -372,7 +382,23 @@ class TelemetryPublisher:
         if self._tenant_id:
             document["tenantId"] = self._tenant_id
 
-        document.update(payload)
+        if channel == "events":
+            contract_events = _build_contract_events(
+                payload if isinstance(payload, list) else []
+            )
+            document["events"] = contract_events
+            return document
+
+        if isinstance(payload, dict):
+            if channel == "telemetry":
+                contract_section = _build_contract_telemetry_section(payload)
+                if contract_section:
+                    document["telemetry"] = contract_section
+            elif channel == "status":
+                document["status"] = _build_contract_status_section(payload)
+            elif channel == "progress":
+                document["progress"] = _build_contract_progress_section(payload)
+
         return document
 
     def _next_sequence(self, channel: str) -> int:
@@ -400,6 +426,237 @@ class TelemetryPublisher:
             LOGGER.exception(
                 "Unexpected error publishing telemetry for channel %s", channel
             )
+
+
+def _build_contract_telemetry_section(payload: Dict[str, Any]) -> Dict[str, Any]:
+    sensors: Dict[str, Dict[str, Any]] = {}
+
+    for entry in payload.get("temperatures", []):
+        if not isinstance(entry, dict):
+            continue
+
+        channel = entry.get("channel")
+        if not isinstance(channel, str) or not channel.strip():
+            continue
+
+        sensor_key = _normalise_sensor_key(channel)
+        sensor_payload = {
+            "type": "heater",
+            "unit": "celsius",
+            "status": "ok",
+        }
+
+        actual = entry.get("actual")
+        target = entry.get("target")
+
+        if actual is not None:
+            sensor_payload["value"] = actual
+        if target is not None:
+            sensor_payload["target"] = target
+
+        sensors[sensor_key] = _prune_none(sensor_payload)
+
+    for entry in payload.get("fans", []):
+        if not isinstance(entry, dict):
+            continue
+
+        name = entry.get("name") or entry.get("channel")
+        if not isinstance(name, str) or not name.strip():
+            continue
+
+        sensor_key = _normalise_sensor_key(name)
+        percent = entry.get("percent")
+
+        sensor_payload = {
+            "type": "fan",
+            "unit": "percent",
+            "status": "ok",
+        }
+
+        if percent is not None:
+            sensor_payload["value"] = percent
+
+        sensors.setdefault(sensor_key, {}).update(_prune_none(sensor_payload))
+
+    return {"sensors": sensors}
+
+
+def _build_contract_status_section(payload: Dict[str, Any]) -> Dict[str, Any]:
+    job_obj = payload.get("job")
+    job: Dict[str, Any] = job_obj if isinstance(job_obj, dict) else {}
+
+    progress_obj = job.get("progress") if job else None
+    progress: Dict[str, Any] = progress_obj if isinstance(progress_obj, dict) else {}
+
+    file_obj = job.get("file") if job else None
+    file_info: Dict[str, Any] = file_obj if isinstance(file_obj, dict) else {}
+
+    contract: Dict[str, Any] = {
+        "state": _normalise_status_state(job.get("status")),
+        "subState": _normalise_sub_state(job.get("subState"), job.get("status")),
+        "jobId": _select_job_id(job, file_info),
+    }
+
+    message = job.get("message")
+    if isinstance(message, str) and message.strip():
+        contract["message"] = message.strip()
+
+    percent = progress.get("percent")
+    if isinstance(percent, (int, float)):
+        contract["progressPercent"] = round(float(percent), 2)
+
+    return contract
+
+
+def _build_contract_progress_section(payload: Dict[str, Any]) -> Dict[str, Any]:
+    job_obj = payload.get("job")
+    job: Dict[str, Any] = job_obj if isinstance(job_obj, dict) else {}
+
+    progress_obj = job.get("progress") if job else None
+    progress: Dict[str, Any] = progress_obj if isinstance(progress_obj, dict) else {}
+
+    file_obj = job.get("file") if job else None
+    file_info: Dict[str, Any] = file_obj if isinstance(file_obj, dict) else {}
+
+    contract: Dict[str, Any] = {
+        "jobId": _select_job_id(job, file_info),
+        "completionPercent": round(_coerce_float(progress.get("percent"), 0.0), 2),
+        "elapsedSeconds": _coerce_int(progress.get("elapsedSeconds"), 0),
+    }
+
+    remaining = progress.get("remainingSeconds")
+    if remaining is not None:
+        contract["estimatedTimeRemainingSeconds"] = _coerce_int(remaining, 0)
+
+    return contract
+
+
+def _build_contract_events(entries: List[Any]) -> List[Dict[str, Any]]:
+    contract_events: List[Dict[str, Any]] = []
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+
+        base_code = entry.get("code") or entry.get("type") or "event"
+        event_name = _normalise_event_name(base_code)
+        severity_raw = entry.get("severity") or "info"
+        severity = str(severity_raw).lower().strip() or "info"
+
+        details: Dict[str, Any] = {
+            "code": str(base_code),
+        }
+
+        message = entry.get("message")
+        if not message:
+            data = entry.get("data")
+            if isinstance(data, dict):
+                message = data.get("message") or data.get("detail")
+
+        if isinstance(message, str) and message.strip():
+            details["message"] = message.strip()
+
+        payload: Dict[str, Any] = {"details": details}
+
+        data = entry.get("data")
+        if isinstance(data, dict) and data:
+            payload["data"] = data
+
+        contract_entry: Dict[str, Any] = {
+            "eventName": event_name,
+            "severity": severity,
+            "payload": payload,
+        }
+
+        trace_id = entry.get("traceId")
+        if isinstance(trace_id, str) and trace_id.strip():
+            contract_entry["traceId"] = trace_id.strip()
+
+        contract_events.append(contract_entry)
+
+    return contract_events
+
+
+def _normalise_sensor_key(name: str) -> str:
+    stripped = name.strip()
+    if not stripped:
+        return name
+
+    tokens = [token for token in _TOKEN_SPLIT_PATTERN.split(stripped) if token]
+    if not tokens:
+        return stripped
+
+    head, *tail = tokens
+    return head.lower() + "".join(part.capitalize() for part in tail)
+
+
+_TOKEN_SPLIT_PATTERN = re.compile(r"[^0-9A-Za-z]+")
+
+
+def _prune_none(mapping: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in mapping.items() if value is not None}
+
+
+def _normalise_status_state(state: Any) -> str:
+    if not isinstance(state, str) or not state.strip():
+        return "Unknown"
+
+    normalized = state.strip().replace("_", " ").lower()
+    mapping = {
+        "printing": "Printing",
+        "paused": "Paused",
+        "idle": "Idle",
+        "error": "Error",
+        "completed": "Completed",
+        "cancelled": "Cancelled",
+        "offline": "Offline",
+    }
+    return mapping.get(normalized, normalized.title())
+
+
+def _normalise_sub_state(sub_state: Any, fallback_state: Any) -> str:
+    if isinstance(sub_state, str) and sub_state.strip():
+        return _normalise_status_state(sub_state)
+
+    return _normalise_status_state(fallback_state)
+
+
+def _select_job_id(job: Dict[str, Any], file_info: Dict[str, Any]) -> str:
+    for candidate in (
+        job.get("id"),
+        job.get("jobId"),
+        file_info.get("name") if isinstance(file_info, dict) else None,
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    return "unknown"
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalise_event_name(value: Any) -> str:
+    if not isinstance(value, str):
+        return "event"
+
+    tokens = [token for token in _TOKEN_SPLIT_PATTERN.split(value.strip()) if token]
+    if not tokens:
+        return "event"
+
+    head, *tail = tokens
+    return head.lower() + "".join(part.capitalize() for part in tail)
 
 
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:

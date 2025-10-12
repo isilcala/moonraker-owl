@@ -21,6 +21,9 @@ from moonraker_owl.config import (
 )
 from moonraker_owl import constants
 from moonraker_owl.telemetry import TelemetryConfigurationError, TelemetryPublisher
+from moonraker_owl.version import __version__ as PLUGIN_VERSION
+
+EXPECTED_ORIGIN = f"moonraker-owl@{PLUGIN_VERSION}"
 
 
 class FakeMoonrakerClient:
@@ -131,6 +134,21 @@ def _decode(message: dict[str, Any]) -> Dict[str, Any]:
     return json.loads(message["payload"].decode("utf-8"))
 
 
+def _get_contract_sensors(document: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    telemetry = document.get("telemetry")
+    assert isinstance(telemetry, dict), "Expected telemetry contract object"
+    sensors = telemetry.get("sensors")
+    assert isinstance(sensors, dict), "Expected telemetry.sensors object"
+    return sensors
+
+
+def _get_sensor(document: Dict[str, Any], name: str) -> Dict[str, Any]:
+    sensors = _get_contract_sensors(document)
+    sensor = sensors.get(name)
+    assert isinstance(sensor, dict), f"Expected sensor '{name}'"
+    return sensor
+
+
 @pytest.mark.asyncio
 async def test_publisher_emits_initial_full_snapshots() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
@@ -164,15 +182,42 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         assert document.get("tenantId") == "tenant-42"
         assert document.get("printerId") == "printer-99"
         assert document["source"] == "moonraker"
+        assert document.get("_origin") == EXPECTED_ORIGIN
+        assert document.get("_ts"), "Expected contract timestamp"
+        assert document.get("_seq") is not None
+        assert document.get("sequence") == document.get("_seq")
+        assert document.get("timestamp") == document.get("_ts")
         # Raw field is excluded by default (bandwidth optimization)
         assert "raw" not in document, "Raw field should be excluded by default"
 
     telemetry_doc = _decode(messages["owl/printers/device-123/telemetry"][0])
-    assert telemetry_doc["toolhead"]["position"]["x"] is not None
-    assert telemetry_doc["temperatures"], "Expected temperature readings"
+    assert "temperatures" not in telemetry_doc
+    contract_section = telemetry_doc.get("telemetry")
+    assert isinstance(contract_section, dict)
+    sensors = contract_section.get("sensors")
+    assert isinstance(sensors, dict) and sensors, "Expected sensor contract payload"
+    extruder_sensor = sensors.get("extruder")
+    assert isinstance(extruder_sensor, dict)
+    assert extruder_sensor.get("type") == "heater"
+    assert extruder_sensor.get("value") is not None
+
+    status_doc = _decode(messages["owl/printers/device-123/status"][0])
+    assert "job" not in status_doc
+    status_contract = status_doc.get("status")
+    assert isinstance(status_contract, dict)
+    assert status_contract.get("state") == "Printing"
+    assert status_contract.get("jobId")
+    assert status_contract.get("progressPercent") is not None
 
     progress_doc = _decode(messages["owl/printers/device-123/progress"][0])
-    assert progress_doc["job"]["progress"]["percent"] > 0
+    assert "job" not in progress_doc
+    progress_contract = progress_doc.get("progress")
+    assert isinstance(progress_contract, dict)
+    assert progress_contract.get("jobId")
+    completion_percent = progress_contract.get("completionPercent")
+    assert completion_percent is not None
+    assert completion_percent > 0
+    assert "elapsedSeconds" in progress_contract
 
 
 @pytest.mark.asyncio
@@ -207,7 +252,9 @@ async def test_publisher_emits_progress_full_update() -> None:
     assert progress_messages, "Expected progress updates"
     document = _decode(progress_messages[-1])
     assert document["kind"] == "full"
-    assert document["job"]["progress"]["percent"] == pytest.approx(55.0, rel=0.01)
+    progress = document.get("progress")
+    assert isinstance(progress, dict)
+    assert progress.get("completionPercent") == pytest.approx(55.0, rel=0.01)
 
 
 @pytest.mark.asyncio
@@ -235,7 +282,17 @@ async def test_publisher_emits_events_channel() -> None:
     assert events_messages, "Expected events payload"
     document = _decode(events_messages[-1])
     assert document["kind"] == "delta"
-    assert document["events"][0]["message"] == "File opened"
+    events = document.get("events")
+    assert isinstance(events, list) and events, "Expected contract events"
+    entry = events[0]
+    assert entry.get("eventName") == "gcodeResponse"
+    assert entry.get("severity") == "info"
+    payload = entry.get("payload")
+    assert isinstance(payload, dict)
+    details = payload.get("details")
+    assert isinstance(details, dict)
+    assert details.get("message") == "File opened"
+    assert details.get("code") == "gcode_response"
 
 
 @pytest.mark.asyncio
@@ -443,19 +500,15 @@ async def test_temperature_target_preserved_across_updates() -> None:
     assert telemetry_messages, "Expected telemetry updates"
 
     document = _decode(telemetry_messages[-1])
-    temps = document.get("temperatures", [])
-
-    extruder_temp = next((t for t in temps if t["channel"] == "extruder"), None)
-    assert extruder_temp is not None, "Expected extruder temperature"
-    assert extruder_temp["actual"] == pytest.approx(195.5, rel=0.01)
-    assert extruder_temp["target"] == pytest.approx(210.0, rel=0.01), (
+    extruder_sensor = _get_sensor(document, "extruder")
+    assert extruder_sensor.get("value") == pytest.approx(195.5, rel=0.01)
+    assert extruder_sensor.get("target") == pytest.approx(210.0, rel=0.01), (
         "Target should be preserved"
     )
 
-    bed_temp = next((t for t in temps if t["channel"] == "heater_bed"), None)
-    assert bed_temp is not None, "Expected bed temperature"
-    assert bed_temp["actual"] == pytest.approx(58.2, rel=0.01)
-    assert bed_temp["target"] == pytest.approx(60.0, rel=0.01), (
+    bed_sensor = _get_sensor(document, "heaterBed")
+    assert bed_sensor.get("value") == pytest.approx(58.2, rel=0.01)
+    assert bed_sensor.get("target") == pytest.approx(60.0, rel=0.01), (
         "Target should be preserved"
     )
 
@@ -552,14 +605,11 @@ async def test_query_on_notification_ensures_target_values():
     assert telemetry_messages, "Expected telemetry updates"
 
     document = _decode(telemetry_messages[-1])
-    temps = document.get("temperatures", [])
-
-    extruder_temp = next((t for t in temps if t["channel"] == "extruder"), None)
-    assert extruder_temp is not None, "Expected extruder temperature"
-    assert extruder_temp["actual"] == pytest.approx(40.1, rel=0.01)
+    extruder_sensor = _get_sensor(document, "extruder")
+    assert extruder_sensor.get("value") == pytest.approx(40.1, rel=0.01)
     # This is the critical assertion: target should be 50.0 (from query),
     # not missing or stuck at old value
-    assert extruder_temp["target"] == pytest.approx(50.0, rel=0.01), (
+    assert extruder_sensor.get("target") == pytest.approx(50.0, rel=0.01), (
         "Target should be retrieved via HTTP query when omitted from WebSocket notification"
     )
 
@@ -596,8 +646,12 @@ async def test_raw_payload_excluded_by_default():
     )
 
     # Verify normalized data is still present
-    assert "temperatures" in document, "Expected normalized temperature data"
     assert "deviceId" in document, "Expected device metadata"
+    assert document.get("_origin") == EXPECTED_ORIGIN
+    contract = document.get("telemetry")
+    assert isinstance(contract, dict) and "sensors" in contract
+    sensors = contract["sensors"]
+    assert isinstance(sensors, dict) and "extruder" in sensors
 
     await publisher.stop()
 
@@ -631,6 +685,10 @@ async def test_raw_payload_included_when_configured():
     assert isinstance(document["raw"], str), "Raw field should be a JSON string"
 
     # Verify normalized data is also present
-    assert "temperatures" in document, "Expected normalized temperature data"
+    assert document.get("_origin") == EXPECTED_ORIGIN
+    contract = document.get("telemetry")
+    assert isinstance(contract, dict) and "sensors" in contract
+    sensors = contract["sensors"]
+    assert isinstance(sensors, dict) and "extruder" in sensors
 
     await publisher.stop()
