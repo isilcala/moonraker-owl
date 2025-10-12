@@ -120,6 +120,13 @@ class TelemetryPublisher:
             "telemetry": f"{self._base_topic}/telemetry",
             "events": f"{self._base_topic}/events",
         }
+        # Hard-coded QoS levels keep MQTT requirements explicit and consistent across deploys.
+        self._channel_qos = {
+            "status": 1,
+            "progress": 1,
+            "telemetry": 0,
+            "events": 2,
+        }
 
         self._min_interval = _derive_interval_seconds(config.telemetry.rate_hz)
         self._include_fields = _normalise_fields(config.include_fields)
@@ -383,21 +390,13 @@ class TelemetryPublisher:
             sequence = self._next_sequence(channel)
 
         document: Dict[str, Any] = {
-            "timestamp": captured_at,
             "_ts": captured_at,
-            "sequence": sequence,
             "_seq": sequence,
             "schemaVersion": 1,
             "kind": kind,
             "deviceId": self._device_id,
-            "source": "moonraker",
             "_origin": _ORIGIN,
         }
-
-        if channel == "telemetry":
-            document.pop("timestamp", None)
-            document.pop("sequence", None)
-            document.pop("source", None)
 
         # Only include raw Moonraker payload if configured
         # This saves ~450 bytes per message (41% bandwidth reduction)
@@ -474,7 +473,7 @@ class TelemetryPublisher:
             self._mqtt.publish(
                 topic,
                 payload_bytes,
-                qos=1,
+                qos=self._channel_qos.get(channel, 1),
                 retain=False,
                 properties=properties,
             )

@@ -175,7 +175,16 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
     for channel in ("status", "progress", "telemetry"):
         topic = f"owl/printers/device-123/{channel}"
         assert topic in messages, f"Missing channel {channel}"
-        document = _decode(messages[topic][0])
+        first_message = messages[topic][0]
+        assert (
+            first_message["qos"]
+            == {
+                "status": 1,
+                "progress": 1,
+                "telemetry": 0,
+            }[channel]
+        )
+        document = _decode(first_message)
         assert document["kind"] == "full"
         assert document["schemaVersion"] == 1
         assert document["deviceId"] == "device-123"
@@ -184,14 +193,9 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         assert document.get("_origin") == EXPECTED_ORIGIN
         assert document.get("_ts"), "Expected contract timestamp"
         assert document.get("_seq") is not None
-        if channel == "telemetry":
-            assert "source" not in document
-            assert "sequence" not in document
-            assert "timestamp" not in document
-        else:
-            assert document["source"] == "moonraker"
-            assert document.get("sequence") == document.get("_seq")
-            assert document.get("timestamp") == document.get("_ts")
+        assert "source" not in document
+        assert "sequence" not in document
+        assert "timestamp" not in document
         # Raw field is excluded by default (bandwidth optimization)
         assert "raw" not in document, "Raw field should be excluded by default"
 
@@ -285,7 +289,9 @@ async def test_publisher_emits_events_channel() -> None:
 
     events_messages = mqtt.by_topic().get("owl/printers/device-123/events")
     assert events_messages, "Expected events payload"
-    document = _decode(events_messages[-1])
+    last_event_message = events_messages[-1]
+    assert last_event_message["qos"] == 2
+    document = _decode(last_event_message)
     assert document["kind"] == "delta"
     events = document.get("events")
     assert isinstance(events, list) and events, "Expected contract events"
@@ -429,7 +435,7 @@ async def test_subscription_normalizes_field_names() -> None:
         assert len(telemetry_messages) == 1
 
         document = _decode(telemetry_messages[0])
-        assert document.get("sequence", 0) > 1
+        assert document.get("_seq", 0) > 1
 
         extruder_sensor = _get_sensor(document, "extruder")
         assert extruder_sensor.get("target") == 100
