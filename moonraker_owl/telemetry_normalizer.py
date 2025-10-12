@@ -238,14 +238,11 @@ class TelemetryNormalizer:
     # ------------------------------------------------------------------
     def _build_status_payload(self) -> Optional[Dict[str, Any]]:
         job = _build_job_section(self._status_state, self._file_metadata)
-        system = _build_system_section(self._proc_state)
         alerts = _build_alerts_section(self._status_state)
 
         payload: Dict[str, Any] = {}
         if job:
             payload["job"] = job
-        if system:
-            payload["system"] = system
         if alerts:
             payload["alerts"] = alerts
 
@@ -503,55 +500,6 @@ def _build_fan_section(status_state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "percent": round(max(0.0, min(percent, 100.0)), 1),
         }
     ]
-
-
-def _build_system_section(proc_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    payload: Dict[str, Any] = {}
-
-    moonraker_stats = proc_state.get("moonraker_stats")
-    if isinstance(moonraker_stats, dict):
-        uptime = moonraker_stats.get("time")
-        if uptime is not None:
-            try:
-                payload["uptimeSeconds"] = int(uptime)
-            except (TypeError, ValueError):
-                pass
-
-    cpu_usage = proc_state.get("system_cpu_usage")
-    if isinstance(cpu_usage, dict):
-        value = cpu_usage.get("cpu")
-        if value is not None:
-            payload["cpu"] = {"usagePercent": _safe_round(value)}
-
-    memory = proc_state.get("system_memory")
-    if isinstance(memory, dict):
-        used = memory.get("used") or memory.get("usedBytes") or memory.get("used")
-        total = memory.get("total") or memory.get("totalBytes") or memory.get("total")
-        data: Dict[str, Any] = {}
-        if used is not None:
-            data["usedBytes"] = _coerce_int(used)
-        if total is not None:
-            data["totalBytes"] = _coerce_int(total)
-        if data:
-            payload["memory"] = data
-
-    network = proc_state.get("network")
-    if isinstance(network, dict):
-        interfaces = []
-        for name, metrics in network.items():
-            if not isinstance(metrics, dict):
-                continue
-            interfaces.append(
-                {
-                    "name": name,
-                    "rxBytes": _coerce_int(metrics.get("rx_bytes")),
-                    "txBytes": _coerce_int(metrics.get("tx_bytes")),
-                }
-            )
-        if interfaces:
-            payload["network"] = {"interfaces": interfaces}
-
-    return payload or None
 
 
 def _build_alerts_section(status_state: Dict[str, Any]) -> List[Dict[str, Any]]:

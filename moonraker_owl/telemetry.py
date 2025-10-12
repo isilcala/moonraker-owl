@@ -432,6 +432,11 @@ class TelemetryPublisher:
             "_origin": _ORIGIN,
         }
 
+        if channel == "telemetry":
+            document.pop("timestamp", None)
+            document.pop("sequence", None)
+            document.pop("source", None)
+
         # Only include raw Moonraker payload if configured
         # This saves ~450 bytes per message (41% bandwidth reduction)
         if self._config.telemetry.include_raw_payload:

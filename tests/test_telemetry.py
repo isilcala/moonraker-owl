@@ -181,12 +181,17 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         assert document["deviceId"] == "device-123"
         assert document.get("tenantId") == "tenant-42"
         assert document.get("printerId") == "printer-99"
-        assert document["source"] == "moonraker"
         assert document.get("_origin") == EXPECTED_ORIGIN
         assert document.get("_ts"), "Expected contract timestamp"
         assert document.get("_seq") is not None
-        assert document.get("sequence") == document.get("_seq")
-        assert document.get("timestamp") == document.get("_ts")
+        if channel == "telemetry":
+            assert "source" not in document
+            assert "sequence" not in document
+            assert "timestamp" not in document
+        else:
+            assert document["source"] == "moonraker"
+            assert document.get("sequence") == document.get("_seq")
+            assert document.get("timestamp") == document.get("_ts")
         # Raw field is excluded by default (bandwidth optimization)
         assert "raw" not in document, "Raw field should be excluded by default"
 
