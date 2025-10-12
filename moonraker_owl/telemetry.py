@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ from .adapters import MQTTConnectionError
 from .config import OwlConfig
 from .core import PrinterAdapter, deep_merge
 from .telemetry_normalizer import TelemetryNormalizer
+from .telemetry_state import TelemetryHasher, TelemetryStateCache
 from . import constants
 from .version import __version__
 
@@ -134,11 +136,10 @@ class TelemetryPublisher:
         self._worker: Optional[asyncio.Task[None]] = None
         self._callback_registered = False
         self._normalizer = TelemetryNormalizer()
-        self._channel_snapshots: Dict[str, Optional[Dict[str, Any]]] = {
-            "status": None,
-            "progress": None,
-            "telemetry": None,
-        }
+        self._hasher = TelemetryHasher()
+        self._state_cache = TelemetryStateCache(
+            ("status", "progress", "telemetry"), self._hasher
+        )
         self._sequence_counter: Dict[str, int] = defaultdict(int)
         self._force_full_publish = False
 
@@ -214,6 +215,18 @@ class TelemetryPublisher:
                             if isinstance(payload["params"][0], dict):
                                 payload["params"][0].update(
                                     heater_state["result"]["status"]
+                                )
+                                LOGGER.debug(
+                                    "Heater merge snapshot: extruder=%s heater_bed=%s",
+                                    _summarise_heater_state(
+                                        payload["params"][0].get("extruder")
+                                    ),
+                                    _summarise_heater_state(
+                                        payload["params"][0].get("heater_bed")
+                                    ),
+                                )
+                                self._state_cache.force_next_publish(
+                                    "telemetry", reason="heater merge"
                                 )
             except Exception as exc:  # pragma: no cover - defensive logging
                 LOGGER.debug("Failed to query heater state: %s", exc)
@@ -336,17 +349,61 @@ class TelemetryPublisher:
         if ephemeral:
             kind = "delta"
             body = payload
+            diff_summary = "ephemeral"
+            sequence: Optional[int] = None
         else:
-            previous = self._channel_snapshots.get(channel)
+            if not self._validate_contract_payload(channel, payload):
+                LOGGER.debug(
+                    "Skipping publish for channel %s: invalid payload structure",
+                    channel,
+                )
+                return
 
-            if not force_full and previous is not None and previous == payload:
+            decision = self._state_cache.evaluate(
+                channel,
+                payload,
+                force_publish=force_full or self._force_full_publish,
+                diff_callback=_summarise_change,
+            )
+
+            if not decision.should_publish:
+                if channel == "telemetry" and isinstance(payload, dict):
+                    extruder_entry = next(
+                        (
+                            entry
+                            for entry in payload.get("temperatures", [])
+                            if isinstance(entry, dict)
+                            and entry.get("channel") == "extruder"
+                        ),
+                        None,
+                    )
+                    LOGGER.debug(
+                        "Skipping publish for channel %s: %s (hash=%s, extruder=%s)",
+                        channel,
+                        decision.reason or "payload unchanged",
+                        decision.current_hash,
+                        extruder_entry,
+                    )
+                else:
+                    LOGGER.debug(
+                        "Skipping publish for channel %s: %s",
+                        channel,
+                        decision.reason or "payload unchanged",
+                    )
                 return
 
             kind = "full"
             body = payload
-            self._channel_snapshots[channel] = copy.deepcopy(payload)
+            diff_summary = decision.diff_summary
+            if decision.reason:
+                diff_summary = f"{diff_summary} ({decision.reason})"
+            sequence = decision.sequence
 
-        document = self._build_envelope(channel, kind, body, raw_payload)
+        LOGGER.debug("Publishing channel %s (%s): %s", channel, kind, diff_summary)
+
+        document = self._build_envelope(
+            channel, kind, body, raw_payload, sequence=sequence
+        )
         topic = self._channel_topics[channel]
         self._publish(channel, topic, document)
 
@@ -356,9 +413,12 @@ class TelemetryPublisher:
         kind: str,
         payload: Union[Dict[str, Any], list[Any]],
         raw_payload: str,
+        *,
+        sequence: Optional[int] = None,
     ) -> Dict[str, Any]:
         captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        sequence = self._next_sequence(channel)
+        if sequence is None:
+            sequence = self._next_sequence(channel)
 
         document: Dict[str, Any] = {
             "timestamp": captured_at,
@@ -404,6 +464,37 @@ class TelemetryPublisher:
     def _next_sequence(self, channel: str) -> int:
         self._sequence_counter[channel] += 1
         return self._sequence_counter[channel]
+
+    def _validate_contract_payload(
+        self, channel: str, payload: Union[Dict[str, Any], list[Any]]
+    ) -> bool:
+        if channel in {"status", "progress", "telemetry"} and not isinstance(
+            payload, dict
+        ):
+            LOGGER.debug(
+                "Rejecting channel %s payload: expected mapping, got %s",
+                channel,
+                type(payload).__name__,
+            )
+            return False
+
+        if channel == "telemetry" and isinstance(payload, dict):
+            temperatures = payload.get("temperatures")
+            if temperatures is not None:
+                if not isinstance(temperatures, list):
+                    LOGGER.debug(
+                        "Telemetry temperatures block malformed: %r",
+                        temperatures,
+                    )
+                    return False
+                for entry in temperatures:
+                    if not isinstance(entry, dict) or not entry.get("channel"):
+                        LOGGER.debug(
+                            "Telemetry temperature entry malformed: %r",
+                            entry,
+                        )
+                        return False
+        return True
 
     def _publish(self, channel: str, topic: str, document: Dict[str, Any]) -> None:
         payload_bytes = json.dumps(document, default=_json_default).encode("utf-8")
@@ -784,3 +875,75 @@ def _json_default(value: Any) -> Any:
         return str(value)
     except Exception:  # pragma: no cover - defensive fallback
         return repr(value)
+
+
+def _summarise_change(previous: Optional[Any], current: Any) -> str:
+    if previous is None:
+        return "initial snapshot"
+
+    if previous == current:
+        return "unchanged"
+
+    if isinstance(previous, dict) and isinstance(current, dict):
+        return _summarise_mapping_change(previous, current)
+
+    if isinstance(previous, list) and isinstance(current, list):
+        return _summarise_sequence_change(previous, current)
+
+    return "payload changed"
+
+
+def _summarise_mapping_change(previous: Dict[str, Any], current: Dict[str, Any]) -> str:
+    diffs: List[str] = []
+    for key in sorted(set(previous.keys()) | set(current.keys())):
+        before = previous.get(key)
+        after = current.get(key)
+        if before == after:
+            continue
+        diffs.append(f"{key}={_summarise_value(before)}->{_summarise_value(after)}")
+
+    if diffs:
+        return ", ".join(diffs)
+
+    return "structure mutated"
+
+
+def _summarise_sequence_change(previous: List[Any], current: List[Any]) -> str:
+    if len(previous) != len(current):
+        return f"len {len(previous)}->{len(current)}"
+
+    diffs: List[str] = []
+    for idx, (before, after) in enumerate(zip(previous, current)):
+        if before == after:
+            continue
+        diffs.append(f"[{idx}]={_summarise_value(before)}->{_summarise_value(after)}")
+        if len(diffs) >= 3:
+            break
+
+    if diffs:
+        return ", ".join(diffs)
+
+    return "sequence mutated"
+
+
+def _summarise_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return _stable_hash(value)
+    return repr(value)
+
+
+def _stable_hash(value: Any) -> str:
+    try:
+        payload = json.dumps(value, sort_keys=True, default=str).encode("utf-8")
+    except Exception:
+        payload = repr(value).encode("utf-8", errors="ignore")
+    return hashlib.md5(payload).hexdigest()[:8]
+
+
+def _summarise_heater_state(state: Any) -> str:
+    if not isinstance(state, dict):
+        return "missing"
+
+    actual = state.get("temperature")
+    target = state.get("target")
+    return f"actual={actual} target={target}"

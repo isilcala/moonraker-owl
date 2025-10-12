@@ -372,6 +372,64 @@ async def test_subscription_normalizes_field_names() -> None:
         "toolhead": ["position"],
     }
 
+    @pytest.mark.asyncio
+    async def test_heater_merge_forces_telemetry_publish() -> None:
+        initial_state = {
+            "result": {
+                "status": {
+                    "extruder": {"temperature": 41.0, "target": 0.0},
+                    "heater_bed": {"temperature": 39.0, "target": 0.0},
+                }
+            }
+        }
+
+        moonraker = FakeMoonrakerClient(initial_state)
+        mqtt = FakeMQTTClient()
+        config = build_config(rate_hz=20.0)
+
+        publisher = TelemetryPublisher(config, moonraker, mqtt)
+
+        await publisher.start()
+        await asyncio.sleep(0.05)
+        mqtt.messages.clear()
+
+        moonraker._initial_state = {
+            "result": {
+                "status": {
+                    "extruder": {"temperature": 72.5, "target": 100.0},
+                    "heater_bed": {"temperature": 39.0, "target": 0.0},
+                }
+            }
+        }
+
+        await moonraker.emit(
+            {
+                "method": "notify_status_update",
+                "params": [
+                    {
+                        "status": {
+                            "extruder": {"temperature": 72.5},
+                            "heater_bed": {"temperature": 39.0},
+                        }
+                    }
+                ],
+            }
+        )
+
+        await asyncio.sleep(0.1)
+        await publisher.stop()
+
+        telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+        assert telemetry_messages, "Expected telemetry publish after heater ramp"
+        assert len(telemetry_messages) == 1
+
+        document = _decode(telemetry_messages[0])
+        assert document.get("sequence", 0) > 1
+
+        extruder_sensor = _get_sensor(document, "extruder")
+        assert extruder_sensor.get("target") == pytest.approx(100.0)
+        assert extruder_sensor.get("value") == pytest.approx(72.5, rel=0.01)
+
 
 def test_telemetry_configuration_requires_device_id():
     parser = ConfigParser()
