@@ -18,6 +18,7 @@ from .logging import configure_logging
 from .telemetry import (
     TelemetryConfigurationError,
     TelemetryPublisher,
+    build_offline_overview_will,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -106,6 +107,24 @@ class MoonrakerOwlApp:
         self._mqtt_client = MQTTClient(self._config.cloud, client_id=client_id)
         self._mqtt_client.register_disconnect_handler(self._on_mqtt_disconnect)
         self._mqtt_client.register_connect_handler(self._on_mqtt_connect)
+
+        try:
+            (
+                will_topic,
+                will_payload,
+                will_qos,
+                will_retain,
+                will_properties,
+            ) = build_offline_overview_will(self._config)
+            self._mqtt_client.set_last_will(
+                will_topic,
+                will_payload,
+                qos=will_qos,
+                retain=will_retain,
+                properties=will_properties,
+            )
+        except TelemetryConfigurationError as exc:
+            LOGGER.warning("Unable to configure MQTT last will: %s", exc)
 
         try:
             await self._mqtt_client.connect()

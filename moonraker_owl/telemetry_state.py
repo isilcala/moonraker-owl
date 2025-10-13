@@ -134,3 +134,10 @@ class TelemetryStateCache:
                 changed=changed,
                 reason=reason,
             )
+
+    def peek_payload(self, channel: str) -> Optional[Any]:
+        with self._lock:
+            snapshot = self._states.get(channel)
+            if snapshot is None or snapshot.payload is None:
+                return None
+            return copy.deepcopy(snapshot.payload)

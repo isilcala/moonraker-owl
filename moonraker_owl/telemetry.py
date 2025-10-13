@@ -9,14 +9,21 @@ import hashlib
 import json
 import logging
 import re
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
+import math
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from typing import Any, Dict, Iterable, Optional, Protocol, Union, List
 
 from .adapters import MQTTConnectionError
 from .config import OwlConfig
 from .core import PrinterAdapter, deep_merge
-from .telemetry_normalizer import TelemetryNormalizer, _round_temperature
+from .telemetry_normalizer import (
+    TelemetryNormalizer,
+    _round_temperature,
+    _safe_float,
+)
 from .telemetry_state import TelemetryHasher, TelemetryStateCache
 from . import constants
 from .version import __version__
@@ -115,15 +122,13 @@ class TelemetryPublisher:
         ) = _resolve_printer_identity(config)
         self._base_topic = f"owl/printers/{self._device_id}"
         self._channel_topics = {
-            "status": f"{self._base_topic}/status",
-            "progress": f"{self._base_topic}/progress",
+            "overview": f"{self._base_topic}/overview",
             "telemetry": f"{self._base_topic}/telemetry",
             "events": f"{self._base_topic}/events",
         }
         # Hard-coded QoS levels keep MQTT requirements explicit and consistent across deploys.
         self._channel_qos = {
-            "status": 1,
-            "progress": 1,
+            "overview": 1,
             "telemetry": 0,
             "events": 2,
         }
@@ -144,12 +149,15 @@ class TelemetryPublisher:
         self._callback_registered = False
         self._normalizer = TelemetryNormalizer()
         self._hasher = TelemetryHasher()
-        self._state_cache = TelemetryStateCache(
-            ("status", "progress", "telemetry"), self._hasher
-        )
+        self._state_cache = TelemetryStateCache(("overview", "telemetry"), self._hasher)
         self._sequence_counter: Dict[str, int] = defaultdict(int)
         self._force_full_publish = False
         self._heater_merge_cache: Dict[str, Any] = {}
+        self._last_overview_publish_time = 0.0
+        self._last_overview_status = "Idle"
+        self._last_payload_snapshot: Optional[Dict[str, Any]] = None
+        self._overview_idle_interval = 60.0
+        self._overview_active_interval = 15.0
 
     async def start(self) -> None:
         if self._worker is not None:
@@ -245,8 +253,38 @@ class TelemetryPublisher:
                     continue
 
                 previous_snapshot = self._heater_merge_cache.get(key)
-                if previous_snapshot != snapshot:
-                    self._heater_merge_cache[key] = snapshot
+                self._heater_merge_cache[key] = snapshot
+
+                current_contract = (
+                    _round_contract_temperature(snapshot.get("temperature")),
+                    _round_contract_temperature(snapshot.get("target")),
+                )
+
+                if not isinstance(previous_snapshot, dict):
+                    cached_payload = self._state_cache.peek_payload("telemetry")
+                    contract_match = False
+                    if isinstance(cached_payload, dict):
+                        sensors = cached_payload.get("sensors")
+                        if isinstance(sensors, dict):
+                            sensor_key = _normalise_sensor_key(key)
+                            cached_sensor = sensors.get(sensor_key)
+                            if isinstance(cached_sensor, dict):
+                                cached_contract = (
+                                    cached_sensor.get("value"),
+                                    cached_sensor.get("target"),
+                                )
+                                contract_match = cached_contract == current_contract
+
+                    if not contract_match:
+                        has_new_details = True
+                    continue
+
+                previous_contract = (
+                    _round_contract_temperature(previous_snapshot.get("temperature")),
+                    _round_contract_temperature(previous_snapshot.get("target")),
+                )
+
+                if previous_contract != current_contract:
                     has_new_details = True
             else:
                 if self._heater_merge_cache.get(key) != data:
@@ -276,11 +314,15 @@ class TelemetryPublisher:
 
         while not self._stop_event.is_set():
             if pending is None:
-                await self._event.wait()
-                self._event.clear()
-                pending = self._gather_payloads()
-                if pending is None:
-                    continue
+                heartbeat_payload = self._prepare_heartbeat_payload()
+                if heartbeat_payload is not None:
+                    pending = heartbeat_payload
+                else:
+                    await self._event.wait()
+                    self._event.clear()
+                    pending = self._gather_payloads()
+                    if pending is None:
+                        continue
 
             while not self._stop_event.is_set():
                 now = loop.time()
@@ -337,11 +379,13 @@ class TelemetryPublisher:
 
         force_full = self._force_full_publish
 
+        if normalized.overview:
+            status_value = normalized.overview.get("printerStatus")
+            if isinstance(status_value, str) and status_value:
+                self._last_overview_status = status_value
+
         self._publish_channel(
-            "status", normalized.status, raw_json, force_full=force_full
-        )
-        self._publish_channel(
-            "progress", normalized.progress, raw_json, force_full=force_full
+            "overview", normalized.overview, raw_json, force_full=force_full
         )
         self._publish_channel(
             "telemetry", normalized.telemetry, raw_json, force_full=force_full
@@ -355,6 +399,8 @@ class TelemetryPublisher:
                 force_full=False,
                 ephemeral=True,
             )
+
+        self._last_payload_snapshot = copy.deepcopy(payload)
 
     def _publish_channel(
         self,
@@ -373,7 +419,11 @@ class TelemetryPublisher:
             body = payload
             sequence: Optional[int] = None
         else:
-            if not self._validate_contract_payload(channel, payload):
+            contract_payload = self._project_contract_payload(channel, payload)
+            if contract_payload is None:
+                return
+
+            if not self._validate_contract_payload(channel, contract_payload):
                 LOGGER.debug(
                     "Skipping publish for channel %s: invalid payload structure",
                     channel,
@@ -382,7 +432,7 @@ class TelemetryPublisher:
 
             decision = self._state_cache.evaluate(
                 channel,
-                payload,
+                contract_payload,
                 force_publish=force_full or self._force_full_publish,
                 diff_callback=_summarise_change,
             )
@@ -391,14 +441,39 @@ class TelemetryPublisher:
                 return
 
             kind = "full"
-            body = payload
+            body = contract_payload
             sequence = decision.sequence
+
+            if channel == "overview":
+                self._last_overview_publish_time = time.monotonic()
 
         document = self._build_envelope(
             channel, kind, body, raw_payload, sequence=sequence
         )
         topic = self._channel_topics[channel]
         self._publish(channel, topic, document)
+
+    def _project_contract_payload(
+        self,
+        channel: str,
+        payload: Optional[Union[Dict[str, Any], list[Any]]],
+    ) -> Optional[Union[Dict[str, Any], list[Any]]]:
+        if payload is None:
+            return None
+
+        if channel == "telemetry":
+            if not isinstance(payload, dict):
+                return None
+            contract = _build_contract_telemetry_section(payload)
+            return contract if contract is not None else None
+
+        if channel == "overview":
+            if not isinstance(payload, dict):
+                return None
+            contract = _build_contract_overview_section(payload)
+            return contract if contract is not None else None
+
+        return payload
 
     def _build_envelope(
         self,
@@ -442,13 +517,9 @@ class TelemetryPublisher:
 
         if isinstance(payload, dict):
             if channel == "telemetry":
-                contract_section = _build_contract_telemetry_section(payload)
-                if contract_section:
-                    document["telemetry"] = contract_section
-            elif channel == "status":
-                document["status"] = _build_contract_status_section(payload)
-            elif channel == "progress":
-                document["progress"] = _build_contract_progress_section(payload)
+                document["telemetry"] = payload
+            elif channel == "overview":
+                document["overview"] = payload
 
         return document
 
@@ -459,9 +530,7 @@ class TelemetryPublisher:
     def _validate_contract_payload(
         self, channel: str, payload: Union[Dict[str, Any], list[Any]]
     ) -> bool:
-        if channel in {"status", "progress", "telemetry"} and not isinstance(
-            payload, dict
-        ):
+        if channel in {"overview", "telemetry"} and not isinstance(payload, dict):
             LOGGER.debug(
                 "Rejecting channel %s payload: expected mapping, got %s",
                 channel,
@@ -486,6 +555,28 @@ class TelemetryPublisher:
                         )
                         return False
         return True
+
+    def _prepare_heartbeat_payload(self) -> Optional[Dict[str, Any]]:
+        if not self._should_emit_overview_heartbeat():
+            return None
+
+        if self._last_payload_snapshot is None:
+            return None
+
+        self._state_cache.force_next_publish("overview", reason="heartbeat")
+        return copy.deepcopy(self._last_payload_snapshot)
+
+    def _should_emit_overview_heartbeat(self) -> bool:
+        if self._last_overview_publish_time == 0.0:
+            return False
+
+        interval = (
+            self._overview_active_interval
+            if self._last_overview_status in {"Printing", "Paused"}
+            else self._overview_idle_interval
+        )
+
+        return time.monotonic() - self._last_overview_publish_time >= interval
 
     def _publish(self, channel: str, topic: str, document: Dict[str, Any]) -> None:
         payload_bytes = json.dumps(document, default=_json_default).encode("utf-8")
@@ -539,14 +630,14 @@ def _build_contract_telemetry_section(payload: Dict[str, Any]) -> Dict[str, Any]
             continue
 
         sensor_key = _normalise_sensor_key(channel)
-        sensor_payload = {
+        sensor_payload: Dict[str, Any] = {
             "type": "heater",
             "unit": "celsius",
             "status": "ok",
         }
 
-        actual = entry.get("actual")
-        target = entry.get("target")
+        actual = _round_contract_temperature(entry.get("actual"))
+        target = _round_contract_temperature(entry.get("target"))
 
         if actual is not None:
             sensor_payload["value"] = actual
@@ -566,7 +657,7 @@ def _build_contract_telemetry_section(payload: Dict[str, Any]) -> Dict[str, Any]
         sensor_key = _normalise_sensor_key(name)
         percent = entry.get("percent")
 
-        sensor_payload = {
+        sensor_payload: Dict[str, Any] = {
             "type": "fan",
             "unit": "percent",
             "status": "ok",
@@ -580,52 +671,32 @@ def _build_contract_telemetry_section(payload: Dict[str, Any]) -> Dict[str, Any]
     return {"sensors": sensors}
 
 
-def _build_contract_status_section(payload: Dict[str, Any]) -> Dict[str, Any]:
-    job_obj = payload.get("job")
-    job: Dict[str, Any] = job_obj if isinstance(job_obj, dict) else {}
+def _build_contract_overview_section(payload: Dict[str, Any]) -> Dict[str, Any]:
+    contract: Dict[str, Any] = {}
 
-    progress_obj = job.get("progress") if job else None
-    progress: Dict[str, Any] = progress_obj if isinstance(progress_obj, dict) else {}
+    status = payload.get("printerStatus")
+    if isinstance(status, str) and status.strip():
+        contract["printerStatus"] = status.strip()
 
-    file_obj = job.get("file") if job else None
-    file_info: Dict[str, Any] = file_obj if isinstance(file_obj, dict) else {}
-
-    contract: Dict[str, Any] = {
-        "state": _normalise_status_state(job.get("status")),
-        "subState": _normalise_sub_state(job.get("subState"), job.get("status")),
-        "jobId": _select_job_id(job, file_info),
-    }
-
-    message = job.get("message")
-    if isinstance(message, str) and message.strip():
-        contract["message"] = message.strip()
-
-    percent = progress.get("percent")
+    percent = payload.get("progressPercent")
     if isinstance(percent, (int, float)):
         contract["progressPercent"] = int(round(float(percent)))
 
-    return contract
+    elapsed = payload.get("elapsedSeconds")
+    if isinstance(elapsed, (int, float)):
+        contract["elapsedSeconds"] = max(int(elapsed), 0)
 
+    remaining = payload.get("estimatedTimeRemainingSeconds")
+    if isinstance(remaining, (int, float)):
+        contract["estimatedTimeRemainingSeconds"] = max(int(remaining), 0)
 
-def _build_contract_progress_section(payload: Dict[str, Any]) -> Dict[str, Any]:
-    job_obj = payload.get("job")
-    job: Dict[str, Any] = job_obj if isinstance(job_obj, dict) else {}
+    job_name = payload.get("jobName")
+    if isinstance(job_name, str) and job_name.strip():
+        contract["jobName"] = job_name.strip()
 
-    progress_obj = job.get("progress") if job else None
-    progress: Dict[str, Any] = progress_obj if isinstance(progress_obj, dict) else {}
-
-    file_obj = job.get("file") if job else None
-    file_info: Dict[str, Any] = file_obj if isinstance(file_obj, dict) else {}
-
-    contract: Dict[str, Any] = {
-        "jobId": _select_job_id(job, file_info),
-        "completionPercent": int(round(_coerce_float(progress.get("percent"), 0.0))),
-        "elapsedSeconds": _coerce_int(progress.get("elapsedSeconds"), 0),
-    }
-
-    remaining = progress.get("remainingSeconds")
-    if remaining is not None:
-        contract["estimatedTimeRemainingSeconds"] = _coerce_int(remaining, 0)
+    last_updated = payload.get("lastUpdatedUtc")
+    if isinstance(last_updated, str) and last_updated.strip():
+        contract["lastUpdatedUtc"] = last_updated.strip()
 
     return contract
 
@@ -696,54 +767,20 @@ def _prune_none(mapping: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in mapping.items() if value is not None}
 
 
-def _normalise_status_state(state: Any) -> str:
-    if not isinstance(state, str) or not state.strip():
-        return "Unknown"
+def _round_contract_temperature(value: Any) -> Optional[int]:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
 
-    normalized = state.strip().replace("_", " ").lower()
-    mapping = {
-        "printing": "Printing",
-        "paused": "Paused",
-        "idle": "Idle",
-        "error": "Error",
-        "completed": "Completed",
-        "cancelled": "Cancelled",
-        "offline": "Offline",
-    }
-    return mapping.get(normalized, normalized.title())
-
-
-def _normalise_sub_state(sub_state: Any, fallback_state: Any) -> str:
-    if isinstance(sub_state, str) and sub_state.strip():
-        return _normalise_status_state(sub_state)
-
-    return _normalise_status_state(fallback_state)
-
-
-def _select_job_id(job: Dict[str, Any], file_info: Dict[str, Any]) -> str:
-    for candidate in (
-        job.get("id"),
-        job.get("jobId"),
-        file_info.get("name") if isinstance(file_info, dict) else None,
-    ):
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
-
-    return "unknown"
-
-
-def _coerce_float(value: Any, default: float) -> float:
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+        quantized = Decimal(str(numeric)).quantize(Decimal("1"), rounding=ROUND_FLOOR)
+    except (InvalidOperation, ValueError):
+        try:
+            return int(math.floor(float(numeric)))
+        except (TypeError, ValueError):
+            return None
 
-
-def _coerce_int(value: Any, default: int) -> int:
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
+    return int(quantized)
 
 
 def _normalise_event_name(value: Any) -> str:
@@ -796,6 +833,42 @@ def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
         )
 
     return tenant_id, device_id, printer_id, device_token
+
+
+def build_offline_overview_will(
+    config: OwlConfig,
+) -> tuple[str, bytes, int, bool, Properties]:
+    tenant_id, device_id, printer_id, device_token = _resolve_printer_identity(config)
+
+    captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    document: Dict[str, Any] = {
+        "_ts": captured_at,
+        "_seq": 0,
+        "schemaVersion": 1,
+        "kind": "full",
+        "channel": "overview",
+        "deviceId": device_id,
+        "_origin": _ORIGIN,
+        "overview": {
+            "printerStatus": "Offline",
+            "lastUpdatedUtc": captured_at,
+        },
+    }
+
+    if tenant_id:
+        document["tenantId"] = tenant_id
+    if printer_id:
+        document["printerId"] = printer_id
+
+    topic = f"owl/printers/{device_id}/overview"
+    payload = json.dumps(document).encode("utf-8")
+
+    properties = Properties(PacketTypes.PUBLISH)
+    properties.UserProperty = [
+        (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, device_token)
+    ]
+
+    return topic, payload, 1, True, properties
 
 
 def _derive_interval_seconds(rate_hz: float) -> float:

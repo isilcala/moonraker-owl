@@ -172,15 +172,14 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, "token")
     ]
 
-    for channel in ("status", "progress", "telemetry"):
+    for channel in ("overview", "telemetry"):
         topic = f"owl/printers/device-123/{channel}"
         assert topic in messages, f"Missing channel {channel}"
         first_message = messages[topic][0]
         assert (
             first_message["qos"]
             == {
-                "status": 1,
-                "progress": 1,
+                "overview": 1,
                 "telemetry": 0,
             }[channel]
         )
@@ -210,27 +209,17 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
     assert extruder_sensor.get("type") == "heater"
     assert extruder_sensor.get("value") is not None
 
-    status_doc = _decode(messages["owl/printers/device-123/status"][0])
-    assert "job" not in status_doc
-    status_contract = status_doc.get("status")
-    assert isinstance(status_contract, dict)
-    assert status_contract.get("state") == "Printing"
-    assert status_contract.get("jobId")
-    assert status_contract.get("progressPercent") is not None
-
-    progress_doc = _decode(messages["owl/printers/device-123/progress"][0])
-    assert "job" not in progress_doc
-    progress_contract = progress_doc.get("progress")
-    assert isinstance(progress_contract, dict)
-    assert progress_contract.get("jobId")
-    completion_percent = progress_contract.get("completionPercent")
-    assert completion_percent is not None
-    assert completion_percent > 0
-    assert "elapsedSeconds" in progress_contract
+    overview_doc = _decode(messages["owl/printers/device-123/overview"][0])
+    overview_contract = overview_doc.get("overview")
+    assert isinstance(overview_contract, dict)
+    assert overview_contract.get("printerStatus") == "Printing"
+    assert overview_contract.get("progressPercent") is not None
+    assert overview_contract.get("elapsedSeconds") is not None
+    assert overview_contract.get("estimatedTimeRemainingSeconds") is not None
 
 
 @pytest.mark.asyncio
-async def test_publisher_emits_progress_full_update() -> None:
+async def test_publisher_emits_overview_full_update() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
@@ -257,13 +246,13 @@ async def test_publisher_emits_progress_full_update() -> None:
     await asyncio.sleep(0.05)
     await publisher.stop()
 
-    progress_messages = mqtt.by_topic().get("owl/printers/device-123/progress")
-    assert progress_messages, "Expected progress updates"
-    document = _decode(progress_messages[-1])
+    overview_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
+    assert overview_messages, "Expected overview updates"
+    document = _decode(overview_messages[-1])
     assert document["kind"] == "full"
-    progress = document.get("progress")
-    assert isinstance(progress, dict)
-    assert progress.get("completionPercent") == 55
+    overview = document.get("overview")
+    assert isinstance(overview, dict)
+    assert overview.get("progressPercent") == 55
 
 
 @pytest.mark.asyncio
@@ -438,8 +427,8 @@ async def test_subscription_normalizes_field_names() -> None:
         assert document.get("_seq", 0) > 1
 
         extruder_sensor = _get_sensor(document, "extruder")
-        assert extruder_sensor.get("target") == pytest.approx(100.0)
-        assert extruder_sensor.get("value") == pytest.approx(72.5)
+        assert extruder_sensor.get("target") == 100
+        assert extruder_sensor.get("value") == 72
 
 
 def test_telemetry_configuration_requires_device_id():
@@ -570,12 +559,82 @@ async def test_temperature_target_preserved_across_updates() -> None:
 
     document = _decode(telemetry_messages[-1])
     extruder_sensor = _get_sensor(document, "extruder")
-    assert extruder_sensor.get("value") == 196
+    assert extruder_sensor.get("value") == 195
     assert extruder_sensor.get("target") == 210, "Target should be preserved"
 
     bed_sensor = _get_sensor(document, "heaterBed")
     assert bed_sensor.get("value") == 58
     assert bed_sensor.get("target") == 60, "Target should be preserved"
+
+
+@pytest.mark.asyncio
+async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -> None:
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {
+                    "temperature": 195.0,
+                    "target": 200.0,
+                }
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=50.0, include_fields=["extruder"])
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+    mqtt.messages.clear()
+
+    await moonraker.emit(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "status": {
+                        "extruder": {
+                            "temperature": 195.4,
+                        }
+                    }
+                }
+            ],
+        }
+    )
+
+    await asyncio.sleep(0.1)
+
+    assert mqtt.by_topic().get("owl/printers/device-123/telemetry") is None, (
+        "Expected fractional change below 1°C to be deduplicated"
+    )
+
+    await moonraker.emit(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "status": {
+                        "extruder": {
+                            "temperature": 196.2,
+                        }
+                    }
+                }
+            ],
+        }
+    )
+
+    await asyncio.sleep(0.1)
+    await publisher.stop()
+
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    assert telemetry_messages, "Expected integer-scale change to publish telemetry"
+
+    document = _decode(telemetry_messages[-1])
+    extruder_sensor = _get_sensor(document, "extruder")
+    assert extruder_sensor.get("value") == 196
 
 
 @pytest.mark.asyncio

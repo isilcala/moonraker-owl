@@ -62,6 +62,9 @@ class FakeMqttClient:
     def loop_stop(self):
         self._events["loop_stop"] = self._events.get("loop_stop", 0) + 1
 
+    def will_set(self, topic, payload=None, qos=0, retain=False, properties=None):
+        self._events["will_set"] = (topic, payload, qos, retain, properties)
+
     def disconnect(self):
         self._events["disconnect_called"] = True
         if self.on_disconnect:
@@ -134,6 +137,44 @@ async def test_connect_configures_client(mqtt_client):
     assert events["connect_args"] == ("broker.owl.dev", 1883, 60)
     assert events["auth"] == ("tenant:device", "token")
     assert events["loop_start"] == 1
+
+
+@pytest.mark.asyncio
+async def test_last_will_applied_before_connect(monkeypatch):
+    loop = asyncio.get_running_loop()
+    events: dict = {}
+
+    def factory(*args, **kwargs):
+        return FakeMqttClient(loop, events, *args, **kwargs)
+
+    monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
+
+    config = CloudConfig(
+        base_url="https://api.owl.dev",
+        broker_host="broker.owl.dev",
+        broker_port=1883,
+    )
+
+    client = MQTTClient(config, client_id="printer-will")
+    properties = object()
+    client.set_last_will(
+        "owl/printers/device/offline",
+        b"offline",
+        qos=1,
+        retain=True,
+        properties=properties,
+    )
+
+    await client.connect()
+    await client.disconnect()
+
+    assert events.get("will_set") == (
+        "owl/printers/device/offline",
+        b"offline",
+        1,
+        True,
+        properties,
+    )
 
 
 @pytest.mark.asyncio

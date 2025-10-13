@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import timedelta
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from typing import Any, Dict, Iterable, List, Optional
 
 from .core import deep_merge
 
 
 @dataclass(slots=True)
-class NormalizedChannels:
+class NormalizedPayloads:
     """Structured payloads ready for publishing to Nexus."""
 
-    status: Optional[Dict[str, Any]] = None
-    progress: Optional[Dict[str, Any]] = None
+    overview: Optional[Dict[str, Any]] = None
     telemetry: Optional[Dict[str, Any]] = None
     events: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -30,26 +29,22 @@ class TelemetryNormalizer:
         self._file_metadata: Dict[str, Any] = {}
         self._pending_events: List[Dict[str, Any]] = []
         self._temperature_state: Dict[str, Dict[str, Optional[float]]] = {}
-        self._last_progress_emit: Optional[Dict[str, Optional[int]]] = None
+        self._last_overview_signature: Optional[tuple[tuple[str, Any], ...]] = None
+        self._last_overview_timestamp: Optional[str] = None
         self._gcode_temp_pattern = re.compile(
             r"(?P<label>[TB]\d?):\s*(?P<actual>-?\d+(?:\.\d+)?)\s*/\s*(?P<target>-?\d+(?:\.\d+)?)",
             re.IGNORECASE,
         )
 
-    def ingest(self, payload: Dict[str, Any]) -> NormalizedChannels:
+    def ingest(self, payload: Dict[str, Any]) -> NormalizedPayloads:
         self._apply_payload(payload)
 
-        status_payload, timing_state, emitted_timings = self._build_status_payload()
-        progress_payload = self._build_progress_payload()
+        overview_payload = self._build_overview_payload()
         telemetry_payload = self._build_telemetry_payload()
         events_payload = self._drain_events()
 
-        if emitted_timings and timing_state is not None:
-            self._last_progress_emit = timing_state
-
-        return NormalizedChannels(
-            status=status_payload,
-            progress=progress_payload,
+        return NormalizedPayloads(
+            overview=overview_payload,
             telemetry=telemetry_payload,
             events=events_payload,
         )
@@ -238,83 +233,81 @@ class TelemetryNormalizer:
     # ------------------------------------------------------------------
     # builders
     # ------------------------------------------------------------------
-    def _build_status_payload(
-        self,
-    ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Optional[int]]], bool]:
-        job = _build_job_section(self._status_state, self._file_metadata)
-        alerts = _build_alerts_section(self._status_state)
+    def _build_overview_payload(self) -> Optional[Dict[str, Any]]:
+        job = _build_job_section(self._status_state, self._file_metadata) or {}
+        printer_status = self._resolve_printer_status(job)
 
-        payload: Dict[str, Any] = {}
-        if job:
-            payload["job"] = job
-        if alerts:
-            payload["alerts"] = alerts
+        overview: Dict[str, Any] = {"printerStatus": printer_status}
 
-        timing_state: Optional[Dict[str, Optional[int]]] = None
-        emit_timings = False
-        if job:
-            progress_dict = job.get("progress")
-            if isinstance(progress_dict, dict):
-                elapsed = progress_dict.get("elapsedSeconds")
-                remaining = progress_dict.get("remainingSeconds")
-                percent = progress_dict.get("percent")
+        progress = job.get("progress") if isinstance(job, dict) else None
+        if isinstance(progress, dict):
+            percent = progress.get("percent")
+            if percent is not None:
+                overview["progressPercent"] = int(percent)
 
-                has_elapsed = isinstance(elapsed, int)
-                has_remaining = isinstance(remaining, int)
+            elapsed = progress.get("elapsedSeconds")
+            if elapsed is not None:
+                overview["elapsedSeconds"] = int(elapsed)
 
-                if has_elapsed or has_remaining:
-                    timing_state = {
-                        "elapsed": elapsed if has_elapsed else None,
-                        "remaining": remaining if has_remaining else None,
-                        "percent": percent if isinstance(percent, int) else None,
-                    }
+            remaining = progress.get("remainingSeconds")
+            if remaining is not None:
+                overview["estimatedTimeRemainingSeconds"] = int(remaining)
 
-                emit_timings = self._should_emit_timings(timing_state)
-                if not emit_timings:
-                    progress_dict.pop("elapsedSeconds", None)
-                    progress_dict.pop("remainingSeconds", None)
-                    timing_state = self._last_progress_emit
+        file_info = job.get("file") if isinstance(job, dict) else None
+        if isinstance(file_info, dict):
+            name = file_info.get("name")
+            if isinstance(name, str) and name.strip():
+                overview["jobName"] = name.strip()
 
-        return payload or None, timing_state, emit_timings
+        signature = tuple(sorted(overview.items()))
+        if signature != self._last_overview_signature:
+            self._last_overview_signature = signature
+            self._last_overview_timestamp = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
 
-    def _should_emit_timings(self, current: Optional[Dict[str, Optional[int]]]) -> bool:
-        if current is None:
-            return True
+        if self._last_overview_timestamp:
+            overview["lastUpdatedUtc"] = self._last_overview_timestamp
 
-        previous = self._last_progress_emit
-        if previous is None:
-            return True
+        return overview
 
-        current_percent = current.get("percent")
-        previous_percent = previous.get("percent") if previous else None
-        if isinstance(current_percent, int) and current_percent != previous_percent:
-            return True
+    def _resolve_printer_status(self, job: Dict[str, Any]) -> str:
+        print_stats = self._status_state.get("print_stats")
+        raw_state: Optional[str] = None
 
-        if self._has_significant_delta(
-            current.get("elapsed"), previous.get("elapsed") if previous else None
-        ):
-            return True
+        if isinstance(print_stats, dict):
+            candidate = print_stats.get("state")
+            if isinstance(candidate, str):
+                raw_state = candidate
 
-        if self._has_significant_delta(
-            current.get("remaining"), previous.get("remaining") if previous else None
-        ):
-            return True
+        if raw_state is None:
+            candidate = job.get("status") if isinstance(job, dict) else None
+            if isinstance(candidate, str):
+                raw_state = candidate
 
-        return False
+        if raw_state:
+            normalized = raw_state.strip().lower()
+        else:
+            normalized = ""
 
-    @staticmethod
-    def _has_significant_delta(
-        current: Optional[int], previous: Optional[int], threshold: int = 15
-    ) -> bool:
-        if not isinstance(current, int) or not isinstance(previous, int):
-            return False
-        return abs(current - previous) >= threshold
+        mapping = {
+            "printing": "Printing",
+            "resuming": "Printing",
+            "pausing": "Paused",
+            "paused": "Paused",
+            "standby": "Idle",
+            "ready": "Idle",
+            "idle": "Idle",
+            "complete": "Completed",
+            "completed": "Completed",
+            "cancelled": "Completed",
+            "cancelling": "Completed",
+            "error": "Error",
+            "shutdown": "Error",
+            "offline": "Offline",
+        }
 
-    def _build_progress_payload(self) -> Optional[Dict[str, Any]]:
-        progress = _build_progress_section(self._status_state)
-        if not progress:
-            return None
-        return {"job": {"progress": progress}}
+        return mapping.get(normalized, "Idle")
 
     def _build_telemetry_payload(self) -> Optional[Dict[str, Any]]:
         toolhead = _build_toolhead_section(self._status_state)
@@ -611,7 +604,7 @@ def _round_temperature(value: Any) -> Optional[float]:
     decimal_value = Decimal(str(numeric))
 
     try:
-        quantized = decimal_value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        quantized = decimal_value.quantize(Decimal("0.1"), rounding=ROUND_FLOOR)
         return float(quantized)
     except (InvalidOperation, ValueError):
         scaled = int(numeric * 10)

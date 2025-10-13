@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import paho.mqtt.client as mqtt
 
@@ -42,6 +42,7 @@ class MQTTClient:
         self._connected: bool = False
         self._disconnect_handlers: List[Callable[[int], None]] = []
         self._connect_handlers: List[Callable[[int], None]] = []
+        self._last_will: Optional[Dict[str, Any]] = None
 
     async def connect(self, timeout: float = 30.0) -> None:
         """Connect to the MQTT broker and wait for acknowledgement."""
@@ -62,6 +63,9 @@ class MQTTClient:
 
         client = mqtt.Client(**client_kwargs)
         client.enable_logger(LOGGER)
+
+        if self._last_will is not None:
+            client.will_set(**self._last_will)
 
         if self.config.username:
             client.username_pw_set(self.config.username, self.config.password)
@@ -130,6 +134,24 @@ class MQTTClient:
         )
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             raise MQTTConnectionError(f"Publish failed with rc={info.rc}")
+
+    def set_last_will(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        qos: int = 0,
+        retain: bool = False,
+        properties=None,
+    ) -> None:
+        self._last_will = {
+            "topic": topic,
+            "payload": payload,
+            "qos": qos,
+            "retain": retain,
+        }
+        if properties is not None:
+            self._last_will["properties"] = properties
 
     def subscribe(self, topic: str, qos: int = 1) -> None:
         if not self._client:

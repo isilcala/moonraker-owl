@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from moonraker_owl.config import load_config, save_config
 from moonraker_owl.link import (
@@ -15,7 +16,7 @@ from moonraker_owl.link import (
 
 
 @pytest.mark.asyncio
-async def test_link_device_polls_until_success(aiohttp_server):
+async def test_link_device_polls_until_success():
     attempts = 0
 
     async def handler(request: web.Request) -> web.StreamResponse:
@@ -37,14 +38,14 @@ async def test_link_device_polls_until_success(aiohttp_server):
 
     app = web.Application()
     app.router.add_post("/device/link", handler)
-    server = await aiohttp_server(app)
 
-    credentials = await link_device(
-        str(server.make_url("/")),
-        "CODE123",
-        poll_interval=0.01,
-        timeout=1.0,
-    )
+    async with TestServer(app) as server:
+        credentials = await link_device(
+            str(server.make_url("/")),
+            "CODE123",
+            poll_interval=0.01,
+            timeout=1.0,
+        )
 
     assert attempts == 2
     assert credentials.device_id == "device-1"
@@ -53,7 +54,7 @@ async def test_link_device_polls_until_success(aiohttp_server):
 
 
 @pytest.mark.asyncio
-async def test_link_device_allows_missing_tenant_id(aiohttp_server):
+async def test_link_device_allows_missing_tenant_id():
     async def handler(request: web.Request) -> web.StreamResponse:
         payload = await request.json()
         assert payload["linkCode"] == "CODE123"
@@ -67,14 +68,14 @@ async def test_link_device_allows_missing_tenant_id(aiohttp_server):
 
     app = web.Application()
     app.router.add_post("/device/link", handler)
-    server = await aiohttp_server(app)
 
-    credentials = await link_device(
-        str(server.make_url("/")),
-        "CODE123",
-        poll_interval=0.01,
-        timeout=1.0,
-    )
+    async with TestServer(app) as server:
+        credentials = await link_device(
+            str(server.make_url("/")),
+            "CODE123",
+            poll_interval=0.01,
+            timeout=1.0,
+        )
 
     assert credentials.tenant_id == ""
 
