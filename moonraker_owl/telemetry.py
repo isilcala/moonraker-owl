@@ -149,7 +149,7 @@ class TelemetryPublisher:
         )
         self._sequence_counter: Dict[str, int] = defaultdict(int)
         self._force_full_publish = False
-        self._heater_merge_cache: Dict[str, Dict[str, Any]] = {}
+        self._heater_merge_cache: Dict[str, Any] = {}
 
     async def start(self) -> None:
         if self._worker is not None:
@@ -219,53 +219,39 @@ class TelemetryPublisher:
                         else None
                     )
 
-                    if (
-                        heater_status
-                        and "params" in payload
-                        and isinstance(payload["params"], list)
-                        and payload["params"]
-                    ):
-                        first_entry = payload["params"][0]
-                        if isinstance(first_entry, dict):
-                            added_details = self._merge_heater_state(
-                                first_entry, heater_status
+                    if heater_status:
+                        has_new_details = self._track_heater_snapshot(heater_status)
+
+                        if has_new_details:
+                            await self._enqueue({"result": {"status": heater_status}})
+                            self._state_cache.force_next_publish(
+                                "telemetry", reason="heater refresh"
                             )
-                            if added_details:
-                                self._state_cache.force_next_publish(
-                                    "telemetry", reason="heater merge"
-                                )
             except Exception as exc:  # pragma: no cover - defensive logging
                 LOGGER.debug("Failed to query heater state: %s", exc)
 
         await self._enqueue(payload)
 
-    def _merge_heater_state(
-        self, params_entry: Dict[str, Any], heater_status: Dict[str, Any]
-    ) -> bool:
+    def _track_heater_snapshot(self, heater_status: Dict[str, Any]) -> bool:
         has_new_details = False
 
         for key, data in heater_status.items():
-            if not isinstance(data, dict):
-                params_entry[key] = copy.deepcopy(data)
-                continue
+            if isinstance(data, dict):
+                snapshot = _normalise_heater_snapshot(data)
+                if not snapshot:
+                    if key in self._heater_merge_cache:
+                        self._heater_merge_cache.pop(key, None)
+                        has_new_details = True
+                    continue
 
-            existing = params_entry.get(key)
-            if isinstance(existing, dict):
-                existing.update(data)
+                previous_snapshot = self._heater_merge_cache.get(key)
+                if previous_snapshot != snapshot:
+                    self._heater_merge_cache[key] = snapshot
+                    has_new_details = True
             else:
-                params_entry[key] = copy.deepcopy(data)
-
-            snapshot = _normalise_heater_snapshot(data)
-            if not snapshot:
-                if key in self._heater_merge_cache:
-                    # Drop cached detail so a future populated snapshot can trigger publish
-                    self._heater_merge_cache.pop(key, None)
-                continue
-
-            previous_snapshot = self._heater_merge_cache.get(key)
-            if previous_snapshot != snapshot:
-                has_new_details = True
-                self._heater_merge_cache[key] = snapshot
+                if self._heater_merge_cache.get(key) != data:
+                    self._heater_merge_cache[key] = copy.deepcopy(data)
+                    has_new_details = True
 
         return has_new_details
 

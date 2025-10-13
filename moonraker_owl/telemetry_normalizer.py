@@ -2,23 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
-from decimal import (
-    Decimal,
-    InvalidOperation,
-    ROUND_CEILING,
-    ROUND_FLOOR,
-    ROUND_HALF_UP,
-    ROUND_HALF_DOWN,
-)
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, Iterable, List, Optional
 
 from .core import deep_merge
-
-LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -529,16 +519,7 @@ def _merge_temperature_entry(
     if actual is None and target is None:
         return
 
-    # Log when we're preserving a target value that wasn't in the current update
-    if target_candidate is None and target is not None:
-        LOGGER.debug(
-            "Preserving target for %s: actual=%s target=%s (from previous=%s)",
-            channel,
-            actual,
-            target,
-            previous.get("target"),
-        )
-
+    # Preserve prior target when the current update omits it
     entry = {
         "channel": channel,
         "actual": actual,
