@@ -149,6 +149,7 @@ class TelemetryPublisher:
         )
         self._sequence_counter: Dict[str, int] = defaultdict(int)
         self._force_full_publish = False
+        self._heater_merge_cache: Dict[str, Dict[str, Any]] = {}
 
     async def start(self) -> None:
         if self._worker is not None:
@@ -212,17 +213,24 @@ class TelemetryPublisher:
                         heater_objects, timeout=5.0
                     )
                     # Merge the heater state into the notification payload
-                    if "result" in heater_state and "status" in heater_state["result"]:
-                        if (
-                            "params" in payload
-                            and isinstance(payload["params"], list)
-                            and len(payload["params"]) > 0
-                        ):
-                            # Merge heater data into the first params entry
-                            if isinstance(payload["params"][0], dict):
-                                payload["params"][0].update(
-                                    heater_state["result"]["status"]
-                                )
+                    heater_status = (
+                        heater_state.get("result", {}).get("status")
+                        if isinstance(heater_state, dict)
+                        else None
+                    )
+
+                    if (
+                        heater_status
+                        and "params" in payload
+                        and isinstance(payload["params"], list)
+                        and payload["params"]
+                    ):
+                        first_entry = payload["params"][0]
+                        if isinstance(first_entry, dict):
+                            added_details = self._merge_heater_state(
+                                first_entry, heater_status
+                            )
+                            if added_details:
                                 self._state_cache.force_next_publish(
                                     "telemetry", reason="heater merge"
                                 )
@@ -230,6 +238,36 @@ class TelemetryPublisher:
                 LOGGER.debug("Failed to query heater state: %s", exc)
 
         await self._enqueue(payload)
+
+    def _merge_heater_state(
+        self, params_entry: Dict[str, Any], heater_status: Dict[str, Any]
+    ) -> bool:
+        has_new_details = False
+
+        for key, data in heater_status.items():
+            if not isinstance(data, dict):
+                params_entry[key] = copy.deepcopy(data)
+                continue
+
+            existing = params_entry.get(key)
+            if isinstance(existing, dict):
+                existing.update(data)
+            else:
+                params_entry[key] = copy.deepcopy(data)
+
+            snapshot = _normalise_heater_snapshot(data)
+            if not snapshot:
+                if key in self._heater_merge_cache:
+                    # Drop cached detail so a future populated snapshot can trigger publish
+                    self._heater_merge_cache.pop(key, None)
+                continue
+
+            previous_snapshot = self._heater_merge_cache.get(key)
+            if previous_snapshot != snapshot:
+                has_new_details = True
+                self._heater_merge_cache[key] = snapshot
+
+        return has_new_details
 
     async def _enqueue(self, payload: Dict[str, Any]) -> None:
         if self._stop_event.is_set():
@@ -483,6 +521,24 @@ class TelemetryPublisher:
             LOGGER.exception(
                 "Unexpected error publishing telemetry for channel %s", channel
             )
+
+
+def _normalise_heater_snapshot(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    snapshot: Dict[str, Any] = {}
+    for field in ("temperature", "target", "power"):
+        value = data.get(field)
+        if value is None:
+            continue
+
+        try:
+            snapshot[field] = round(float(value), 1)
+            continue
+        except (TypeError, ValueError):
+            pass
+
+        snapshot[field] = value
+
+    return snapshot or None
 
 
 def _build_contract_telemetry_section(payload: Dict[str, Any]) -> Dict[str, Any]:

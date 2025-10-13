@@ -615,16 +615,18 @@ def _safe_round(value: Any, digits: int = 2) -> Optional[float]:
     return round(numeric, digits)
 
 
-def _round_temperature(value: Any) -> Optional[int]:
+def _round_temperature(value: Any) -> Optional[float]:
     numeric = _safe_float(value)
     if numeric is None:
         return None
 
     try:
-        quantized = Decimal(str(numeric)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-        return int(quantized)
+        quantized = Decimal(str(numeric)).quantize(
+            Decimal("0.1"), rounding=ROUND_HALF_UP
+        )
+        return float(quantized)
     except (InvalidOperation, ValueError):
-        return int(round(numeric))
+        return round(numeric, 1)
 
 
 def _safe_float_from_fraction(
