@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, Optional, Protocol, Union, List
 from .adapters import MQTTConnectionError
 from .config import OwlConfig
 from .core import PrinterAdapter, deep_merge
-from .telemetry_normalizer import TelemetryNormalizer
+from .telemetry_normalizer import TelemetryNormalizer, _round_temperature
 from .telemetry_state import TelemetryHasher, TelemetryStateCache
 from . import constants
 from .version import __version__
@@ -530,11 +530,10 @@ def _normalise_heater_snapshot(data: Dict[str, Any]) -> Optional[Dict[str, Any]]
         if value is None:
             continue
 
-        try:
-            snapshot[field] = round(float(value), 1)
+        rounded = _round_temperature(value)
+        if rounded is not None:
+            snapshot[field] = rounded
             continue
-        except (TypeError, ValueError):
-            pass
 
         snapshot[field] = value
 

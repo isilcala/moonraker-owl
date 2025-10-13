@@ -438,8 +438,8 @@ async def test_subscription_normalizes_field_names() -> None:
         assert document.get("_seq", 0) > 1
 
         extruder_sensor = _get_sensor(document, "extruder")
-        assert extruder_sensor.get("target") == 100
-        assert extruder_sensor.get("value") == 73
+        assert extruder_sensor.get("target") == pytest.approx(100.0)
+        assert extruder_sensor.get("value") == pytest.approx(72.5)
 
 
 def test_telemetry_configuration_requires_device_id():

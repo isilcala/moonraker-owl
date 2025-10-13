@@ -6,7 +6,14 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import (
+    Decimal,
+    InvalidOperation,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_UP,
+    ROUND_HALF_DOWN,
+)
 from typing import Any, Dict, Iterable, List, Optional
 
 from .core import deep_merge
@@ -620,13 +627,14 @@ def _round_temperature(value: Any) -> Optional[float]:
     if numeric is None:
         return None
 
+    decimal_value = Decimal(str(numeric))
+
     try:
-        quantized = Decimal(str(numeric)).quantize(
-            Decimal("0.1"), rounding=ROUND_HALF_UP
-        )
+        quantized = decimal_value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
         return float(quantized)
     except (InvalidOperation, ValueError):
-        return round(numeric, 1)
+        scaled = int(numeric * 10)
+        return scaled / 10.0
 
 
 def _safe_float_from_fraction(
