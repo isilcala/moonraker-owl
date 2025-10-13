@@ -418,6 +418,7 @@ class TelemetryPublisher:
             "_seq": sequence,
             "schemaVersion": 1,
             "kind": kind,
+            "channel": channel,
             "deviceId": self._device_id,
             "_origin": _ORIGIN,
         }
