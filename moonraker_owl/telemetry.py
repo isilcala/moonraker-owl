@@ -935,42 +935,6 @@ def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
     return tenant_id, device_id, printer_id, device_token
 
 
-def build_offline_overview_will(
-    config: OwlConfig,
-) -> tuple[str, bytes, int, bool, Properties]:
-    tenant_id, device_id, printer_id, device_token = _resolve_printer_identity(config)
-
-    captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    document: Dict[str, Any] = {
-        "_ts": captured_at,
-        "_seq": 0,
-        "schemaVersion": 1,
-        "kind": "full",
-        "channel": "overview",
-        "deviceId": device_id,
-        "_origin": _ORIGIN,
-        "overview": {
-            "printerStatus": "Offline",
-            "lastUpdatedUtc": captured_at,
-        },
-    }
-
-    if tenant_id:
-        document["tenantId"] = tenant_id
-    if printer_id:
-        document["printerId"] = printer_id
-
-    topic = f"owl/printers/{device_id}/overview"
-    payload = json.dumps(document).encode("utf-8")
-
-    properties = Properties(PacketTypes.PUBLISH)
-    properties.UserProperty = [
-        (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, device_token)
-    ]
-
-    return topic, payload, 1, True, properties
-
-
 def _derive_interval_seconds(rate_hz: float) -> float:
     if rate_hz <= 0:
         return 1.0
