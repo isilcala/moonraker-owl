@@ -101,24 +101,49 @@ class TelemetryNormalizer:
         item = entry.get("item")
         if isinstance(item, dict):
             path = item.get("path")
-            size = item.get("size")
-            if path:
-                self._file_metadata[path] = {
-                    "size": size,
-                    "modified": item.get("modified"),
-                }
+            if isinstance(path, str) and path:
+                record = self._file_metadata.setdefault(path, {})
+                size = _coerce_int(item.get("size"))
+                if size is not None:
+                    record["size"] = size
+                modified = item.get("modified")
+                if modified is not None:
+                    record["modified"] = modified
+                record.setdefault("relativePath", path)
 
         job = entry.get("job")
         if isinstance(job, dict):
             filename = job.get("filename")
             metadata = job.get("metadata")
-            if isinstance(filename, str) and isinstance(metadata, dict):
-                size = metadata.get("size")
-                if size is not None:
-                    self._file_metadata[filename] = {
-                        "size": size,
-                        "modified": metadata.get("modified"),
-                    }
+            if isinstance(filename, str) and filename:
+                record = self._file_metadata.setdefault(filename, {})
+                record.setdefault("relativePath", filename)
+
+                if isinstance(metadata, dict):
+                    size = _coerce_int(metadata.get("size"))
+                    if size is not None:
+                        record["size"] = size
+
+                    modified = metadata.get("modified")
+                    if modified is not None:
+                        record["modified"] = modified
+
+                    layer_count = metadata.get("layer_count") or metadata.get(
+                        "layerCount"
+                    )
+                    layer_count_value = _coerce_int(layer_count)
+                    if layer_count_value is not None:
+                        record["layerCount"] = layer_count_value
+
+                    thumbnails = _sanitize_thumbnails(metadata.get("thumbnails"))
+                    if thumbnails:
+                        record["thumbnails"] = thumbnails
+
+                    relative_path = metadata.get("relative_path") or metadata.get(
+                        "relativePath"
+                    )
+                    if isinstance(relative_path, str) and relative_path.strip():
+                        record["relativePath"] = relative_path.strip()
 
     def _capture_events(
         self, method: Optional[str], params: Optional[Iterable[Any]]
@@ -240,24 +265,109 @@ class TelemetryNormalizer:
         overview: Dict[str, Any] = {"printerStatus": printer_status}
 
         progress = job.get("progress") if isinstance(job, dict) else None
+        percent: Optional[int] = None
+        elapsed: Optional[int] = None
+        remaining: Optional[int] = None
         if isinstance(progress, dict):
-            percent = progress.get("percent")
-            if percent is not None:
-                overview["progressPercent"] = int(percent)
+            percent_value = _coerce_int(progress.get("percent"))
+            if percent_value is not None:
+                percent = percent_value
+                overview["progressPercent"] = percent_value
 
-            elapsed = progress.get("elapsedSeconds")
-            if elapsed is not None:
-                overview["elapsedSeconds"] = int(elapsed)
+            elapsed_value = _coerce_int(progress.get("elapsedSeconds"))
+            if elapsed_value is not None:
+                elapsed = elapsed_value
+                overview["elapsedSeconds"] = elapsed_value
 
-            remaining = progress.get("remainingSeconds")
-            if remaining is not None:
-                overview["estimatedTimeRemainingSeconds"] = int(remaining)
+            remaining_value = _coerce_int(progress.get("remainingSeconds"))
+            if remaining_value is not None:
+                remaining = remaining_value
+                overview["estimatedTimeRemainingSeconds"] = remaining_value
 
+        job_payload: Dict[str, Any] = {}
         file_info = job.get("file") if isinstance(job, dict) else None
         if isinstance(file_info, dict):
             name = file_info.get("name")
             if isinstance(name, str) and name.strip():
-                overview["jobName"] = name.strip()
+                normalized_name = name.strip()
+                overview["jobName"] = normalized_name
+                job_payload["name"] = normalized_name
+
+            path = file_info.get("path") or file_info.get("relativePath")
+            if isinstance(path, str) and path.strip():
+                job_payload["sourcePath"] = path.strip()
+
+            size_bytes = _coerce_int(file_info.get("sizeBytes"))
+            if size_bytes is not None:
+                job_payload["sizeBytes"] = size_bytes
+
+        job_id = job.get("id")
+        if isinstance(job_id, str) and job_id.strip():
+            job_payload["id"] = job_id.strip()
+
+        job_message = job.get("message")
+        if isinstance(job_message, str) and job_message.strip():
+            job_payload["message"] = job_message.strip()
+
+        if percent is not None:
+            job_payload["progressPercent"] = percent
+        if elapsed is not None:
+            job_payload["elapsedSeconds"] = elapsed
+        if remaining is not None:
+            job_payload["estimatedTimeRemainingSeconds"] = remaining
+
+        layers = job.get("layers")
+        layer_status: Optional[str] = None
+        if isinstance(layers, dict):
+            sanitized_layers: Dict[str, int] = {}
+            current_layer = _coerce_int(layers.get("current"))
+            total_layer = _coerce_int(layers.get("total"))
+
+            if current_layer is not None:
+                sanitized_layers["current"] = current_layer
+            if total_layer is not None:
+                sanitized_layers["total"] = total_layer
+
+            if sanitized_layers:
+                job_payload["layers"] = sanitized_layers
+
+            layer_status = _format_layer_status(current_layer, total_layer)
+
+        thumbnails = job.get("thumbnails")
+        selected_thumbnail = _select_thumbnail_entry(thumbnails) if thumbnails else None
+
+        if job_payload:
+            thumbnail_payload: Dict[str, Any] = {
+                "cloudUrl": None,
+                "sourcePath": selected_thumbnail.get("relativePath")
+                if selected_thumbnail
+                else None,
+            }
+
+            if selected_thumbnail:
+                if (width := selected_thumbnail.get("width")) is not None:
+                    thumbnail_payload["width"] = width
+                if (height := selected_thumbnail.get("height")) is not None:
+                    thumbnail_payload["height"] = height
+                if (size := selected_thumbnail.get("sizeBytes")) is not None:
+                    thumbnail_payload["sizeBytes"] = size
+
+            job_payload["thumbnail"] = thumbnail_payload
+            overview["job"] = job_payload
+
+        sub_status = layer_status
+        if not sub_status and isinstance(job_payload.get("message"), str):
+            sub_status = job_payload["message"]
+
+        if not sub_status:
+            display_status = self._status_state.get("display_status")
+            if isinstance(display_status, dict):
+                candidate = display_status.get("message")
+                if isinstance(candidate, str) and candidate.strip():
+                    sub_status = candidate.strip()
+
+        if sub_status:
+            overview["subStatus"] = sub_status
 
         signature = tuple(sorted(overview.items()))
         if signature != self._last_overview_signature:
@@ -346,16 +456,32 @@ def _build_job_section(
     if isinstance(state, str) and state:
         job["status"] = state
 
+    meta: Dict[str, Any] = {}
     filename = print_stats.get("filename")
     if isinstance(filename, str) and filename:
-        file_info: Dict[str, Any] = {"name": filename}
+        sanitized_name = filename.strip()
         meta = file_metadata.get(filename) or {}
-        size = meta.get("size")
+        file_info: Dict[str, Any] = {
+            "name": sanitized_name,
+            "path": sanitized_name,
+        }
+
+        size = _coerce_int(meta.get("size"))
         if size is not None:
-            try:
-                file_info["sizeBytes"] = int(size)
-            except (TypeError, ValueError):
-                pass
+            file_info["sizeBytes"] = size
+
+        relative_path = meta.get("relativePath")
+        if isinstance(relative_path, str) and relative_path.strip():
+            file_info["relativePath"] = relative_path.strip()
+
+        thumbnails = meta.get("thumbnails")
+        if thumbnails:
+            job["thumbnails"] = thumbnails
+
+        layer_count_meta = _coerce_int(meta.get("layerCount"))
+        if layer_count_meta is not None:
+            job["layerCount"] = layer_count_meta
+
         job["file"] = file_info
 
     job_id = _derive_job_id(filename)
@@ -367,8 +493,46 @@ def _build_job_section(
         job["message"] = message
 
     progress = _build_progress_section(status_state)
+    percent_value: Optional[float] = None
     if progress:
         job["progress"] = progress
+        percent_candidate = progress.get("percent")
+        if percent_candidate is not None:
+            try:
+                percent_value = float(percent_candidate)
+            except (TypeError, ValueError):
+                percent_value = None
+
+    info = print_stats.get("info")
+    current_layer = None
+    total_layer = None
+    if isinstance(info, dict):
+        current_layer = _coerce_int(
+            info.get("current_layer") or info.get("currentLayer")
+        )
+        total_layer = _coerce_int(info.get("total_layer") or info.get("totalLayer"))
+
+    if total_layer is None:
+        total_layer = _coerce_int(meta.get("layerCount")) if meta else None
+
+    if (
+        current_layer is None
+        and total_layer is not None
+        and total_layer > 0
+        and percent_value is not None
+    ):
+        estimated = int(round((percent_value / 100.0) * total_layer))
+        current_layer = max(0, min(estimated, total_layer))
+        if percent_value > 0.0 and current_layer == 0:
+            current_layer = 1
+
+    layers_payload: Dict[str, Any] = {}
+    if current_layer is not None:
+        layers_payload["current"] = current_layer
+    if total_layer is not None:
+        layers_payload["total"] = total_layer
+    if layers_payload:
+        job["layers"] = layers_payload
 
     print_duration = _safe_float(print_stats.get("print_duration"))
     total_duration = _safe_float(print_stats.get("total_duration"))
@@ -569,6 +733,90 @@ def _build_alerts_section(status_state: Dict[str, Any]) -> List[Dict[str, Any]]:
 # ----------------------------------------------------------------------
 # utilities
 # ----------------------------------------------------------------------
+
+
+def _sanitize_thumbnails(entries: Any) -> List[Dict[str, Any]]:
+    sanitized: List[Dict[str, Any]] = []
+    if not isinstance(entries, Iterable):
+        return sanitized
+
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+
+        path = raw.get("relative_path") or raw.get("relativePath")
+        if not isinstance(path, str) or not path.strip():
+            continue
+
+        entry: Dict[str, Any] = {"relativePath": path.strip()}
+
+        width = _coerce_int(raw.get("width"))
+        if width is not None:
+            entry["width"] = width
+
+        height = _coerce_int(raw.get("height"))
+        if height is not None:
+            entry["height"] = height
+
+        size_bytes = _coerce_int(raw.get("size") or raw.get("sizeBytes"))
+        if size_bytes is not None:
+            entry["sizeBytes"] = size_bytes
+
+        sanitized.append(entry)
+
+    return sanitized
+
+
+def _select_thumbnail_entry(
+    entries: Optional[Iterable[Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    if not entries:
+        return None
+
+    best_entry: Optional[Dict[str, Any]] = None
+    best_score = -1
+
+    for candidate in entries:
+        if not isinstance(candidate, dict):
+            continue
+
+        path = candidate.get("relativePath") or candidate.get("relative_path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+
+        sanitized: Dict[str, Any] = {"relativePath": path.strip()}
+
+        width = _coerce_int(candidate.get("width"))
+        if width is not None:
+            sanitized["width"] = width
+
+        height = _coerce_int(candidate.get("height"))
+        if height is not None:
+            sanitized["height"] = height
+
+        size_bytes = _coerce_int(candidate.get("sizeBytes") or candidate.get("size"))
+        if size_bytes is not None:
+            sanitized["sizeBytes"] = size_bytes
+
+        score = (sanitized.get("width") or 0) * (sanitized.get("height") or 0)
+        if score > best_score:
+            best_entry = sanitized
+            best_score = score
+
+    return best_entry
+
+
+def _format_layer_status(current: Optional[int], total: Optional[int]) -> Optional[str]:
+    if total is None or total <= 0:
+        return None
+
+    if current is None:
+        return None
+
+    current_value = max(0, current)
+    current_value = min(current_value, total)
+
+    return f"Layer {current_value}/{total}"
 
 
 def _format_duration(seconds: float) -> str:

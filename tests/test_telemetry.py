@@ -216,6 +216,18 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
     assert overview_contract.get("progressPercent") is not None
     assert overview_contract.get("elapsedSeconds") is not None
     assert overview_contract.get("estimatedTimeRemainingSeconds") is not None
+    assert overview_contract.get("subStatus")
+
+    job_contract = overview_contract.get("job")
+    assert isinstance(job_contract, dict)
+    assert job_contract.get("name")
+    assert job_contract.get("progressPercent") == overview_contract.get(
+        "progressPercent"
+    )
+
+    thumbnail_contract = job_contract.get("thumbnail")
+    assert isinstance(thumbnail_contract, dict)
+    assert "cloudUrl" in thumbnail_contract
 
 
 @pytest.mark.asyncio
@@ -253,6 +265,10 @@ async def test_publisher_emits_overview_full_update() -> None:
     overview = document.get("overview")
     assert isinstance(overview, dict)
     assert overview.get("progressPercent") == 55
+
+    job = overview.get("job")
+    assert isinstance(job, dict)
+    assert job.get("progressPercent") == 55
 
 
 @pytest.mark.asyncio

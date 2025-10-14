@@ -678,6 +678,10 @@ def _build_contract_overview_section(payload: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(status, str) and status.strip():
         contract["printerStatus"] = status.strip()
 
+    sub_status = payload.get("subStatus")
+    if isinstance(sub_status, str) and sub_status.strip():
+        contract["subStatus"] = sub_status.strip()
+
     percent = payload.get("progressPercent")
     if isinstance(percent, (int, float)):
         contract["progressPercent"] = int(round(float(percent)))
@@ -697,6 +701,92 @@ def _build_contract_overview_section(payload: Dict[str, Any]) -> Dict[str, Any]:
     last_updated = payload.get("lastUpdatedUtc")
     if isinstance(last_updated, str) and last_updated.strip():
         contract["lastUpdatedUtc"] = last_updated.strip()
+
+    job_payload = payload.get("job")
+    if isinstance(job_payload, dict):
+        job_contract: Dict[str, Any] = {}
+
+        job_id = job_payload.get("id")
+        if isinstance(job_id, str) and job_id.strip():
+            job_contract["id"] = job_id.strip()
+
+        job_name_value = job_payload.get("name")
+        if isinstance(job_name_value, str) and job_name_value.strip():
+            job_contract["name"] = job_name_value.strip()
+
+        source_path = job_payload.get("sourcePath")
+        if isinstance(source_path, str) and source_path.strip():
+            job_contract["sourcePath"] = source_path.strip()
+
+        message = job_payload.get("message")
+        if isinstance(message, str) and message.strip():
+            job_contract["message"] = message.strip()
+
+        progress_percent = job_payload.get("progressPercent")
+        if isinstance(progress_percent, (int, float)):
+            job_contract["progressPercent"] = int(round(float(progress_percent)))
+
+        elapsed_seconds = job_payload.get("elapsedSeconds")
+        if isinstance(elapsed_seconds, (int, float)):
+            job_contract["elapsedSeconds"] = max(int(elapsed_seconds), 0)
+
+        remaining_seconds = job_payload.get("estimatedTimeRemainingSeconds")
+        if isinstance(remaining_seconds, (int, float)):
+            job_contract["estimatedTimeRemainingSeconds"] = max(
+                int(remaining_seconds), 0
+            )
+
+        size_bytes = job_payload.get("sizeBytes")
+        size_int = _coerce_int(size_bytes)
+        if size_int is not None:
+            job_contract["sizeBytes"] = size_int
+
+        layers_payload = job_payload.get("layers")
+        if isinstance(layers_payload, dict):
+            layers_contract: Dict[str, Any] = {}
+
+            current_layer = _coerce_int(layers_payload.get("current"))
+            if current_layer is not None:
+                layers_contract["current"] = current_layer
+
+            total_layer = _coerce_int(layers_payload.get("total"))
+            if total_layer is not None:
+                layers_contract["total"] = total_layer
+
+            if layers_contract:
+                job_contract["layers"] = layers_contract
+
+        thumbnail_payload = job_payload.get("thumbnail")
+        if isinstance(thumbnail_payload, dict):
+            thumbnail_contract: Dict[str, Any] = {}
+
+            source = thumbnail_payload.get("sourcePath")
+            if isinstance(source, str) and source.strip():
+                thumbnail_contract["sourcePath"] = source.strip()
+
+            cloud_url = thumbnail_payload.get("cloudUrl")
+            if isinstance(cloud_url, str) and cloud_url.strip():
+                thumbnail_contract["cloudUrl"] = cloud_url.strip()
+            else:
+                thumbnail_contract["cloudUrl"] = None
+
+            width = _coerce_int(thumbnail_payload.get("width"))
+            if width is not None:
+                thumbnail_contract["width"] = width
+
+            height = _coerce_int(thumbnail_payload.get("height"))
+            if height is not None:
+                thumbnail_contract["height"] = height
+
+            size = _coerce_int(thumbnail_payload.get("sizeBytes"))
+            if size is not None:
+                thumbnail_contract["sizeBytes"] = size
+
+            if thumbnail_contract:
+                job_contract["thumbnail"] = thumbnail_contract
+
+        if job_contract:
+            contract["job"] = job_contract
 
     return contract
 
@@ -745,6 +835,16 @@ def _build_contract_events(entries: List[Any]) -> List[Dict[str, Any]]:
         contract_events.append(contract_entry)
 
     return contract_events
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalise_sensor_key(name: str) -> str:
