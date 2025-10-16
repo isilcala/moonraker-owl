@@ -16,7 +16,7 @@ class NormalizedPayloads:
     """Structured payloads ready for publishing to Nexus."""
 
     overview: Optional[Dict[str, Any]] = None
-    telemetry: Optional[Dict[str, Any]] = None
+    metrics: Optional[Dict[str, Any]] = None
     events: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -40,12 +40,12 @@ class TelemetryNormalizer:
         self._apply_payload(payload)
 
         overview_payload = self._build_overview_payload()
-        telemetry_payload = self._build_telemetry_payload()
+        metrics_payload = self._build_telemetry_payload()
         events_payload = self._drain_events()
 
         return NormalizedPayloads(
             overview=overview_payload,
-            telemetry=telemetry_payload,
+            metrics=metrics_payload,
             events=events_payload,
         )
 

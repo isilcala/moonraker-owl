@@ -37,7 +37,7 @@ async def test_link_device_polls_until_success():
         return web.json_response(payload)
 
     app = web.Application()
-    app.router.add_post("/device/link", handler)
+    app.router.add_post("/devices/link", handler)
 
     async with TestServer(app) as server:
         credentials = await link_device(
@@ -67,7 +67,7 @@ async def test_link_device_allows_missing_tenant_id():
         )
 
     app = web.Application()
-    app.router.add_post("/device/link", handler)
+    app.router.add_post("/devices/link", handler)
 
     async with TestServer(app) as server:
         credentials = await link_device(

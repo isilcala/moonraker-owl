@@ -46,7 +46,7 @@ async def link_device(
     if not link_code:
         raise DeviceLinkingError("Link code cannot be empty")
 
-    url = base_url.rstrip("/") + "/device/link"
+    url = base_url.rstrip("/") + "/devices/link"
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 

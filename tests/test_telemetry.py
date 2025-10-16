@@ -135,7 +135,7 @@ def _decode(message: dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_contract_sensors(document: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    telemetry = document.get("telemetry")
+    telemetry = document.get("metrics")
     assert isinstance(telemetry, dict), "Expected telemetry contract object"
     sensors = telemetry.get("sensors")
     assert isinstance(sensors, dict), "Expected telemetry.sensors object"
@@ -172,7 +172,7 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, "token")
     ]
 
-    for channel in ("overview", "telemetry"):
+    for channel in ("overview", "metrics"):
         topic = f"owl/printers/device-123/{channel}"
         assert topic in messages, f"Missing channel {channel}"
         first_message = messages[topic][0]
@@ -180,7 +180,7 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
             first_message["qos"]
             == {
                 "overview": 1,
-                "telemetry": 0,
+                "metrics": 0,
             }[channel]
         )
         document = _decode(first_message)
@@ -198,9 +198,9 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         # Raw field is excluded by default (bandwidth optimization)
         assert "raw" not in document, "Raw field should be excluded by default"
 
-    telemetry_doc = _decode(messages["owl/printers/device-123/telemetry"][0])
+    telemetry_doc = _decode(messages["owl/printers/device-123/metrics"][0])
     assert "temperatures" not in telemetry_doc
-    contract_section = telemetry_doc.get("telemetry")
+    contract_section = telemetry_doc.get("metrics")
     assert isinstance(contract_section, dict)
     sensors = contract_section.get("sensors")
     assert isinstance(sensors, dict) and sensors, "Expected sensor contract payload"
@@ -435,7 +435,7 @@ async def test_subscription_normalizes_field_names() -> None:
         await asyncio.sleep(0.1)
         await publisher.stop()
 
-        telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+        telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
         assert telemetry_messages, "Expected telemetry publish after heater ramp"
         assert len(telemetry_messages) == 1
 
@@ -570,7 +570,7 @@ async def test_temperature_target_preserved_across_updates() -> None:
     await publisher.stop()
 
     # Verify the target was preserved
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
     assert telemetry_messages, "Expected telemetry updates"
 
     document = _decode(telemetry_messages[-1])
@@ -623,7 +623,7 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
 
     await asyncio.sleep(0.1)
 
-    assert mqtt.by_topic().get("owl/printers/device-123/telemetry") is None, (
+    assert mqtt.by_topic().get("owl/printers/device-123/metrics") is None, (
         "Expected fractional change below 1°C to be deduplicated"
     )
 
@@ -645,7 +645,7 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
     await asyncio.sleep(0.1)
     await publisher.stop()
 
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
     assert telemetry_messages, "Expected integer-scale change to publish telemetry"
 
     document = _decode(telemetry_messages[-1])
@@ -741,7 +741,7 @@ async def test_query_on_notification_ensures_target_values():
     )
 
     # Verify MQTT message includes the correct target (from query, not notification)
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
     assert telemetry_messages, "Expected telemetry updates"
 
     document = _decode(telemetry_messages[-1])
@@ -776,7 +776,7 @@ async def test_raw_payload_excluded_by_default():
     await asyncio.sleep(0.2)
 
     # Verify messages were published
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
     assert telemetry_messages, "Expected telemetry messages"
 
     # Check that raw field is NOT present
@@ -788,7 +788,7 @@ async def test_raw_payload_excluded_by_default():
     # Verify normalized data is still present
     assert "deviceId" in document, "Expected device metadata"
     assert document.get("_origin") == EXPECTED_ORIGIN
-    contract = document.get("telemetry")
+    contract = document.get("metrics")
     assert isinstance(contract, dict) and "sensors" in contract
     sensors = contract["sensors"]
     assert isinstance(sensors, dict) and "extruder" in sensors
@@ -816,7 +816,7 @@ async def test_raw_payload_included_when_configured():
     await asyncio.sleep(0.2)
 
     # Verify messages were published
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
     assert telemetry_messages, "Expected telemetry messages"
 
     # Check that raw field IS present
@@ -826,9 +826,11 @@ async def test_raw_payload_included_when_configured():
 
     # Verify normalized data is also present
     assert document.get("_origin") == EXPECTED_ORIGIN
-    contract = document.get("telemetry")
+    contract = document.get("metrics")
     assert isinstance(contract, dict) and "sensors" in contract
     sensors = contract["sensors"]
     assert isinstance(sensors, dict) and "extruder" in sensors
 
     await publisher.stop()
+
+

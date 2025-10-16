@@ -123,13 +123,13 @@ class TelemetryPublisher:
         self._base_topic = f"owl/printers/{self._device_id}"
         self._channel_topics = {
             "overview": f"{self._base_topic}/overview",
-            "telemetry": f"{self._base_topic}/telemetry",
+            "metrics": f"{self._base_topic}/metrics",
             "events": f"{self._base_topic}/events",
         }
         # Hard-coded QoS levels keep MQTT requirements explicit and consistent across deploys.
         self._channel_qos = {
             "overview": 1,
-            "telemetry": 0,
+            "metrics": 0,
             "events": 2,
         }
 
@@ -149,7 +149,7 @@ class TelemetryPublisher:
         self._callback_registered = False
         self._normalizer = TelemetryNormalizer()
         self._hasher = TelemetryHasher()
-        self._state_cache = TelemetryStateCache(("overview", "telemetry"), self._hasher)
+        self._state_cache = TelemetryStateCache(("overview", "metrics"), self._hasher)
         self._sequence_counter: Dict[str, int] = defaultdict(int)
         self._force_full_publish = False
         self._heater_merge_cache: Dict[str, Any] = {}
@@ -190,7 +190,7 @@ class TelemetryPublisher:
 
     @property
     def topic(self) -> str:
-        return self._channel_topics["telemetry"]
+        return self._channel_topics["metrics"]
 
     def request_full_snapshot(self) -> None:
         """Force the next payload batch to be emitted as full snapshots."""
@@ -233,7 +233,7 @@ class TelemetryPublisher:
                         if has_new_details:
                             await self._enqueue({"result": {"status": heater_status}})
                             self._state_cache.force_next_publish(
-                                "telemetry", reason="heater refresh"
+                                "metrics", reason="heater refresh"
                             )
             except Exception as exc:  # pragma: no cover - defensive logging
                 LOGGER.debug("Failed to query heater state: %s", exc)
@@ -261,7 +261,7 @@ class TelemetryPublisher:
                 )
 
                 if not isinstance(previous_snapshot, dict):
-                    cached_payload = self._state_cache.peek_payload("telemetry")
+                    cached_payload = self._state_cache.peek_payload("metrics")
                     contract_match = False
                     if isinstance(cached_payload, dict):
                         sensors = cached_payload.get("sensors")
@@ -388,7 +388,7 @@ class TelemetryPublisher:
             "overview", normalized.overview, raw_json, force_full=force_full
         )
         self._publish_channel(
-            "telemetry", normalized.telemetry, raw_json, force_full=force_full
+            "metrics", normalized.metrics, raw_json, force_full=force_full
         )
 
         if normalized.events:
@@ -461,7 +461,7 @@ class TelemetryPublisher:
         if payload is None:
             return None
 
-        if channel == "telemetry":
+        if channel == "metrics":
             if not isinstance(payload, dict):
                 return None
             contract = _build_contract_telemetry_section(payload)
@@ -516,8 +516,8 @@ class TelemetryPublisher:
             return document
 
         if isinstance(payload, dict):
-            if channel == "telemetry":
-                document["telemetry"] = payload
+            if channel == "metrics":
+                document["metrics"] = payload
             elif channel == "overview":
                 document["overview"] = payload
 
@@ -530,7 +530,7 @@ class TelemetryPublisher:
     def _validate_contract_payload(
         self, channel: str, payload: Union[Dict[str, Any], list[Any]]
     ) -> bool:
-        if channel in {"overview", "telemetry"} and not isinstance(payload, dict):
+        if channel in {"overview", "metrics"} and not isinstance(payload, dict):
             LOGGER.debug(
                 "Rejecting channel %s payload: expected mapping, got %s",
                 channel,
@@ -538,7 +538,7 @@ class TelemetryPublisher:
             )
             return False
 
-        if channel == "telemetry" and isinstance(payload, dict):
+        if channel == "metrics" and isinstance(payload, dict):
             temperatures = payload.get("temperatures")
             if temperatures is not None:
                 if not isinstance(temperatures, list):
