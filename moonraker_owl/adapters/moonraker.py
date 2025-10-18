@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 from typing import Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
@@ -26,7 +27,7 @@ class MoonrakerClient(PrinterAdapter):
         *,
         session: Optional[aiohttp.ClientSession] = None,
         reconnect_initial: float = 1.0,
-        reconnect_max: float = 10.0,
+        reconnect_max: float = 30.0,
     ) -> None:
         self.config = config
         self.reconnect_initial = reconnect_initial
@@ -202,7 +203,17 @@ class MoonrakerClient(PrinterAdapter):
                 if self._stop_event.is_set():
                     break
                 LOGGER.warning("Moonraker websocket error: %s", exc)
-                await asyncio.sleep(backoff)
+                # Apply full jitter to reconnect delay to avoid herd storms. Sleep a random
+                # duration uniformly between 0 and the current backoff value, then increase
+                # the backoff (capped by reconnect_max) for the next attempt.
+                jittered = random.uniform(0, backoff)
+                LOGGER.debug(
+                    "Sleeping %.2fs before reconnect (backoff=%.2fs, cap=%.2fs)",
+                    jittered,
+                    backoff,
+                    self.reconnect_max,
+                )
+                await asyncio.sleep(jittered)
                 backoff = min(backoff * 2, self.reconnect_max)
 
     async def _dispatch(self, raw_data: str) -> None:
