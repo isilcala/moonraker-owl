@@ -48,7 +48,15 @@ class FakeMQTT:
     def unsubscribe(self, topic: str):
         self.unsubscriptions.append(topic)
 
-    def publish(self, topic: str, payload: bytes, qos: int = 0, retain: bool = False):
+    def publish(
+        self,
+        topic: str,
+        payload: bytes,
+        qos: int = 0,
+        retain: bool = False,
+        *,
+        properties=None,
+    ):
         self.published.append((topic, payload, qos, retain))
 
     async def emit(self, topic: str, payload: Dict[str, Any]) -> None:
@@ -106,14 +114,27 @@ async def test_command_processor_executes_action_and_sends_ack(config):
 
     assert mqtt.subscriptions == [("owl/printers/device-123/commands/#", 1)]
 
-    assert len(mqtt.published) == 1
-    topic, payload, qos, retain = mqtt.published[0]
-    body = json.loads(payload.decode("utf-8"))
+    assert len(mqtt.published) == 2
 
+    # First ack confirms receipt
+    topic, payload, qos, retain = mqtt.published[0]
+    accepted = json.loads(payload.decode("utf-8"))
     assert topic == "owl/printers/device-123/acks/pause"
-    assert body["status"] == "success"
-    assert body["commandId"] == "cmd-1"
-    assert "errorCode" not in body
+    assert accepted["status"] == "accepted"
+    assert accepted["commandId"] == "cmd-1"
+    assert accepted["stage"] == "dispatch"
+    assert "reason" not in accepted
+    assert qos == 1
+    assert retain is False
+
+    # Second ack reports final outcome
+    topic, payload, qos, retain = mqtt.published[1]
+    completed = json.loads(payload.decode("utf-8"))
+    assert topic == "owl/printers/device-123/acks/pause"
+    assert completed["status"] == "success"
+    assert completed["stage"] == "execution"
+    assert completed["commandId"] == "cmd-1"
+    assert "reason" not in completed
     assert qos == 1
     assert retain is False
 
@@ -136,10 +157,16 @@ async def test_command_processor_handles_unknown_action(config):
 
     await mqtt.emit("owl/printers/device-123/commands/scrub", message)
 
-    assert len(mqtt.published) == 1
-    body = json.loads(mqtt.published[0][1].decode("utf-8"))
-    assert body["status"] == "failed"
-    assert body["errorCode"] == "unsupported_command"
+    assert len(mqtt.published) == 2
+
+    accepted = json.loads(mqtt.published[0][1].decode("utf-8"))
+    assert accepted["status"] == "accepted"
+    assert accepted["stage"] == "dispatch"
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["stage"] == "execution"
+    assert failed["reason"]["code"] == "unsupported_command"
     assert not moonraker.actions
 
     await processor.stop()
@@ -184,7 +211,7 @@ async def test_command_processor_rejects_invalid_parameters(config):
     assert len(mqtt.published) == 1
     payload = json.loads(mqtt.published[0][1].decode("utf-8"))
     assert payload["status"] == "failed"
-    assert payload["errorCode"] == "invalid_parameters"
+    assert payload.get("reason", {}).get("code") == "invalid_parameters"
 
     await processor.stop()
 

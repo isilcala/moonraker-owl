@@ -125,17 +125,30 @@ class CommandProcessor:
             return
 
         try:
+            await self._publish_ack(
+                command_name,
+                message.command_id,
+                "accepted",
+                stage="dispatch",
+            )
+
             await self._execute(message)
         except CommandProcessingError as exc:
             await self._publish_ack(
                 command_name,
                 message.command_id,
                 "failed",
+                stage="execution",
                 error_code=exc.code or "command_failed",
                 error_message=str(exc),
             )
         else:
-            await self._publish_ack(command_name, message.command_id, "success")
+            await self._publish_ack(
+                command_name,
+                message.command_id,
+                "success",
+                stage="execution",
+            )
 
     async def _execute(self, message: CommandMessage) -> None:
         try:
@@ -157,6 +170,7 @@ class CommandProcessor:
         command_id: Optional[str],
         status: str,
         *,
+        stage: str = "execution",
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
     ) -> None:
@@ -175,14 +189,21 @@ class CommandProcessor:
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
 
+        if stage:
+            document["stage"] = stage
+
         if self._tenant_id:
             document["tenantId"] = self._tenant_id
         if self._printer_id:
             document["printerId"] = self._printer_id
-        if error_code:
-            document["errorCode"] = error_code
-        if error_message:
-            document["errorMessage"] = error_message
+        if error_code or error_message:
+            reason: Dict[str, Any] = {}
+            if error_code:
+                reason["code"] = error_code
+            if error_message:
+                reason["message"] = error_message
+            if reason:
+                document["reason"] = reason
 
         payload = json.dumps(document).encode("utf-8")
         self._mqtt.publish(topic, payload, qos=1, retain=False)
