@@ -21,6 +21,7 @@ from moonraker_owl.config import (
 )
 from moonraker_owl import constants
 from moonraker_owl.telemetry import TelemetryConfigurationError, TelemetryPublisher
+from moonraker_owl.telemetry_normalizer import TelemetryNormalizer
 from moonraker_owl.version import __version__ as PLUGIN_VERSION
 
 EXPECTED_ORIGIN = f"moonraker-owl@{PLUGIN_VERSION}"
@@ -147,6 +148,37 @@ def _get_sensor(document: Dict[str, Any], name: str) -> Dict[str, Any]:
     sensor = sensors.get(name)
     assert isinstance(sensor, dict), f"Expected sensor '{name}'"
     return sensor
+
+
+@pytest.mark.parametrize(
+    ("raw_state", "expected_status"),
+    [
+        ("printing", "Printing"),
+        ("paused", "Paused"),
+        ("cancelling", "Cancelling"),
+        ("cancelled", "Completed"),
+    ],
+)
+def test_normalizer_maps_printer_states(raw_state: str, expected_status: str) -> None:
+    normalizer = TelemetryNormalizer()
+
+    payload = normalizer.ingest(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": raw_state,
+                    }
+                }
+            ],
+        }
+    )
+
+    overview = payload.overview
+    assert overview is not None, "Expected overview payload"
+    assert overview.get("printerStatus") == expected_status
+    assert overview.get("rawStatus") == raw_state.capitalize()
 
 
 @pytest.mark.asyncio
@@ -832,5 +864,3 @@ async def test_raw_payload_included_when_configured():
     assert isinstance(sensors, dict) and "extruder" in sensors
 
     await publisher.stop()
-
-

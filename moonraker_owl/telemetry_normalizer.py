@@ -31,6 +31,7 @@ class TelemetryNormalizer:
         self._temperature_state: Dict[str, Dict[str, Optional[float]]] = {}
         self._last_overview_signature: Optional[tuple[tuple[str, Any], ...]] = None
         self._last_overview_timestamp: Optional[str] = None
+        self._last_raw_status: Optional[str] = None
         self._gcode_temp_pattern = re.compile(
             r"(?P<label>[TB]\d?):\s*(?P<actual>-?\d+(?:\.\d+)?)\s*/\s*(?P<target>-?\d+(?:\.\d+)?)",
             re.IGNORECASE,
@@ -264,6 +265,9 @@ class TelemetryNormalizer:
 
         overview: Dict[str, Any] = {"printerStatus": printer_status}
 
+        if self._last_raw_status:
+            overview["rawStatus"] = self._last_raw_status
+
         progress = job.get("progress") if isinstance(job, dict) else None
         percent: Optional[int] = None
         elapsed: Optional[int] = None
@@ -395,10 +399,20 @@ class TelemetryNormalizer:
             if isinstance(candidate, str):
                 raw_state = candidate
 
+        raw_label: Optional[str]
         if raw_state:
-            normalized = raw_state.strip().lower()
+            raw_label = raw_state.strip()
+            normalized = raw_label.lower()
         else:
+            raw_label = None
             normalized = ""
+
+        if raw_label:
+            formatted_raw = raw_label[0].upper() + raw_label[1:] if raw_label else None
+        else:
+            formatted_raw = None
+
+        self._last_raw_status = formatted_raw
 
         mapping = {
             "printing": "Printing",
@@ -411,7 +425,9 @@ class TelemetryNormalizer:
             "complete": "Completed",
             "completed": "Completed",
             "cancelled": "Completed",
-            "cancelling": "Completed",
+            "canceled": "Completed",
+            "cancelling": "Cancelling",
+            "canceling": "Cancelling",
             "error": "Error",
             "shutdown": "Error",
             "offline": "Offline",
