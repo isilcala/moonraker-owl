@@ -262,11 +262,22 @@ class TelemetryNormalizer:
     def _build_overview_payload(self) -> Optional[Dict[str, Any]]:
         job = _build_job_section(self._status_state, self._file_metadata) or {}
         printer_status = self._resolve_printer_status(job)
+        timelapse_paused = self._resolve_timelapse_paused()
+        idle_timeout_state = self._resolve_idle_timeout_state()
+
+        if timelapse_paused and printer_status == "Paused":
+            printer_status = "Printing"
 
         overview: Dict[str, Any] = {"printerStatus": printer_status}
 
         if self._last_raw_status:
             overview["rawStatus"] = self._last_raw_status
+
+        if timelapse_paused is not None:
+            overview["timelapsePaused"] = timelapse_paused
+
+        if idle_timeout_state:
+            overview["idleTimeoutState"] = idle_timeout_state
 
         progress = job.get("progress") if isinstance(job, dict) else None
         percent: Optional[int] = None
@@ -384,6 +395,36 @@ class TelemetryNormalizer:
             overview["lastUpdatedUtc"] = self._last_overview_timestamp
 
         return overview
+
+    def _resolve_idle_timeout_state(self) -> Optional[str]:
+        idle_timeout = self._status_state.get("idle_timeout")
+        if not isinstance(idle_timeout, dict):
+            return None
+
+        state = idle_timeout.get("state")
+        if isinstance(state, str) and state.strip():
+            return state.strip()
+
+        return None
+
+    def _resolve_timelapse_paused(self) -> Optional[bool]:
+        macro = self._status_state.get("gcode_macro TIMELAPSE_TAKE_FRAME")
+        if not isinstance(macro, dict):
+            return None
+
+        candidate = macro.get("is_paused")
+        if isinstance(candidate, bool):
+            return candidate
+        if isinstance(candidate, (int, float)):
+            return bool(candidate)
+        if isinstance(candidate, str):
+            normalized = candidate.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+
+        return None
 
     def _resolve_printer_status(self, job: Dict[str, Any]) -> str:
         print_stats = self._status_state.get("print_stats")
