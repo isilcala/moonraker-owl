@@ -9,7 +9,7 @@ async def test_health_reporter_snapshot():
     reporter = HealthReporter()
 
     await reporter.update("mqtt", True)
-    await reporter.update("metrics", False, "stopped")
+    await reporter.update("sensors", False, "stopped")
 
     snapshot = await reporter.snapshot()
 
@@ -18,8 +18,8 @@ async def test_health_reporter_snapshot():
     assert isinstance(component_list, list)
     components = {item["name"]: item for item in component_list}
     assert components["mqtt"]["healthy"] is True
-    assert components["metrics"]["healthy"] is False
-    assert components["metrics"]["detail"] == "stopped"
+    assert components["sensors"]["healthy"] is False
+    assert components["sensors"]["detail"] == "stopped"
 
 
 @pytest.mark.asyncio
@@ -40,4 +40,3 @@ async def test_health_server_serves_snapshot(unused_tcp_port):
                 assert payload["status"] == "ok"
     finally:
         await server.stop()
-

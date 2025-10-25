@@ -428,11 +428,18 @@ class TelemetryNormalizer:
 
     def _resolve_printer_status(self, job: Dict[str, Any]) -> str:
         """
-        Resolve and normalize printer status from Moonraker.
-        Returns normalized status matching backend PrinterRunState enum.
-        
-        Normalization ensures the backend can use simple string matching instead
-        of complex heuristics. Agent owns the semantic mapping.
+        Resolve printer status using Mainsail/Obico-style context-aware detection.
+
+        Priority order:
+        1. Explicit print states (printing, paused, cancelled, etc.)
+        2. Error/shutdown states
+        3. Heating detection (ready/standby + heater targets)
+        4. Job context (ready/standby + active job file)
+        5. Idle timeout override (Klipper macro support)
+        6. Default idle state
+
+        Matches Mainsail behavior for heating phase detection and
+        Obico behavior for job-loaded detection.
         """
         print_stats = self._status_state.get("print_stats")
         raw_state: Optional[str] = None
@@ -447,45 +454,167 @@ class TelemetryNormalizer:
             if isinstance(candidate, str):
                 raw_state = candidate
 
-        raw_label: Optional[str]
+        # Preserve raw status for debugging
         if raw_state:
             raw_label = raw_state.strip()
             normalized = raw_label.lower()
+            formatted_raw = raw_label[0].upper() + raw_label[1:] if raw_label else None
         else:
             raw_label = None
             normalized = ""
-
-        if raw_label:
-            formatted_raw = raw_label[0].upper() + raw_label[1:] if raw_label else None
-        else:
             formatted_raw = None
 
         self._last_raw_status = formatted_raw
 
-        # Normalize to backend PrinterRunState enum values (exact case matching)
-        # This ensures backend can use direct string comparison without heuristics
-        # Maps Moonraker states to standardized values: Idle, Printing, Paused, 
-        # Cancelling, Completed, Error, Unknown
-        mapping = {
-            "printing": "Printing",
-            "resuming": "Printing",      # Transition state → Printing
-            "pausing": "Paused",         # Transition state → Paused
-            "paused": "Paused",
-            "standby": "Idle",
-            "ready": "Idle",
-            "idle": "Idle",
-            "complete": "Completed",
-            "completed": "Completed",
-            "cancelled": "Completed",
-            "canceled": "Completed",
-            "cancelling": "Cancelling",
-            "canceling": "Cancelling",
-            "error": "Error",
-            "shutdown": "Error",
-            "offline": "Offline",
-        }
+        # ═══════════════════════════════════════════════════════════
+        # Priority 1: Explicit Print States
+        # ═══════════════════════════════════════════════════════════
+        if normalized in {"printing", "resuming"}:
+            return "Printing"
 
-        return mapping.get(normalized, "Unknown")
+        if normalized == "paused":
+            # Check timelapse pause override (Mainsail behavior)
+            timelapse_paused = self._resolve_timelapse_paused()
+            if timelapse_paused:
+                return "Printing"  # Timelapse pause is still printing
+            return "Paused"
+
+        if normalized in {"cancelling", "canceling"}:
+            return "Cancelling"
+
+        # Map cancelled spelling to Cancelled (explicit, not Completed)
+        if normalized in {"cancelled", "canceled"}:
+            return "Cancelled"
+
+        if normalized in {"complete", "completed"}:
+            return "Completed"
+
+        # ═══════════════════════════════════════════════════════════
+        # Priority 2: Error States
+        # ═══════════════════════════════════════════════════════════
+        if normalized in {"error", "shutdown"}:
+            return "Error"
+
+        if normalized == "offline":
+            return "Offline"
+
+        # ═══════════════════════════════════════════════════════════
+        # Priority 3: Ambiguous States (ready/standby/idle)
+        # Apply Mainsail/Obico heuristics
+        # ═══════════════════════════════════════════════════════════
+        if normalized in {"standby", "ready", "idle"}:
+            # Check 1: Heating for print (Mainsail behavior)
+            if self._is_heating_for_print():
+                return "Printing"
+
+            # Check 2: Active job loaded (Obico behavior)
+            if self._has_active_job(job):
+                return "Printing"
+
+            # Check 3: Idle timeout state override (Klipper macro support)
+            idle_timeout_state = self._resolve_idle_timeout_state()
+            if idle_timeout_state and idle_timeout_state.lower() == "printing":
+                return "Printing"
+
+            # Default: Actually idle
+            return "Idle"
+
+        # ═══════════════════════════════════════════════════════════
+        # Fallback: Unknown state
+        # ═══════════════════════════════════════════════════════════
+        return "Unknown"
+
+    def _is_heating_for_print(self) -> bool:
+        """
+        Detect if printer is heating bed/extruder in preparation for a print.
+
+        Matches Mainsail behavior: Any heater with target > threshold is "heating".
+
+        Returns:
+            True if extruder target > 40°C OR bed target > 40°C
+            AND current temp is significantly below target (>5°C delta)
+        """
+        HEATING_THRESHOLD = 40.0  # °C - minimum target to consider "heating"
+        HEATING_DELTA = 5.0  # °C - minimum delta to consider "in progress"
+
+        # Check extruder
+        extruder = self._status_state.get("extruder")
+        if isinstance(extruder, dict):
+            target = _safe_float(extruder.get("target"))
+            actual = _safe_float(extruder.get("temperature"))
+
+            if target is not None and target > HEATING_THRESHOLD:
+                if actual is None or (target - actual) > HEATING_DELTA:
+                    return True  # Heating extruder for print
+
+        # Check heated bed
+        heater_bed = self._status_state.get("heater_bed")
+        if isinstance(heater_bed, dict):
+            target = _safe_float(heater_bed.get("target"))
+            actual = _safe_float(heater_bed.get("temperature"))
+
+            if target is not None and target > HEATING_THRESHOLD:
+                if actual is None or (target - actual) > HEATING_DELTA:
+                    return True  # Heating bed for print
+
+        # Check generic heaters (e.g., chamber)
+        for key, value in self._status_state.items():
+            if not isinstance(value, dict):
+                continue
+            if not key.startswith("heater_generic"):
+                continue
+
+            target = _safe_float(value.get("target"))
+            actual = _safe_float(value.get("temperature"))
+
+            if target is not None and target > HEATING_THRESHOLD:
+                if actual is None or (target - actual) > HEATING_DELTA:
+                    return True
+
+        return False
+
+    def _has_active_job(self, job: Dict[str, Any]) -> bool:
+        """
+        Check if a print job is actively loaded (Obico behavior).
+
+        A job is "active" if:
+            - Filename is present
+            - Progress > 0% OR elapsed time > 0
+
+        This catches cases where Moonraker reports "ready" but a job
+        is actually in progress (rare edge case).
+
+        Args:
+            job: Job section from _build_job_section
+
+        Returns:
+            True if job is loaded and has made progress
+        """
+        if not isinstance(job, dict):
+            return False
+
+        # Check 1: Has filename
+        file_info = job.get("file")
+        if not isinstance(file_info, dict):
+            return False
+
+        filename = file_info.get("name") or file_info.get("path")
+        if not isinstance(filename, str) or not filename.strip():
+            return False
+
+        # Check 2: Has progress or elapsed time
+        progress = job.get("progress")
+        if isinstance(progress, dict):
+            percent = progress.get("percent")
+            elapsed = progress.get("elapsedSeconds")
+
+            # Job has started if progress > 0 or time elapsed
+            if isinstance(percent, (int, float)) and percent > 0:
+                return True
+            if isinstance(elapsed, (int, float)) and elapsed > 0:
+                return True
+
+        return False
 
     def _build_sensors_payload(self) -> Optional[Dict[str, Any]]:
         toolhead = _build_toolhead_section(self._status_state)
