@@ -16,7 +16,7 @@ class NormalizedPayloads:
     """Structured payloads ready for publishing to Nexus."""
 
     overview: Optional[Dict[str, Any]] = None
-    metrics: Optional[Dict[str, Any]] = None
+    sensors: Optional[Dict[str, Any]] = None
     events: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -41,12 +41,12 @@ class TelemetryNormalizer:
         self._apply_payload(payload)
 
         overview_payload = self._build_overview_payload()
-        metrics_payload = self._build_telemetry_payload()
+        sensors_payload = self._build_sensors_payload()
         events_payload = self._drain_events()
 
         return NormalizedPayloads(
             overview=overview_payload,
-            metrics=metrics_payload,
+            sensors=sensors_payload,
             events=events_payload,
         )
 
@@ -427,6 +427,13 @@ class TelemetryNormalizer:
         return None
 
     def _resolve_printer_status(self, job: Dict[str, Any]) -> str:
+        """
+        Resolve and normalize printer status from Moonraker.
+        Returns normalized status matching backend PrinterRunState enum.
+        
+        Normalization ensures the backend can use simple string matching instead
+        of complex heuristics. Agent owns the semantic mapping.
+        """
         print_stats = self._status_state.get("print_stats")
         raw_state: Optional[str] = None
 
@@ -455,10 +462,14 @@ class TelemetryNormalizer:
 
         self._last_raw_status = formatted_raw
 
+        # Normalize to backend PrinterRunState enum values (exact case matching)
+        # This ensures backend can use direct string comparison without heuristics
+        # Maps Moonraker states to standardized values: Idle, Printing, Paused, 
+        # Cancelling, Completed, Error, Unknown
         mapping = {
             "printing": "Printing",
-            "resuming": "Printing",
-            "pausing": "Paused",
+            "resuming": "Printing",      # Transition state → Printing
+            "pausing": "Paused",         # Transition state → Paused
             "paused": "Paused",
             "standby": "Idle",
             "ready": "Idle",
@@ -474,9 +485,9 @@ class TelemetryNormalizer:
             "offline": "Offline",
         }
 
-        return mapping.get(normalized, "Idle")
+        return mapping.get(normalized, "Unknown")
 
-    def _build_telemetry_payload(self) -> Optional[Dict[str, Any]]:
+    def _build_sensors_payload(self) -> Optional[Dict[str, Any]]:
         toolhead = _build_toolhead_section(self._status_state)
         temperatures = _build_temperature_section(
             self._status_state, self._temperature_state
