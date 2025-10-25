@@ -136,12 +136,7 @@ def _decode(message: dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_contract_sensors(document: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    telemetry = document.get("sensors")
-    assert isinstance(telemetry, dict), "Expected telemetry contract object"
-    # Allow either top-level 'sensors' contract or nested {"sensors": {...}} payload
-    sensors = (
-        telemetry.get("sensors") if telemetry.get("sensors") is not None else telemetry
-    )
+    sensors = document.get("sensors")
     assert isinstance(sensors, dict), "Expected telemetry.sensors object"
     return sensors
 

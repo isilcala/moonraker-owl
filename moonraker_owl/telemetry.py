@@ -668,7 +668,7 @@ def _build_contract_telemetry_section(payload: Dict[str, Any]) -> Dict[str, Any]
 
         sensors.setdefault(sensor_key, {}).update(_prune_none(sensor_payload))
 
-    return {"sensors": sensors}
+    return sensors
 
 
 def _build_contract_overview_section(payload: Dict[str, Any]) -> Dict[str, Any]:
