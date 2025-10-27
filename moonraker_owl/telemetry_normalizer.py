@@ -36,6 +36,8 @@ class TelemetryNormalizer:
         )
         self._last_terminal_state: Optional[tuple[str, datetime]] = None
         self._terminal_state_ttl = timedelta(seconds=10)
+        self._current_print_state: Optional[str] = None
+        self._previous_print_state: Optional[str] = None
 
     def ingest(self, payload: Dict[str, Any]) -> NormalizedPayloads:
         self._apply_payload(payload)
@@ -469,16 +471,13 @@ class TelemetryNormalizer:
         Matches Mainsail behavior for heating phase detection and
         Obico behavior for job-loaded detection.
         """
-        print_stats = self._status_state.get("print_stats")
         raw_state: Optional[str] = None
 
-        if isinstance(print_stats, dict):
-            candidate = print_stats.get("state")
-            if isinstance(candidate, str):
-                raw_state = candidate
+        if isinstance(self._current_print_state, str):
+            raw_state = self._current_print_state
 
-        if raw_state is None:
-            candidate = job.get("status") if isinstance(job, dict) else None
+        if raw_state is None and isinstance(job, dict):
+            candidate = job.get("status")
             if isinstance(candidate, str):
                 raw_state = candidate
 
@@ -527,6 +526,10 @@ class TelemetryNormalizer:
         # Apply Mainsail/Obico heuristics
         # ═══════════════════════════════════════════════════════════
         if normalized in {"standby", "ready", "idle"}:
+            if self._has_active_job(job):
+                self._last_terminal_state = None
+                return "Printing"
+
             last_terminal = self._last_terminal_state
             if last_terminal is not None:
                 state_value, observed_at = last_terminal
@@ -540,11 +543,6 @@ class TelemetryNormalizer:
             # # Check 1: Heating for print (Mainsail behavior)
             # if self._is_heating_for_print():
             #     return "Printing"
-
-            # Check 2: Active job loaded (Obico behavior)
-            if self._has_active_job(job):
-                return "Printing"
-
             # # Check 3: Idle timeout state override (Klipper macro support)
             # idle_timeout_state = self._resolve_idle_timeout_state()
             # if idle_timeout_state and idle_timeout_state.lower() == "printing":
@@ -563,6 +561,9 @@ class TelemetryNormalizer:
             return
 
         normalized = state.strip().lower()
+        if normalized != self._current_print_state:
+            self._previous_print_state = self._current_print_state
+            self._current_print_state = normalized
         if not normalized:
             return
 

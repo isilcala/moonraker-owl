@@ -244,6 +244,53 @@ def test_normalizer_handles_print_stats_dict_params() -> None:
     assert print_stats_state == "printing"
 
 
+def test_cancelled_overrides_prior_paused_state() -> None:
+    normalizer = TelemetryNormalizer()
+
+    normalizer.ingest(
+        {
+            "result": {
+                "status": {
+                    "print_stats": {"state": "paused"},
+                }
+            }
+        }
+    )
+
+    cancelled = normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [{"state": "cancelled"}],
+        }
+    )
+
+    overview = cancelled.overview
+    assert overview is not None
+    assert overview.get("printerStatus") == "Cancelled"
+
+
+def test_status_update_reports_cancelled() -> None:
+    normalizer = TelemetryNormalizer()
+
+    payload = normalizer.ingest(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "cancelled",
+                        "message": "",
+                    }
+                }
+            ],
+        }
+    )
+
+    overview = payload.overview
+    assert overview is not None
+    assert overview.get("printerStatus") == "Cancelled"
+
+
 def test_cancelled_state_persists_briefly(monkeypatch) -> None:
     normalizer = TelemetryNormalizer()
 
@@ -338,6 +385,54 @@ def test_terminal_state_clears_on_printing(monkeypatch) -> None:
 
     assert printing.overview is not None
     assert printing.overview.get("printerStatus") == "Printing"
+
+
+def test_active_job_overrides_cancelled_latch(monkeypatch) -> None:
+    normalizer = TelemetryNormalizer()
+
+    base_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    timeline = [
+        base_time,
+        base_time,
+        base_time + timedelta(seconds=1),
+        base_time + timedelta(seconds=1),
+    ]
+
+    class FakeDateTime(datetime):  # type: ignore[misc]
+        _index = -1
+
+        @classmethod
+        def now(cls, tz=None):
+            cls._index += 1
+            value = timeline[min(cls._index, len(timeline) - 1)]
+            if tz is not None:
+                return value if value.tzinfo else value.replace(tzinfo=tz)
+            return value
+
+    monkeypatch.setattr(telemetry_normalizer, "datetime", FakeDateTime)
+
+    normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [{"state": "cancelled"}],
+        }
+    )
+
+    job_loaded = normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [
+                {
+                    "state": "standby",
+                    "filename": "test.gcode",
+                    "message": "Ready",
+                }
+            ],
+        }
+    )
+
+    assert job_loaded.overview is not None
+    assert job_loaded.overview.get("printerStatus") == "Printing"
 
 
 def test_overview_last_updated_refreshes_without_changes(monkeypatch) -> None:
