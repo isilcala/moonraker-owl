@@ -3,6 +3,7 @@
 import asyncio
 import json
 from configparser import ConfigParser
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -22,6 +23,7 @@ from moonraker_owl.config import (
 from moonraker_owl import constants
 from moonraker_owl.telemetry import TelemetryConfigurationError, TelemetryPublisher
 from moonraker_owl.telemetry_normalizer import TelemetryNormalizer
+import moonraker_owl.telemetry_normalizer as telemetry_normalizer
 from moonraker_owl.version import __version__ as PLUGIN_VERSION
 
 EXPECTED_ORIGIN = f"moonraker-owl@{PLUGIN_VERSION}"
@@ -176,7 +178,209 @@ def test_normalizer_maps_printer_states(raw_state: str, expected_status: str) ->
     overview = payload.overview
     assert overview is not None, "Expected overview payload"
     assert overview.get("printerStatus") == expected_status
-    assert overview.get("rawStatus") == raw_state.capitalize()
+    assert "rawStatus" not in overview
+
+
+@pytest.mark.parametrize(
+    ("raw_state", "expected_status"),
+    [
+        ("printing", "Printing"),
+        ("paused", "Paused"),
+        ("cancelled", "Cancelled"),
+    ],
+)
+def test_normalizer_maps_print_stats_update_states(
+    raw_state: str, expected_status: str
+) -> None:
+    normalizer = TelemetryNormalizer()
+
+    payload = normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [
+                {
+                    "state": raw_state,
+                }
+            ],
+        }
+    )
+
+    overview = payload.overview
+    assert overview is not None, "Expected overview payload"
+    assert overview.get("printerStatus") == expected_status
+
+
+def test_normalizer_handles_tuple_style_print_stats_payload() -> None:
+    normalizer = TelemetryNormalizer()
+
+    payload = normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [["print_stats", {"state": "printing"}]],
+        }
+    )
+
+    overview = payload.overview
+    assert overview is not None
+    assert overview.get("printerStatus") == "Printing"
+    print_stats_state = normalizer._status_state.get("print_stats", {}).get("state")  # type: ignore[attr-defined]
+    assert print_stats_state == "printing"
+
+
+def test_normalizer_handles_print_stats_dict_params() -> None:
+    normalizer = TelemetryNormalizer()
+
+    payload = normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": {"print_stats": {"state": "printing"}},
+        }
+    )
+
+    overview = payload.overview
+    assert overview is not None
+    assert overview.get("printerStatus") == "Printing"
+    print_stats_state = normalizer._status_state.get("print_stats", {}).get("state")  # type: ignore[attr-defined]
+    assert print_stats_state == "printing"
+
+
+def test_cancelled_state_persists_briefly(monkeypatch) -> None:
+    normalizer = TelemetryNormalizer()
+
+    base_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    timeline = [
+        base_time,
+        base_time,
+        base_time + timedelta(seconds=1),
+        base_time + timedelta(seconds=1),
+        base_time + timedelta(seconds=20),
+        base_time + timedelta(seconds=20),
+    ]
+
+    class FakeDateTime(datetime):  # type: ignore[misc]
+        _index = -1
+
+        @classmethod
+        def now(cls, tz=None):
+            cls._index += 1
+            value = timeline[min(cls._index, len(timeline) - 1)]
+            if tz is not None:
+                return value if value.tzinfo else value.replace(tzinfo=tz)
+            return value
+
+    monkeypatch.setattr(telemetry_normalizer, "datetime", FakeDateTime)
+
+    cancelled = normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [{"state": "cancelled"}],
+        }
+    )
+    assert cancelled.overview is not None
+    assert cancelled.overview.get("printerStatus") == "Cancelled"
+
+    standby_recent = normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [{"state": "standby"}],
+        }
+    )
+    assert standby_recent.overview is not None
+    assert standby_recent.overview.get("printerStatus") == "Cancelled"
+
+    standby_late = normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [{"state": "standby"}],
+        }
+    )
+    assert standby_late.overview is not None
+    assert standby_late.overview.get("printerStatus") == "Idle"
+
+
+def test_terminal_state_clears_on_printing(monkeypatch) -> None:
+    normalizer = TelemetryNormalizer()
+
+    base_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    timeline = [
+        base_time,
+        base_time,
+        base_time + timedelta(seconds=2),
+        base_time + timedelta(seconds=2),
+    ]
+
+    class FakeDateTime(datetime):  # type: ignore[misc]
+        _index = -1
+
+        @classmethod
+        def now(cls, tz=None):
+            cls._index += 1
+            value = timeline[min(cls._index, len(timeline) - 1)]
+            if tz is not None:
+                return value if value.tzinfo else value.replace(tzinfo=tz)
+            return value
+
+    monkeypatch.setattr(telemetry_normalizer, "datetime", FakeDateTime)
+
+    normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [{"state": "cancelled"}],
+        }
+    )
+
+    printing = normalizer.ingest(
+        {
+            "method": "notify_print_stats_update",
+            "params": [{"state": "printing"}],
+        }
+    )
+
+    assert printing.overview is not None
+    assert printing.overview.get("printerStatus") == "Printing"
+
+
+def test_overview_last_updated_refreshes_without_changes(monkeypatch) -> None:
+    normalizer = TelemetryNormalizer()
+
+    payload = {
+        "method": "notify_status_update",
+        "params": [
+            {
+                "status": {
+                    "print_stats": {
+                        "state": "printing",
+                    }
+                }
+            }
+        ],
+    }
+
+    base_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    later_time = base_time + timedelta(seconds=5)
+    timeline = [base_time, later_time]
+
+    class FakeDateTime(datetime):  # type: ignore[misc]
+        _call_index = -1
+
+        @classmethod
+        def now(cls, tz=None):
+            cls._call_index += 1
+            value = timeline[min(cls._call_index, len(timeline) - 1)]
+            if tz is not None:
+                return value if value.tzinfo else value.replace(tzinfo=tz)
+            return value
+
+    monkeypatch.setattr(telemetry_normalizer, "datetime", FakeDateTime)
+
+    first_overview = normalizer.ingest(payload).overview
+    assert first_overview is not None
+    second_overview = normalizer.ingest(payload).overview
+    assert second_overview is not None
+
+    assert first_overview.get("lastUpdatedUtc") is not None
+    assert second_overview.get("lastUpdatedUtc") is not None
+    assert second_overview["lastUpdatedUtc"] != first_overview["lastUpdatedUtc"]
 
 
 @pytest.mark.asyncio

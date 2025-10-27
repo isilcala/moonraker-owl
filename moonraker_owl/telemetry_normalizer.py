@@ -29,13 +29,13 @@ class TelemetryNormalizer:
         self._file_metadata: Dict[str, Any] = {}
         self._pending_events: List[Dict[str, Any]] = []
         self._temperature_state: Dict[str, Dict[str, Optional[float]]] = {}
-        self._last_overview_signature: Optional[tuple[tuple[str, Any], ...]] = None
         self._last_overview_timestamp: Optional[str] = None
-        self._last_raw_status: Optional[str] = None
         self._gcode_temp_pattern = re.compile(
             r"(?P<label>[TB]\d?):\s*(?P<actual>-?\d+(?:\.\d+)?)\s*/\s*(?P<target>-?\d+(?:\.\d+)?)",
             re.IGNORECASE,
         )
+        self._last_terminal_state: Optional[tuple[str, datetime]] = None
+        self._terminal_state_ttl = timedelta(seconds=10)
 
     def ingest(self, payload: Dict[str, Any]) -> NormalizedPayloads:
         self._apply_payload(payload)
@@ -59,25 +59,60 @@ class TelemetryNormalizer:
             status = result.get("status")
             if isinstance(status, dict):
                 _deep_merge(self._status_state, status)
+                self._update_terminal_state(
+                    _extract_state_value(status.get("print_stats"))
+                )
 
         method = payload.get("method")
         params = payload.get("params")
+        entries: List[Any] = []
         if isinstance(params, list):
-            for entry in params:
-                if not isinstance(entry, dict):
-                    continue
+            entries = params
+        elif isinstance(params, dict):
+            entries = [params]
 
-                status = entry.get("status")
-                if isinstance(status, dict):
-                    _deep_merge(self._status_state, status)
-                elif method == "notify_status_update" and entry:
-                    # Some Moonraker builds emit status fields directly without a wrapper.
-                    _deep_merge(self._status_state, entry)
-
-                self._capture_proc_stats(entry)
-                self._capture_file_metadata(entry)
+        for entry in entries:
+            self._apply_param_entry(method, entry)
 
         self._capture_events(method, params)
+
+    def _apply_param_entry(self, method: Optional[str], entry: Any) -> None:
+        if isinstance(entry, dict):
+            status = entry.get("status")
+            if isinstance(status, dict):
+                _deep_merge(self._status_state, status)
+                self._update_terminal_state(
+                    _extract_state_value(status.get("print_stats"))
+                )
+            elif method == "notify_status_update":
+                # Some Moonraker builds emit status fields directly without a wrapper.
+                _deep_merge(self._status_state, entry)
+                self._update_terminal_state(_extract_state_value(entry))
+
+            print_stats = entry.get("print_stats")
+            if isinstance(print_stats, dict):
+                # Moonraker often sends print_stats updates outside the status wrapper.
+                target = self._status_state.setdefault("print_stats", {})
+                _deep_merge(target, print_stats)
+                self._update_terminal_state(_extract_state_value(print_stats))
+            elif method == "notify_print_stats_update":
+                target = self._status_state.setdefault("print_stats", {})
+                _deep_merge(target, entry)
+                self._update_terminal_state(_extract_state_value(entry))
+
+            self._capture_proc_stats(entry)
+            self._capture_file_metadata(entry)
+            return
+
+        if method == "notify_print_stats_update" and isinstance(entry, (list, tuple)):
+            if (
+                len(entry) == 2
+                and entry[0] == "print_stats"
+                and isinstance(entry[1], dict)
+            ):
+                target = self._status_state.setdefault("print_stats", {})
+                _deep_merge(target, entry[1])
+                self._update_terminal_state(_extract_state_value(entry[1]))
 
     def _capture_proc_stats(self, entry: Dict[str, Any]) -> None:
         for key in (
@@ -270,9 +305,6 @@ class TelemetryNormalizer:
 
         overview: Dict[str, Any] = {"printerStatus": printer_status}
 
-        if self._last_raw_status:
-            overview["rawStatus"] = self._last_raw_status
-
         # if timelapse_paused is not None:
         #     overview["timelapsePaused"] = timelapse_paused
 
@@ -384,15 +416,11 @@ class TelemetryNormalizer:
         if sub_status:
             overview["subStatus"] = sub_status
 
-        signature = tuple(sorted(overview.items()))
-        if signature != self._last_overview_signature:
-            self._last_overview_signature = signature
-            self._last_overview_timestamp = datetime.now(timezone.utc).isoformat(
-                timespec="seconds"
-            )
-
-        if self._last_overview_timestamp:
-            overview["lastUpdatedUtc"] = self._last_overview_timestamp
+        # Refresh heartbeat on every publish so connectivity checks remain accurate.
+        self._last_overview_timestamp = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        overview["lastUpdatedUtc"] = self._last_overview_timestamp
 
         return overview
 
@@ -454,17 +482,13 @@ class TelemetryNormalizer:
             if isinstance(candidate, str):
                 raw_state = candidate
 
-        # Preserve raw status for debugging
+        # Normalize status for downstream mapping
         if raw_state:
             raw_label = raw_state.strip()
             normalized = raw_label.lower()
-            formatted_raw = raw_label[0].upper() + raw_label[1:] if raw_label else None
         else:
             raw_label = None
             normalized = ""
-            formatted_raw = None
-
-        self._last_raw_status = formatted_raw
 
         # ═══════════════════════════════════════════════════════════
         # Priority 1: Explicit Print States
@@ -503,6 +527,16 @@ class TelemetryNormalizer:
         # Apply Mainsail/Obico heuristics
         # ═══════════════════════════════════════════════════════════
         if normalized in {"standby", "ready", "idle"}:
+            last_terminal = self._last_terminal_state
+            if last_terminal is not None:
+                state_value, observed_at = last_terminal
+                if datetime.now(timezone.utc) - observed_at <= self._terminal_state_ttl:
+                    mapped = self._map_terminal_status(state_value)
+                    if mapped is not None:
+                        return mapped
+                else:
+                    self._last_terminal_state = None
+
             # # Check 1: Heating for print (Mainsail behavior)
             # if self._is_heating_for_print():
             #     return "Printing"
@@ -523,6 +557,48 @@ class TelemetryNormalizer:
         # Fallback: Unknown state
         # ═══════════════════════════════════════════════════════════
         return "Unknown"
+
+    def _update_terminal_state(self, state: Optional[str]) -> None:
+        if not isinstance(state, str):
+            return
+
+        normalized = state.strip().lower()
+        if not normalized:
+            return
+
+        terminal_states = {
+            "cancelled",
+            "canceled",
+            "complete",
+            "completed",
+            "error",
+            "shutdown",
+        }
+        active_states = {
+            "printing",
+            "resuming",
+            "paused",
+            "cancelling",
+            "canceling",
+        }
+
+        if normalized in terminal_states:
+            self._last_terminal_state = (normalized, datetime.now(timezone.utc))
+        elif normalized in active_states:
+            self._last_terminal_state = None
+
+    @staticmethod
+    def _map_terminal_status(state: str) -> Optional[str]:
+        normalized = state.strip().lower()
+        mapping = {
+            "cancelled": "Cancelled",
+            "canceled": "Cancelled",
+            "completed": "Completed",
+            "complete": "Completed",
+            "error": "Error",
+            "shutdown": "Error",
+        }
+        return mapping.get(normalized)
 
     def _is_heating_for_print(self) -> bool:
         """
@@ -1046,3 +1122,13 @@ def _coerce_int(value: Any) -> Optional[int]:
 def _deep_merge(target: Dict[str, Any], updates: Dict[str, Any]) -> None:
     """Legacy wrapper for shared deep_merge utility."""
     deep_merge(target, updates)
+
+
+def _extract_state_value(candidate: Any) -> Optional[str]:
+    if isinstance(candidate, dict):
+        state = candidate.get("state")
+        if isinstance(state, str):
+            return state
+    if isinstance(candidate, str):
+        return candidate
+    return None
