@@ -262,22 +262,22 @@ class TelemetryNormalizer:
     def _build_overview_payload(self) -> Optional[Dict[str, Any]]:
         job = _build_job_section(self._status_state, self._file_metadata) or {}
         printer_status = self._resolve_printer_status(job)
-        timelapse_paused = self._resolve_timelapse_paused()
-        idle_timeout_state = self._resolve_idle_timeout_state()
+        # timelapse_paused = self._resolve_timelapse_paused()
+        # idle_timeout_state = self._resolve_idle_timeout_state()
 
-        if timelapse_paused and printer_status == "Paused":
-            printer_status = "Printing"
+        # if timelapse_paused and printer_status == "Paused":
+        #     printer_status = "Printing"
 
         overview: Dict[str, Any] = {"printerStatus": printer_status}
 
         if self._last_raw_status:
             overview["rawStatus"] = self._last_raw_status
 
-        if timelapse_paused is not None:
-            overview["timelapsePaused"] = timelapse_paused
+        # if timelapse_paused is not None:
+        #     overview["timelapsePaused"] = timelapse_paused
 
-        if idle_timeout_state:
-            overview["idleTimeoutState"] = idle_timeout_state
+        # if idle_timeout_state:
+        #     overview["idleTimeoutState"] = idle_timeout_state
 
         progress = job.get("progress") if isinstance(job, dict) else None
         percent: Optional[int] = None
@@ -407,24 +407,24 @@ class TelemetryNormalizer:
 
         return None
 
-    def _resolve_timelapse_paused(self) -> Optional[bool]:
-        macro = self._status_state.get("gcode_macro TIMELAPSE_TAKE_FRAME")
-        if not isinstance(macro, dict):
-            return None
+    # def _resolve_timelapse_paused(self) -> Optional[bool]:
+    #     macro = self._status_state.get("gcode_macro TIMELAPSE_TAKE_FRAME")
+    #     if not isinstance(macro, dict):
+    #         return None
 
-        candidate = macro.get("is_paused")
-        if isinstance(candidate, bool):
-            return candidate
-        if isinstance(candidate, (int, float)):
-            return bool(candidate)
-        if isinstance(candidate, str):
-            normalized = candidate.strip().lower()
-            if normalized in {"true", "1", "yes", "on"}:
-                return True
-            if normalized in {"false", "0", "no", "off"}:
-                return False
+    #     candidate = macro.get("is_paused")
+    #     if isinstance(candidate, bool):
+    #         return candidate
+    #     if isinstance(candidate, (int, float)):
+    #         return bool(candidate)
+    #     if isinstance(candidate, str):
+    #         normalized = candidate.strip().lower()
+    #         if normalized in {"true", "1", "yes", "on"}:
+    #             return True
+    #         if normalized in {"false", "0", "no", "off"}:
+    #             return False
 
-        return None
+    #     return None
 
     def _resolve_printer_status(self, job: Dict[str, Any]) -> str:
         """
@@ -473,10 +473,10 @@ class TelemetryNormalizer:
             return "Printing"
 
         if normalized == "paused":
-            # Check timelapse pause override (Mainsail behavior)
-            timelapse_paused = self._resolve_timelapse_paused()
-            if timelapse_paused:
-                return "Printing"  # Timelapse pause is still printing
+            # # Check timelapse pause override (Mainsail behavior)
+            # timelapse_paused = self._resolve_timelapse_paused()
+            # if timelapse_paused:
+            #     return "Printing"  # Timelapse pause is still printing
             return "Paused"
 
         if normalized in {"cancelling", "canceling"}:
@@ -503,18 +503,18 @@ class TelemetryNormalizer:
         # Apply Mainsail/Obico heuristics
         # ═══════════════════════════════════════════════════════════
         if normalized in {"standby", "ready", "idle"}:
-            # Check 1: Heating for print (Mainsail behavior)
-            if self._is_heating_for_print():
-                return "Printing"
+            # # Check 1: Heating for print (Mainsail behavior)
+            # if self._is_heating_for_print():
+            #     return "Printing"
 
             # Check 2: Active job loaded (Obico behavior)
             if self._has_active_job(job):
                 return "Printing"
 
-            # Check 3: Idle timeout state override (Klipper macro support)
-            idle_timeout_state = self._resolve_idle_timeout_state()
-            if idle_timeout_state and idle_timeout_state.lower() == "printing":
-                return "Printing"
+            # # Check 3: Idle timeout state override (Klipper macro support)
+            # idle_timeout_state = self._resolve_idle_timeout_state()
+            # if idle_timeout_state and idle_timeout_state.lower() == "printing":
+            #     return "Printing"
 
             # Default: Actually idle
             return "Idle"
@@ -574,47 +574,16 @@ class TelemetryNormalizer:
         return False
 
     def _has_active_job(self, job: Dict[str, Any]) -> bool:
-        """
-        Check if a print job is actively loaded (Obico behavior).
-
-        A job is "active" if:
-            - Filename is present
-            - Progress > 0% OR elapsed time > 0
-
-        This catches cases where Moonraker reports "ready" but a job
-        is actually in progress (rare edge case).
-
-        Args:
-            job: Job section from _build_job_section
-
-        Returns:
-            True if job is loaded and has made progress
-        """
+        """Check if a print job file is loaded (business logic: job loaded = printing workflow)."""
         if not isinstance(job, dict):
             return False
 
-        # Check 1: Has filename
         file_info = job.get("file")
         if not isinstance(file_info, dict):
             return False
 
         filename = file_info.get("name") or file_info.get("path")
-        if not isinstance(filename, str) or not filename.strip():
-            return False
-
-        # Check 2: Has progress or elapsed time
-        progress = job.get("progress")
-        if isinstance(progress, dict):
-            percent = progress.get("percent")
-            elapsed = progress.get("elapsedSeconds")
-
-            # Job has started if progress > 0 or time elapsed
-            if isinstance(percent, (int, float)) and percent > 0:
-                return True
-            if isinstance(elapsed, (int, float)) and elapsed > 0:
-                return True
-
-        return False
+        return isinstance(filename, str) and bool(filename.strip())
 
     def _build_sensors_payload(self) -> Optional[Dict[str, Any]]:
         toolhead = _build_toolhead_section(self._status_state)
