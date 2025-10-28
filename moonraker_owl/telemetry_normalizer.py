@@ -1,50 +1,63 @@
-"""Normalization helpers for Moonraker telemetry payloads."""
+﻿"""Normalization helpers for Moonraker telemetry payloads."""
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from typing import Any, Dict, Iterable, List, Optional
 
-from .core import deep_merge
+from .core.utils import deep_merge
+from .printer_state import PrinterContext, PrinterStateResolver
 
 
 @dataclass(slots=True)
 class NormalizedPayloads:
-    """Structured payloads ready for publishing to Nexus."""
-
     overview: Optional[Dict[str, Any]] = None
     sensors: Optional[Dict[str, Any]] = None
     events: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class TelemetryNormalizer:
-    """Maintains Moonraker state and projects it into the Owl contract."""
+    """Maintain Moonraker state and project it into the Owl contract."""
+
+    TERMINAL_STATE_TTL = timedelta(seconds=10)
+    JOB_ACTIVITY_TTL = timedelta(seconds=180)
 
     def __init__(self) -> None:
-        self._status_state: Dict[str, Any] = {}
+        self._initialized = False
+        self._print_stats: Dict[str, Any] = {}
+        self._status_sections: Dict[str, Any] = {}
         self._proc_state: Dict[str, Any] = {}
         self._file_metadata: Dict[str, Any] = {}
         self._pending_events: List[Dict[str, Any]] = []
         self._temperature_state: Dict[str, Dict[str, Optional[float]]] = {}
         self._last_overview_timestamp: Optional[str] = None
+        self._last_print_stats_at: Optional[datetime] = None
+        self._active_job_hint: Optional[str] = None
+        self._active_job_expires_at: Optional[datetime] = None
         self._gcode_temp_pattern = re.compile(
             r"(?P<label>[TB]\d?):\s*(?P<actual>-?\d+(?:\.\d+)?)\s*/\s*(?P<target>-?\d+(?:\.\d+)?)",
             re.IGNORECASE,
         )
-        self._last_terminal_state: Optional[tuple[str, datetime]] = None
-        self._terminal_state_ttl = timedelta(seconds=10)
-        self._current_print_state: Optional[str] = None
-        self._previous_print_state: Optional[str] = None
+        self._state_resolver = PrinterStateResolver(
+            terminal_ttl=self.TERMINAL_STATE_TTL
+        )
 
+    # ------------------------------------------------------------------
+    # public API
+    # ------------------------------------------------------------------
     def ingest(self, payload: Dict[str, Any]) -> NormalizedPayloads:
-        self._apply_payload(payload)
+        observed_at = datetime.now(timezone.utc)
+        self._process_payload(payload, observed_at)
 
-        overview_payload = self._build_overview_payload()
+        overview_payload = self._build_overview_payload(observed_at)
         sensors_payload = self._build_sensors_payload()
         events_payload = self._drain_events()
+
+        self._initialized = True
 
         return NormalizedPayloads(
             overview=overview_payload,
@@ -55,66 +68,267 @@ class TelemetryNormalizer:
     # ------------------------------------------------------------------
     # payload ingestion
     # ------------------------------------------------------------------
-    def _apply_payload(self, payload: Dict[str, Any]) -> None:
+    def _process_payload(self, payload: Dict[str, Any], observed_at: datetime) -> None:
         result = payload.get("result")
         if isinstance(result, dict):
             status = result.get("status")
             if isinstance(status, dict):
-                _deep_merge(self._status_state, status)
-                self._update_terminal_state(
-                    _extract_state_value(status.get("print_stats"))
-                )
+                allow_print_stats = not self._initialized
+                self._apply_status(status, observed_at, allow_print_stats)
+            self._capture_side_effects("snapshot", result)
 
         method = payload.get("method")
         params = payload.get("params")
-        entries: List[Any] = []
-        if isinstance(params, list):
-            entries = params
-        elif isinstance(params, dict):
-            entries = [params]
 
-        for entry in entries:
-            self._apply_param_entry(method, entry)
+        if method == "notify_status_update":
+            for entry in _iter_entries(params):
+                if isinstance(entry, dict) and "status" in entry:
+                    status = entry.get("status")
+                    if isinstance(status, dict):
+                        self._apply_status(status, observed_at, allow_print_stats=True)
+                        entry = {
+                            key: value
+                            for key, value in entry.items()
+                            if key != "status"
+                        }
+                if isinstance(entry, dict):
+                    self._apply_status(entry, observed_at, allow_print_stats=True)
+                    self._capture_side_effects(method, entry)
+                else:
+                    self._capture_side_effects(method, entry)
 
-        self._capture_events(method, params)
+        elif method == "notify_print_stats_update":
+            for entry in _iter_entries(params):
+                self._apply_print_stats_entry(entry, observed_at)
 
-    def _apply_param_entry(self, method: Optional[str], entry: Any) -> None:
+        else:
+            self._capture_side_effects(method, params)
+
+    def _apply_status(
+        self,
+        status: Dict[str, Any],
+        observed_at: datetime,
+        allow_print_stats: bool,
+    ) -> None:
+        for key, value in status.items():
+            if key == "print_stats":
+                if allow_print_stats:
+                    self._apply_print_stats(value, observed_at)
+                continue
+
+            self._status_sections[key] = _clone(value)
+
+            if key in {
+                "moonraker_stats",
+                "system_cpu_usage",
+                "system_memory",
+                "network",
+                "cpu_temp",
+                "websocket_connections",
+            }:
+                self._proc_state[key] = _clone(value)
+
+        self._capture_side_effects("status", status)
+
+    def _apply_print_stats_entry(self, entry: Any, observed_at: datetime) -> None:
         if isinstance(entry, dict):
-            status = entry.get("status")
-            if isinstance(status, dict):
-                _deep_merge(self._status_state, status)
-                self._update_terminal_state(
-                    _extract_state_value(status.get("print_stats"))
-                )
-            elif method == "notify_status_update":
-                # Some Moonraker builds emit status fields directly without a wrapper.
-                _deep_merge(self._status_state, entry)
-                self._update_terminal_state(_extract_state_value(entry))
-
-            print_stats = entry.get("print_stats")
-            if isinstance(print_stats, dict):
-                # Moonraker often sends print_stats updates outside the status wrapper.
-                target = self._status_state.setdefault("print_stats", {})
-                _deep_merge(target, print_stats)
-                self._update_terminal_state(_extract_state_value(print_stats))
-            elif method == "notify_print_stats_update":
-                target = self._status_state.setdefault("print_stats", {})
-                _deep_merge(target, entry)
-                self._update_terminal_state(_extract_state_value(entry))
-
-            self._capture_proc_stats(entry)
-            self._capture_file_metadata(entry)
+            candidate = entry.get("print_stats")
+            if isinstance(candidate, dict):
+                self._apply_print_stats(candidate, observed_at)
+            else:
+                self._apply_print_stats(entry, observed_at)
             return
 
-        if method == "notify_print_stats_update" and isinstance(entry, (list, tuple)):
-            if (
-                len(entry) == 2
-                and entry[0] == "print_stats"
-                and isinstance(entry[1], dict)
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            key, value = entry
+            if key == "print_stats" and isinstance(value, dict):
+                self._apply_print_stats(value, observed_at)
+            else:
+                self._apply_print_stats({key: _clone(value)}, observed_at)
+            return
+
+    def _apply_print_stats(self, updates: Any, observed_at: datetime) -> None:
+        if not isinstance(updates, dict):
+            return
+
+        self._print_stats = {**self._print_stats, **_clone(updates)}
+        self._last_print_stats_at = observed_at
+
+        filename = updates.get("filename")
+        if isinstance(filename, str) and filename:
+            self._file_metadata.setdefault(filename, {}).setdefault(
+                "relativePath", filename
+            )
+
+        self._refresh_job_activity(updates, observed_at)
+
+    def _refresh_job_activity(
+        self, updates: Dict[str, Any], observed_at: datetime
+    ) -> None:
+        if not updates:
+            return
+
+        filename = updates.get("filename")
+        if isinstance(filename, str):
+            sanitized = filename.strip()
+            if sanitized:
+                self._active_job_hint = sanitized
+                self._active_job_expires_at = observed_at + self.JOB_ACTIVITY_TTL
+
+        state_value = _extract_state_value(updates)
+        normalized_state = (
+            state_value.strip().lower() if isinstance(state_value, str) else ""
+        )
+
+        active_states = {"printing", "resuming", "paused", "cancelling", "canceling"}
+        terminal_states = {
+            "complete",
+            "completed",
+            "cancelled",
+            "canceled",
+            "error",
+            "shutdown",
+        }
+
+        if normalized_state in terminal_states:
+            self._active_job_expires_at = None
+            return
+
+        if normalized_state in active_states:
+            self._active_job_expires_at = observed_at + self.JOB_ACTIVITY_TTL
+            return
+
+        if self._active_job_hint:
+            progress_value = _safe_float(updates.get("progress"))
+            duration_value = _safe_float(updates.get("print_duration"))
+            total_duration_value = _safe_float(updates.get("total_duration"))
+            if any(
+                value is not None
+                for value in (progress_value, duration_value, total_duration_value)
             ):
-                target = self._status_state.setdefault("print_stats", {})
-                _deep_merge(target, entry[1])
-                self._update_terminal_state(_extract_state_value(entry[1]))
+                self._active_job_expires_at = observed_at + self.JOB_ACTIVITY_TTL
+
+    def _active_job_recent(self, observed_at: datetime) -> bool:
+        return (
+            self._active_job_expires_at is not None
+            and observed_at <= self._active_job_expires_at
+        )
+
+    def _compose_job_payload(
+        self, observed_at: datetime
+    ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[str]]:
+        overview_updates: Dict[str, Any] = {}
+        job_payload: Dict[str, Any] = {}
+        sub_status: Optional[str] = None
+
+        raw_filename = self._print_stats.get("filename")
+        effective_filename: Optional[str] = None
+        if isinstance(raw_filename, str) and raw_filename.strip():
+            effective_filename = raw_filename.strip()
+        elif self._active_job_hint and self._active_job_recent(observed_at):
+            effective_filename = self._active_job_hint
+
+        metadata: Optional[Dict[str, Any]] = None
+        if effective_filename:
+            metadata = self._file_metadata.get(effective_filename)
+            overview_updates["jobName"] = effective_filename
+
+            file_info: Dict[str, Any] = {
+                "name": effective_filename,
+                "path": effective_filename,
+            }
+
+            if isinstance(metadata, dict):
+                size = _coerce_int(metadata.get("size"))
+                if size is not None:
+                    file_info["sizeBytes"] = size
+
+                relative_path = metadata.get("relativePath")
+                if isinstance(relative_path, str) and relative_path.strip():
+                    file_info["relativePath"] = relative_path.strip()
+
+                thumbnails = metadata.get("thumbnails")
+                if thumbnails:
+                    job_payload["thumbnails"] = thumbnails
+
+            file_info.setdefault("relativePath", effective_filename)
+
+            job_payload["name"] = effective_filename
+            job_payload["sourcePath"] = file_info.get(
+                "relativePath", effective_filename
+            )
+            job_payload["file"] = file_info
+
+        job_id = _derive_job_id(effective_filename)
+        if job_id:
+            job_payload["id"] = job_id
+
+        message = self._print_stats.get("message")
+        if isinstance(message, str) and message.strip():
+            job_payload["message"] = message.strip()
+            sub_status = message.strip()
+
+        progress = _build_progress_section(None, None, self._print_stats)
+        if progress:
+            job_payload["progressPercent"] = progress.get("percent")
+            if progress.get("elapsedSeconds") is not None:
+                job_payload.setdefault("progress", {})["elapsed"] = _format_duration(
+                    progress["elapsedSeconds"]
+                )
+                job_payload["progress"]["elapsedSeconds"] = progress["elapsedSeconds"]
+            if progress.get("remainingSeconds") is not None:
+                job_payload.setdefault("progress", {})["remaining"] = _format_duration(
+                    progress["remainingSeconds"]
+                )
+                job_payload["progress"]["remainingSeconds"] = progress[
+                    "remainingSeconds"
+                ]
+
+        info = (
+            self._print_stats.get("info")
+            if isinstance(self._print_stats, dict)
+            else None
+        )
+        current_layer = None
+        total_layer = None
+        if isinstance(info, dict):
+            current_layer = _coerce_int(
+                info.get("current_layer") or info.get("currentLayer")
+            )
+            total_layer = _coerce_int(info.get("total_layer") or info.get("totalLayer"))
+
+        if total_layer is not None:
+            job_payload.setdefault("layers", {})["total"] = total_layer
+        if current_layer is not None:
+            job_payload.setdefault("layers", {})["current"] = current_layer
+
+        return overview_updates, job_payload or None, sub_status
+
+    def _has_active_job(
+        self, job_payload: Optional[Dict[str, Any]], observed_at: datetime
+    ) -> bool:
+        if isinstance(job_payload, dict):
+            source_path = job_payload.get("sourcePath") or job_payload.get("name")
+            if isinstance(source_path, str) and source_path.strip():
+                return True
+        return self._active_job_recent(observed_at)
+
+    def _capture_side_effects(self, method: Optional[str], payload: Any) -> None:
+        if method in {"notify_status_update", "status", "snapshot"}:
+            if isinstance(payload, dict):
+                self._capture_proc_stats(payload)
+                self._capture_file_metadata(payload)
+        elif method == "notify_proc_stat_update":
+            if isinstance(payload, list):
+                for entry in payload:
+                    if isinstance(entry, dict):
+                        self._capture_proc_stats(entry)
+        elif method == "notify_filelist_changed":
+            if isinstance(payload, list):
+                for entry in payload:
+                    if isinstance(entry, dict):
+                        self._capture_file_metadata(entry)
+        self._capture_events(method, payload)
 
     def _capture_proc_stats(self, entry: Dict[str, Any]) -> None:
         for key in (
@@ -131,7 +345,7 @@ class TelemetryNormalizer:
 
             if isinstance(value, dict):
                 target = self._proc_state.setdefault(key, {})
-                _deep_merge(target, value)
+                deep_merge(target, value)
             else:
                 self._proc_state[key] = value
 
@@ -183,9 +397,7 @@ class TelemetryNormalizer:
                     if isinstance(relative_path, str) and relative_path.strip():
                         record["relativePath"] = relative_path.strip()
 
-    def _capture_events(
-        self, method: Optional[str], params: Optional[Iterable[Any]]
-    ) -> None:
+    def _capture_events(self, method: Optional[str], params: Any) -> None:
         if method == "notify_gcode_response":
             if isinstance(params, list):
                 for entry in params:
@@ -259,11 +471,11 @@ class TelemetryNormalizer:
             actual = _round_temperature(match.group("actual"))
             target = _round_temperature(match.group("target"))
 
-            channel = self._map_gcode_channel(label)
+            channel = _map_gcode_channel(label)
             if channel is None:
                 continue
 
-            channel_state = self._status_state.setdefault(channel, {})
+            channel_state = self._status_sections.setdefault(channel, {})
             if actual is not None:
                 channel_state["temperature"] = actual
             if target is not None:
@@ -275,399 +487,68 @@ class TelemetryNormalizer:
             if target is not None:
                 stored["target"] = target
 
-    @staticmethod
-    def _map_gcode_channel(label: str) -> Optional[str]:
-        if not label:
-            return None
-
-        label = label.upper()
-
-        if label.startswith("B"):
-            return "heater_bed"
-
-        if label.startswith("T"):
-            suffix = label[1:]
-            if not suffix or suffix == "0":
-                return "extruder"
-            return f"extruder{suffix}"
-
-        return None
-
     # ------------------------------------------------------------------
     # builders
     # ------------------------------------------------------------------
-    def _build_overview_payload(self) -> Optional[Dict[str, Any]]:
-        job = _build_job_section(self._status_state, self._file_metadata) or {}
-        printer_status = self._resolve_printer_status(job)
-        # timelapse_paused = self._resolve_timelapse_paused()
-        # idle_timeout_state = self._resolve_idle_timeout_state()
+    def _build_overview_payload(
+        self, observed_at: datetime
+    ) -> Optional[Dict[str, Any]]:
+        overview_updates, job_payload, sub_status = self._compose_job_payload(
+            observed_at
+        )
 
-        # if timelapse_paused and printer_status == "Paused":
-        #     printer_status = "Printing"
+        printer_status = self._state_resolver.resolve(
+            _extract_state_value(self._print_stats),
+            PrinterContext(
+                observed_at=observed_at,
+                has_active_job=self._has_active_job(job_payload, observed_at),
+                is_heating=self._is_heating_for_print(),
+            ),
+        )
 
         overview: Dict[str, Any] = {"printerStatus": printer_status}
 
-        # if timelapse_paused is not None:
-        #     overview["timelapsePaused"] = timelapse_paused
+        if overview_updates:
+            overview.update(overview_updates)
 
-        # if idle_timeout_state:
-        #     overview["idleTimeoutState"] = idle_timeout_state
+        progress = _build_progress_section(
+            self._status_sections.get("display_status"),
+            self._status_sections.get("virtual_sdcard"),
+            self._print_stats,
+        )
 
-        progress = job.get("progress") if isinstance(job, dict) else None
-        percent: Optional[int] = None
-        elapsed: Optional[int] = None
-        remaining: Optional[int] = None
-        if isinstance(progress, dict):
-            percent_value = _coerce_int(progress.get("percent"))
+        if progress:
+            percent_value = progress.get("percent")
             if percent_value is not None:
-                percent = percent_value
                 overview["progressPercent"] = percent_value
-
-            elapsed_value = _coerce_int(progress.get("elapsedSeconds"))
-            if elapsed_value is not None:
-                elapsed = elapsed_value
-                overview["elapsedSeconds"] = elapsed_value
-
-            remaining_value = _coerce_int(progress.get("remainingSeconds"))
-            if remaining_value is not None:
-                remaining = remaining_value
-                overview["estimatedTimeRemainingSeconds"] = remaining_value
-
-        job_payload: Dict[str, Any] = {}
-        file_info = job.get("file") if isinstance(job, dict) else None
-        if isinstance(file_info, dict):
-            name = file_info.get("name")
-            if isinstance(name, str) and name.strip():
-                normalized_name = name.strip()
-                overview["jobName"] = normalized_name
-                job_payload["name"] = normalized_name
-
-            path = file_info.get("path") or file_info.get("relativePath")
-            if isinstance(path, str) and path.strip():
-                job_payload["sourcePath"] = path.strip()
-
-            size_bytes = _coerce_int(file_info.get("sizeBytes"))
-            if size_bytes is not None:
-                job_payload["sizeBytes"] = size_bytes
-
-        job_id = job.get("id")
-        if isinstance(job_id, str) and job_id.strip():
-            job_payload["id"] = job_id.strip()
-
-        job_message = job.get("message")
-        if isinstance(job_message, str) and job_message.strip():
-            job_payload["message"] = job_message.strip()
-
-        if percent is not None:
-            job_payload["progressPercent"] = percent
-        if elapsed is not None:
-            job_payload["elapsedSeconds"] = elapsed
-        if remaining is not None:
-            job_payload["estimatedTimeRemainingSeconds"] = remaining
-
-        layers = job.get("layers")
-        layer_status: Optional[str] = None
-        if isinstance(layers, dict):
-            sanitized_layers: Dict[str, int] = {}
-            current_layer = _coerce_int(layers.get("current"))
-            total_layer = _coerce_int(layers.get("total"))
-
-            if current_layer is not None:
-                sanitized_layers["current"] = current_layer
-            if total_layer is not None:
-                sanitized_layers["total"] = total_layer
-
-            if sanitized_layers:
-                job_payload["layers"] = sanitized_layers
-
-            layer_status = _format_layer_status(current_layer, total_layer)
-
-        thumbnails = job.get("thumbnails")
-        selected_thumbnail = _select_thumbnail_entry(thumbnails) if thumbnails else None
+            if (elapsed := progress.get("elapsedSeconds")) is not None:
+                overview["elapsedSeconds"] = elapsed
+            if (remaining := progress.get("remainingSeconds")) is not None:
+                overview["estimatedTimeRemainingSeconds"] = remaining
 
         if job_payload:
-            thumbnail_payload: Dict[str, Any] = {
-                "cloudUrl": None,
-                "sourcePath": selected_thumbnail.get("relativePath")
-                if selected_thumbnail
-                else None,
-            }
-
-            if selected_thumbnail:
-                if (width := selected_thumbnail.get("width")) is not None:
-                    thumbnail_payload["width"] = width
-                if (height := selected_thumbnail.get("height")) is not None:
-                    thumbnail_payload["height"] = height
-                if (size := selected_thumbnail.get("sizeBytes")) is not None:
-                    thumbnail_payload["sizeBytes"] = size
-
-            job_payload["thumbnail"] = thumbnail_payload
             overview["job"] = job_payload
 
-        sub_status = layer_status
-        if not sub_status and isinstance(job_payload.get("message"), str):
-            sub_status = job_payload["message"]
-
-        if not sub_status:
-            display_status = self._status_state.get("display_status")
+        if sub_status:
+            overview.setdefault("subStatus", sub_status)
+        else:
+            display_status = self._status_sections.get("display_status")
             if isinstance(display_status, dict):
                 candidate = display_status.get("message")
                 if isinstance(candidate, str) and candidate.strip():
-                    sub_status = candidate.strip()
+                    overview.setdefault("subStatus", candidate.strip())
 
-        if sub_status:
-            overview["subStatus"] = sub_status
-
-        # Refresh heartbeat on every publish so connectivity checks remain accurate.
-        self._last_overview_timestamp = datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
-        )
+        self._last_overview_timestamp = observed_at.isoformat(timespec="seconds")
         overview["lastUpdatedUtc"] = self._last_overview_timestamp
 
         return overview
 
-    def _resolve_idle_timeout_state(self) -> Optional[str]:
-        idle_timeout = self._status_state.get("idle_timeout")
-        if not isinstance(idle_timeout, dict):
-            return None
-
-        state = idle_timeout.get("state")
-        if isinstance(state, str) and state.strip():
-            return state.strip()
-
-        return None
-
-    # def _resolve_timelapse_paused(self) -> Optional[bool]:
-    #     macro = self._status_state.get("gcode_macro TIMELAPSE_TAKE_FRAME")
-    #     if not isinstance(macro, dict):
-    #         return None
-
-    #     candidate = macro.get("is_paused")
-    #     if isinstance(candidate, bool):
-    #         return candidate
-    #     if isinstance(candidate, (int, float)):
-    #         return bool(candidate)
-    #     if isinstance(candidate, str):
-    #         normalized = candidate.strip().lower()
-    #         if normalized in {"true", "1", "yes", "on"}:
-    #             return True
-    #         if normalized in {"false", "0", "no", "off"}:
-    #             return False
-
-    #     return None
-
-    def _resolve_printer_status(self, job: Dict[str, Any]) -> str:
-        """
-        Resolve printer status using Mainsail/Obico-style context-aware detection.
-
-        Priority order:
-        1. Explicit print states (printing, paused, cancelled, etc.)
-        2. Error/shutdown states
-        3. Heating detection (ready/standby + heater targets)
-        4. Job context (ready/standby + active job file)
-        5. Idle timeout override (Klipper macro support)
-        6. Default idle state
-
-        Matches Mainsail behavior for heating phase detection and
-        Obico behavior for job-loaded detection.
-        """
-        raw_state: Optional[str] = None
-
-        if isinstance(self._current_print_state, str):
-            raw_state = self._current_print_state
-
-        if raw_state is None and isinstance(job, dict):
-            candidate = job.get("status")
-            if isinstance(candidate, str):
-                raw_state = candidate
-
-        # Normalize status for downstream mapping
-        if raw_state:
-            raw_label = raw_state.strip()
-            normalized = raw_label.lower()
-        else:
-            raw_label = None
-            normalized = ""
-
-        # ═══════════════════════════════════════════════════════════
-        # Priority 1: Explicit Print States
-        # ═══════════════════════════════════════════════════════════
-        if normalized in {"printing", "resuming"}:
-            return "Printing"
-
-        if normalized == "paused":
-            # # Check timelapse pause override (Mainsail behavior)
-            # timelapse_paused = self._resolve_timelapse_paused()
-            # if timelapse_paused:
-            #     return "Printing"  # Timelapse pause is still printing
-            return "Paused"
-
-        if normalized in {"cancelling", "canceling"}:
-            return "Cancelling"
-
-        # Map cancelled spelling to Cancelled (explicit, not Completed)
-        if normalized in {"cancelled", "canceled"}:
-            return "Cancelled"
-
-        if normalized in {"complete", "completed"}:
-            return "Completed"
-
-        # ═══════════════════════════════════════════════════════════
-        # Priority 2: Error States
-        # ═══════════════════════════════════════════════════════════
-        if normalized in {"error", "shutdown"}:
-            return "Error"
-
-        if normalized == "offline":
-            return "Offline"
-
-        # ═══════════════════════════════════════════════════════════
-        # Priority 3: Ambiguous States (ready/standby/idle)
-        # Apply Mainsail/Obico heuristics
-        # ═══════════════════════════════════════════════════════════
-        if normalized in {"standby", "ready", "idle"}:
-            if self._has_active_job(job):
-                self._last_terminal_state = None
-                return "Printing"
-
-            last_terminal = self._last_terminal_state
-            if last_terminal is not None:
-                state_value, observed_at = last_terminal
-                if datetime.now(timezone.utc) - observed_at <= self._terminal_state_ttl:
-                    mapped = self._map_terminal_status(state_value)
-                    if mapped is not None:
-                        return mapped
-                else:
-                    self._last_terminal_state = None
-
-            # # Check 1: Heating for print (Mainsail behavior)
-            # if self._is_heating_for_print():
-            #     return "Printing"
-            # # Check 3: Idle timeout state override (Klipper macro support)
-            # idle_timeout_state = self._resolve_idle_timeout_state()
-            # if idle_timeout_state and idle_timeout_state.lower() == "printing":
-            #     return "Printing"
-
-            # Default: Actually idle
-            return "Idle"
-
-        # ═══════════════════════════════════════════════════════════
-        # Fallback: Unknown state
-        # ═══════════════════════════════════════════════════════════
-        return "Unknown"
-
-    def _update_terminal_state(self, state: Optional[str]) -> None:
-        if not isinstance(state, str):
-            return
-
-        normalized = state.strip().lower()
-        if normalized != self._current_print_state:
-            self._previous_print_state = self._current_print_state
-            self._current_print_state = normalized
-        if not normalized:
-            return
-
-        terminal_states = {
-            "cancelled",
-            "canceled",
-            "complete",
-            "completed",
-            "error",
-            "shutdown",
-        }
-        active_states = {
-            "printing",
-            "resuming",
-            "paused",
-            "cancelling",
-            "canceling",
-        }
-
-        if normalized in terminal_states:
-            self._last_terminal_state = (normalized, datetime.now(timezone.utc))
-        elif normalized in active_states:
-            self._last_terminal_state = None
-
-    @staticmethod
-    def _map_terminal_status(state: str) -> Optional[str]:
-        normalized = state.strip().lower()
-        mapping = {
-            "cancelled": "Cancelled",
-            "canceled": "Cancelled",
-            "completed": "Completed",
-            "complete": "Completed",
-            "error": "Error",
-            "shutdown": "Error",
-        }
-        return mapping.get(normalized)
-
-    def _is_heating_for_print(self) -> bool:
-        """
-        Detect if printer is heating bed/extruder in preparation for a print.
-
-        Matches Mainsail behavior: Any heater with target > threshold is "heating".
-
-        Returns:
-            True if extruder target > 40°C OR bed target > 40°C
-            AND current temp is significantly below target (>5°C delta)
-        """
-        HEATING_THRESHOLD = 40.0  # °C - minimum target to consider "heating"
-        HEATING_DELTA = 5.0  # °C - minimum delta to consider "in progress"
-
-        # Check extruder
-        extruder = self._status_state.get("extruder")
-        if isinstance(extruder, dict):
-            target = _safe_float(extruder.get("target"))
-            actual = _safe_float(extruder.get("temperature"))
-
-            if target is not None and target > HEATING_THRESHOLD:
-                if actual is None or (target - actual) > HEATING_DELTA:
-                    return True  # Heating extruder for print
-
-        # Check heated bed
-        heater_bed = self._status_state.get("heater_bed")
-        if isinstance(heater_bed, dict):
-            target = _safe_float(heater_bed.get("target"))
-            actual = _safe_float(heater_bed.get("temperature"))
-
-            if target is not None and target > HEATING_THRESHOLD:
-                if actual is None or (target - actual) > HEATING_DELTA:
-                    return True  # Heating bed for print
-
-        # Check generic heaters (e.g., chamber)
-        for key, value in self._status_state.items():
-            if not isinstance(value, dict):
-                continue
-            if not key.startswith("heater_generic"):
-                continue
-
-            target = _safe_float(value.get("target"))
-            actual = _safe_float(value.get("temperature"))
-
-            if target is not None and target > HEATING_THRESHOLD:
-                if actual is None or (target - actual) > HEATING_DELTA:
-                    return True
-
-        return False
-
-    def _has_active_job(self, job: Dict[str, Any]) -> bool:
-        """Check if a print job file is loaded (business logic: job loaded = printing workflow)."""
-        if not isinstance(job, dict):
-            return False
-
-        file_info = job.get("file")
-        if not isinstance(file_info, dict):
-            return False
-
-        filename = file_info.get("name") or file_info.get("path")
-        return isinstance(filename, str) and bool(filename.strip())
-
     def _build_sensors_payload(self) -> Optional[Dict[str, Any]]:
-        toolhead = _build_toolhead_section(self._status_state)
+        toolhead = _build_toolhead_section(self._status_sections)
         temperatures = _build_temperature_section(
-            self._status_state, self._temperature_state
+            self._status_sections, self._temperature_state
         )
-        fans = _build_fan_section(self._status_state)
+        fans = _build_fan_section(self._status_sections)
 
         payload: Dict[str, Any] = {}
         if toolhead:
@@ -679,144 +560,68 @@ class TelemetryNormalizer:
 
         return payload or None
 
+    def _is_heating_for_print(self) -> bool:
+        HEATING_THRESHOLD = 40.0
+        HEATING_DELTA = 5.0
+
+        for key in ("extruder", "heater_bed"):
+            channel = self._status_sections.get(key)
+            if not isinstance(channel, dict):
+                continue
+            target = _safe_float(channel.get("target"))
+            actual = _safe_float(channel.get("temperature"))
+            if target is None or target <= HEATING_THRESHOLD:
+                continue
+            if actual is None or (target - actual) > HEATING_DELTA:
+                return True
+
+        for key, value in self._status_sections.items():
+            if not isinstance(value, dict) or not key.startswith("heater_generic"):
+                continue
+            target = _safe_float(value.get("target"))
+            actual = _safe_float(value.get("temperature"))
+            if target is None or target <= HEATING_THRESHOLD:
+                continue
+            if actual is None or (target - actual) > HEATING_DELTA:
+                return True
+
+        return False
+
 
 # ----------------------------------------------------------------------
-# section builders
+# helper functions
 # ----------------------------------------------------------------------
 
 
-def _build_job_section(
-    status_state: Dict[str, Any],
-    file_metadata: Dict[str, Any],
+def _iter_entries(params: Any) -> List[Any]:
+    if params is None:
+        return []
+    if isinstance(params, list):
+        return params
+    if isinstance(params, dict):
+        return [params]
+    return [params]
+
+
+def _clone(value: Any) -> Any:
+    return copy.deepcopy(value)
+
+
+def _extract_state_value(candidate: Any) -> Optional[str]:
+    if isinstance(candidate, dict):
+        state = candidate.get("state")
+        if isinstance(state, str):
+            return state
+    if isinstance(candidate, str):
+        return candidate
+    return None
+
+
+def _build_progress_section(
+    display_status: Any,
+    virtual_sdcard: Any,
+    print_stats: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    print_stats = status_state.get("print_stats")
-    if not isinstance(print_stats, dict):
-        return None
-
-    job: Dict[str, Any] = {}
-
-    state = print_stats.get("state")
-    if isinstance(state, str) and state:
-        job["status"] = state
-
-    meta: Dict[str, Any] = {}
-    filename = print_stats.get("filename")
-    if isinstance(filename, str) and filename:
-        sanitized_name = filename.strip()
-        meta = file_metadata.get(filename) or {}
-        file_info: Dict[str, Any] = {
-            "name": sanitized_name,
-            "path": sanitized_name,
-        }
-
-        size = _coerce_int(meta.get("size"))
-        if size is not None:
-            file_info["sizeBytes"] = size
-
-        relative_path = meta.get("relativePath")
-        if isinstance(relative_path, str) and relative_path.strip():
-            file_info["relativePath"] = relative_path.strip()
-
-        thumbnails = meta.get("thumbnails")
-        if thumbnails:
-            job["thumbnails"] = thumbnails
-
-        layer_count_meta = _coerce_int(meta.get("layerCount"))
-        if layer_count_meta is not None:
-            job["layerCount"] = layer_count_meta
-
-        job["file"] = file_info
-
-    job_id = _derive_job_id(filename)
-    if job_id:
-        job["id"] = job_id
-
-    message = print_stats.get("message")
-    if isinstance(message, str) and message:
-        job["message"] = message
-
-    progress = _build_progress_section(status_state)
-    percent_value: Optional[float] = None
-    if progress:
-        job["progress"] = progress
-        percent_candidate = progress.get("percent")
-        if percent_candidate is not None:
-            try:
-                percent_value = float(percent_candidate)
-            except (TypeError, ValueError):
-                percent_value = None
-
-    info = print_stats.get("info")
-    current_layer = None
-    total_layer = None
-    if isinstance(info, dict):
-        current_layer = _coerce_int(
-            info.get("current_layer") or info.get("currentLayer")
-        )
-        total_layer = _coerce_int(info.get("total_layer") or info.get("totalLayer"))
-
-    if total_layer is None:
-        total_layer = _coerce_int(meta.get("layerCount")) if meta else None
-
-    if (
-        current_layer is None
-        and total_layer is not None
-        and total_layer > 0
-        and percent_value is not None
-    ):
-        estimated = int(round((percent_value / 100.0) * total_layer))
-        current_layer = max(0, min(estimated, total_layer))
-        if percent_value > 0.0 and current_layer == 0:
-            current_layer = 1
-
-    layers_payload: Dict[str, Any] = {}
-    if current_layer is not None:
-        layers_payload["current"] = current_layer
-    if total_layer is not None:
-        layers_payload["total"] = total_layer
-    if layers_payload:
-        job["layers"] = layers_payload
-
-    print_duration = _safe_float(print_stats.get("print_duration"))
-    total_duration = _safe_float(print_stats.get("total_duration"))
-
-    if print_duration is not None:
-        job.setdefault("progress", {})["elapsed"] = _format_duration(print_duration)
-        job["progress"]["elapsedSeconds"] = max(int(print_duration), 0)
-
-    if (
-        total_duration is not None
-        and print_duration is not None
-        and total_duration >= print_duration
-    ):
-        remaining_seconds = total_duration - print_duration
-        job.setdefault("progress", {})["remaining"] = _format_duration(
-            remaining_seconds
-        )
-        job["progress"]["remainingSeconds"] = max(int(remaining_seconds), 0)
-
-    return job or None
-
-
-def _derive_job_id(filename: Optional[str]) -> Optional[str]:
-    if not isinstance(filename, str):
-        return None
-
-    candidate = filename.strip()
-    if not candidate:
-        return None
-
-    candidate = candidate.replace("\\", "/")
-    name = candidate.split("/")[-1]
-    stem = name.rsplit(".", 1)[0] if "." in name else name
-    return stem or None
-
-
-def _build_progress_section(status_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    display_status = status_state.get("display_status")
-    virtual_sdcard = status_state.get("virtual_sdcard")
-    print_stats = status_state.get("print_stats")
-
     percent: Optional[float] = None
 
     for candidate in (
@@ -836,11 +641,36 @@ def _build_progress_section(status_state: Dict[str, Any]) -> Optional[Dict[str, 
         return None
 
     progress: Dict[str, Any] = {"percent": int(round(percent))}
+
+    elapsed = _safe_float(print_stats.get("print_duration"))
+    if elapsed is not None:
+        progress["elapsedSeconds"] = max(int(elapsed), 0)
+
+    total_duration = _safe_float(print_stats.get("total_duration"))
+    if total_duration is not None and elapsed is not None and total_duration >= elapsed:
+        progress["remainingSeconds"] = max(int(total_duration - elapsed), 0)
+
     return progress
 
 
-def _build_toolhead_section(status_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    toolhead = status_state.get("toolhead")
+def _derive_job_id(filename: Optional[str]) -> Optional[str]:
+    if not isinstance(filename, str):
+        return None
+
+    candidate = filename.strip()
+    if not candidate:
+        return None
+
+    candidate = candidate.replace("\\", "/")
+    name = candidate.split("/")[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return stem or None
+
+
+def _build_toolhead_section(
+    status_sections: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    toolhead = status_sections.get("toolhead")
     if not isinstance(toolhead, dict):
         return None
 
@@ -863,34 +693,26 @@ def _build_toolhead_section(status_state: Dict[str, Any]) -> Optional[Dict[str, 
 
 
 def _build_temperature_section(
-    status_state: Dict[str, Any],
+    status_sections: Dict[str, Any],
     temperature_state: Dict[str, Dict[str, Optional[float]]],
 ) -> List[Dict[str, Any]]:
     temperatures: List[Dict[str, Any]] = []
 
-    extruder = status_state.get("extruder")
-    if isinstance(extruder, dict):
-        _merge_temperature_entry(temperatures, "extruder", extruder, temperature_state)
-
-    heater_bed = status_state.get("heater_bed")
-    if isinstance(heater_bed, dict):
-        _merge_temperature_entry(
-            temperatures, "heater_bed", heater_bed, temperature_state
-        )
-
-    for key, value in status_state.items():
+    for key, value in status_sections.items():
+        if key not in {"extruder", "heater_bed"} and not key.startswith(
+            "temperature_sensor"
+        ):
+            continue
         if not isinstance(value, dict):
             continue
-        if not key.startswith("temperature_sensor"):
-            continue
 
-        _merge_temperature_entry(temperatures, key.strip(), value, temperature_state)
+        channel = key.strip()
+        _merge_temperature_entry(temperatures, channel, value, temperature_state)
 
     return [
-        temperature
-        for temperature in temperatures
-        if temperature.get("actual") is not None
-        or temperature.get("target") is not None
+        temp
+        for temp in temperatures
+        if temp.get("actual") is not None or temp.get("target") is not None
     ]
 
 
@@ -902,12 +724,9 @@ def _merge_temperature_entry(
 ) -> None:
     previous = temperature_state.get(channel, {})
 
-    # Extract current values from Moonraker data
     actual_candidate = _round_temperature(data.get("temperature"))
     target_candidate = _round_temperature(data.get("target"))
 
-    # Use new value if present, otherwise fall back to preserved state
-    # This handles cases where Moonraker omits target in rapid temperature updates
     actual = (
         actual_candidate if actual_candidate is not None else previous.get("actual")
     )
@@ -915,67 +734,38 @@ def _merge_temperature_entry(
         target_candidate if target_candidate is not None else previous.get("target")
     )
 
-    # Skip sensors with no data at all
     if actual is None and target is None:
         return
 
-    # Preserve prior target when the current update omits it
     entry = {
         "channel": channel,
         "actual": actual,
         "target": target,
     }
-
     collection.append(entry)
 
-    # Persist both values for future reference
-    # This ensures target persists across updates where it may be omitted
     temperature_state[channel] = {
         "actual": actual,
         "target": target,
     }
 
 
-def _build_fan_section(status_state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    fan = status_state.get("fan")
+def _build_fan_section(status_sections: Dict[str, Any]) -> List[Dict[str, Any]]:
+    fan = status_sections.get("fan")
     if not isinstance(fan, dict):
         return []
 
-    speed = fan.get("speed")
-    speed_value = _safe_float(speed)
-    if speed_value is None:
+    speed = _safe_float(fan.get("speed"))
+    if speed is None:
         return []
 
-    percent = speed_value * 100.0 if speed_value <= 1.0 else speed_value
+    percent = speed * 100.0 if speed <= 1.0 else speed
     return [
         {
             "name": "part",
             "percent": round(max(0.0, min(percent, 100.0)), 1),
         }
     ]
-
-
-def _build_alerts_section(status_state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    display_status = status_state.get("display_status")
-    if not isinstance(display_status, dict):
-        return []
-
-    message = display_status.get("message")
-    if not isinstance(message, str) or not message.strip():
-        return []
-
-    return [
-        {
-            "code": "display_status",
-            "severity": "info",
-            "message": message.strip(),
-        }
-    ]
-
-
-# ----------------------------------------------------------------------
-# utilities
-# ----------------------------------------------------------------------
 
 
 def _sanitize_thumbnails(entries: Any) -> List[Dict[str, Any]]:
@@ -1008,67 +798,6 @@ def _sanitize_thumbnails(entries: Any) -> List[Dict[str, Any]]:
         sanitized.append(entry)
 
     return sanitized
-
-
-def _select_thumbnail_entry(
-    entries: Optional[Iterable[Dict[str, Any]]],
-) -> Optional[Dict[str, Any]]:
-    if not entries:
-        return None
-
-    best_entry: Optional[Dict[str, Any]] = None
-    best_score = -1
-
-    for candidate in entries:
-        if not isinstance(candidate, dict):
-            continue
-
-        path = candidate.get("relativePath") or candidate.get("relative_path")
-        if not isinstance(path, str) or not path.strip():
-            continue
-
-        sanitized: Dict[str, Any] = {"relativePath": path.strip()}
-
-        width = _coerce_int(candidate.get("width"))
-        if width is not None:
-            sanitized["width"] = width
-
-        height = _coerce_int(candidate.get("height"))
-        if height is not None:
-            sanitized["height"] = height
-
-        size_bytes = _coerce_int(candidate.get("sizeBytes") or candidate.get("size"))
-        if size_bytes is not None:
-            sanitized["sizeBytes"] = size_bytes
-
-        score = (sanitized.get("width") or 0) * (sanitized.get("height") or 0)
-        if score > best_score:
-            best_entry = sanitized
-            best_score = score
-
-    return best_entry
-
-
-def _format_layer_status(current: Optional[int], total: Optional[int]) -> Optional[str]:
-    if total is None or total <= 0:
-        return None
-
-    if current is None:
-        return None
-
-    current_value = max(0, current)
-    current_value = min(current_value, total)
-
-    return f"Layer {current_value}/{total}"
-
-
-def _format_duration(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    duration = timedelta(seconds=float(seconds))
-    total_seconds = int(duration.total_seconds())
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -1107,8 +836,7 @@ def _safe_float_from_fraction(
 ) -> Optional[float]:
     if not isinstance(container, dict):
         return None
-    value = container.get(key)
-    return _safe_float(value)
+    return _safe_float(container.get(key))
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -1120,16 +848,28 @@ def _coerce_int(value: Any) -> Optional[int]:
         return None
 
 
-def _deep_merge(target: Dict[str, Any], updates: Dict[str, Any]) -> None:
-    """Legacy wrapper for shared deep_merge utility."""
-    deep_merge(target, updates)
+def _format_duration(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    duration = timedelta(seconds=float(seconds))
+    total_seconds = int(duration.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-def _extract_state_value(candidate: Any) -> Optional[str]:
-    if isinstance(candidate, dict):
-        state = candidate.get("state")
-        if isinstance(state, str):
-            return state
-    if isinstance(candidate, str):
-        return candidate
+def _map_gcode_channel(label: str) -> Optional[str]:
+    if not label:
+        return None
+
+    label = label.upper()
+
+    if label.startswith("B"):
+        return "heater_bed"
+
+    if label.startswith("T"):
+        suffix = label[1:]
+        if not suffix or suffix == "0":
+            return "extruder"
+        return f"extruder{suffix}"
+
     return None
