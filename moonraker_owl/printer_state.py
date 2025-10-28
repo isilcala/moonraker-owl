@@ -70,7 +70,10 @@ class PrinterStateResolver:
         if normalized in self._IDLE_STATES:
             latched = self._current_latch(context.observed_at)
             if latched is not None:
-                return latched
+                if context.has_active_job:
+                    self._clear_latch()
+                else:
+                    return latched
 
             if context.is_heating:
                 # Mainsail labels pre-print heating as printing to signal activity.
@@ -88,7 +91,9 @@ class PrinterStateResolver:
 
         if normalized:
             # Unknown but non-empty state -> surface raw value for diagnostics.
-            return raw_state.strip().title()
+            if isinstance(raw_state, str):
+                return raw_state.strip().title()
+            return normalized.title()
 
         return "Unknown"
 

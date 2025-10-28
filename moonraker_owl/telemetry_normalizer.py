@@ -30,6 +30,9 @@ class TelemetryNormalizer:
         self._initialized = False
         self._print_stats: Dict[str, Any] = {}
         self._status_sections: Dict[str, Any] = {}
+        # Backwards compatibility: legacy tests and helpers reference
+        # _status_state, keep it as an alias of the canonical map.
+        self._status_state = self._status_sections
         self._proc_state: Dict[str, Any] = {}
         self._file_metadata: Dict[str, Any] = {}
         self._pending_events: List[Dict[str, Any]] = []
@@ -116,7 +119,11 @@ class TelemetryNormalizer:
                     self._apply_print_stats(value, observed_at)
                 continue
 
-            self._status_sections[key] = _clone(value)
+            existing_section = self._status_sections.get(key)
+            if isinstance(existing_section, dict) and isinstance(value, dict):
+                deep_merge(existing_section, _clone(value))
+            else:
+                self._status_sections[key] = _clone(value)
 
             if key in {
                 "moonraker_stats",
@@ -152,6 +159,7 @@ class TelemetryNormalizer:
             return
 
         self._print_stats = {**self._print_stats, **_clone(updates)}
+        self._status_sections["print_stats"] = _clone(self._print_stats)
         self._last_print_stats_at = observed_at
 
         filename = updates.get("filename")
@@ -159,8 +167,6 @@ class TelemetryNormalizer:
             self._file_metadata.setdefault(filename, {}).setdefault(
                 "relativePath", filename
             )
-
-        self._refresh_job_activity(updates, observed_at)
 
     def _refresh_job_activity(
         self, updates: Dict[str, Any], observed_at: datetime
@@ -250,6 +256,12 @@ class TelemetryNormalizer:
                 thumbnails = metadata.get("thumbnails")
                 if thumbnails:
                     job_payload["thumbnails"] = thumbnails
+                    if not job_payload.get("thumbnail"):
+                        first_thumb = (
+                            thumbnails[0] if isinstance(thumbnails, list) else None
+                        )
+                        if isinstance(first_thumb, dict):
+                            job_payload["thumbnail"] = first_thumb
 
             file_info.setdefault("relativePath", effective_filename)
 
@@ -268,7 +280,11 @@ class TelemetryNormalizer:
             job_payload["message"] = message.strip()
             sub_status = message.strip()
 
-        progress = _build_progress_section(None, None, self._print_stats)
+        progress = _build_progress_section(
+            self._status_sections.get("display_status"),
+            self._status_sections.get("virtual_sdcard"),
+            self._print_stats,
+        )
         if progress:
             job_payload["progressPercent"] = progress.get("percent")
             if progress.get("elapsedSeconds") is not None:

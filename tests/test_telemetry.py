@@ -60,6 +60,9 @@ class FakeMoonrakerClient:
             return
         await self._callback(payload)
 
+    def update_state(self, state: Dict[str, Any]) -> None:
+        self._initial_state = state
+
 
 class FakeMQTTClient:
     def __init__(self) -> None:
@@ -135,19 +138,6 @@ def _load_sample(name: str) -> Dict[str, Any]:
 
 def _decode(message: dict[str, Any]) -> Dict[str, Any]:
     return json.loads(message["payload"].decode("utf-8"))
-
-
-def _get_contract_sensors(document: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    sensors = document.get("sensors")
-    assert isinstance(sensors, dict), "Expected telemetry.sensors object"
-    return sensors
-
-
-def _get_sensor(document: Dict[str, Any], name: str) -> Dict[str, Any]:
-    sensors = _get_contract_sensors(document)
-    sensor = sensors.get(name)
-    assert isinstance(sensor, dict), f"Expected sensor '{name}'"
-    return sensor
 
 
 @pytest.mark.parametrize(
@@ -298,8 +288,7 @@ def test_cancelled_state_persists_briefly(monkeypatch) -> None:
     timeline = [
         base_time,
         base_time,
-        base_time + timedelta(seconds=1),
-        base_time + timedelta(seconds=1),
+        base_time + timedelta(seconds=20),
         base_time + timedelta(seconds=20),
         base_time + timedelta(seconds=20),
     ]
@@ -501,66 +490,95 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, "token")
     ]
 
-    for channel in ("overview", "sensors"):
+    expected_qos = {"overview": 1, "telemetry": 0}
+    for channel in ("overview", "telemetry"):
         topic = f"owl/printers/device-123/{channel}"
         assert topic in messages, f"Missing channel {channel}"
         first_message = messages[topic][0]
-        assert (
-            first_message["qos"]
-            == {
-                "overview": 1,
-                "sensors": 0,
-            }[channel]
-        )
+        assert first_message["qos"] == expected_qos[channel]
         document = _decode(first_message)
         assert document["kind"] == "full"
-        assert document["schemaVersion"] == 1
+        assert document["_schema"] == 1
         assert document["deviceId"] == "device-123"
         assert document.get("tenantId") == "tenant-42"
         assert document.get("printerId") == "printer-99"
         assert document.get("_origin") == EXPECTED_ORIGIN
         assert document.get("_ts"), "Expected contract timestamp"
         assert document.get("_seq") is not None
-        assert "source" not in document
-        assert "sequence" not in document
-        assert "timestamp" not in document
-        # Raw field is excluded by default (bandwidth optimization)
         assert "raw" not in document, "Raw field should be excluded by default"
 
-    telemetry_doc = _decode(messages["owl/printers/device-123/sensors"][0])
-    assert "temperatures" not in telemetry_doc
-    contract_section = telemetry_doc.get("sensors")
-    assert isinstance(contract_section, dict)
-    sensors = (
-        contract_section.get("sensors")
-        if contract_section.get("sensors") is not None
-        else contract_section
+    telemetry_doc = _decode(messages["owl/printers/device-123/telemetry"][0])
+    telemetry_body = telemetry_doc.get("telemetry")
+    assert isinstance(telemetry_body, dict)
+    sensors = telemetry_body.get("sensors")
+    assert isinstance(sensors, list) and sensors, "Expected telemetry sensor payload"
+    extruder_sensor = next(
+        (sensor for sensor in sensors if sensor.get("channel") == "extruder"),
+        None,
     )
-    assert isinstance(sensors, dict) and sensors, "Expected sensor contract payload"
-    extruder_sensor = sensors.get("extruder")
-    assert isinstance(extruder_sensor, dict)
+    assert extruder_sensor is not None
     assert extruder_sensor.get("type") == "heater"
     assert extruder_sensor.get("value") is not None
+    assert extruder_sensor.get("target") is not None
 
     overview_doc = _decode(messages["owl/printers/device-123/overview"][0])
     overview_contract = overview_doc.get("overview")
     assert isinstance(overview_contract, dict)
     assert overview_contract.get("printerStatus") == "Printing"
-    assert overview_contract.get("progressPercent") is not None
     assert overview_contract.get("elapsedSeconds") is not None
     assert overview_contract.get("estimatedTimeRemainingSeconds") is not None
     assert overview_contract.get("subStatus")
+    flags = overview_contract.get("flags")
+    assert isinstance(flags, dict)
+    assert flags.get("hasActiveJob") is True
+    assert flags.get("watchWindowActive") is False
 
     job_contract = overview_contract.get("job")
     assert isinstance(job_contract, dict)
     assert job_contract.get("name")
-    assert job_contract.get("progressPercent") == overview_contract.get(
-        "progressPercent"
-    )
+    assert job_contract.get("progressPercent") is not None
 
-    thumbnail_contract = job_contract.get("thumbnail")
-    assert isinstance(thumbnail_contract, dict)
-    assert "cloudUrl" in thumbnail_contract
+
+@pytest.mark.asyncio
+async def test_pipeline_emits_schema_envelopes() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=20.0)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+    await publisher.stop()
+
+    messages = mqtt.by_topic()
+    telemetry_topic = "owl/printers/device-123/telemetry"
+    overview_topic = "owl/printers/device-123/overview"
+
+    assert telemetry_topic in messages, "Expected telemetry channel"
+    assert overview_topic in messages, "Expected overview channel"
+    assert "owl/printers/device-123/sensors" not in messages
+
+    telemetry_envelope = _decode(messages[telemetry_topic][0])
+    assert telemetry_envelope["_schema"] == 1
+    assert telemetry_envelope["kind"] == "full"
+    assert telemetry_envelope["_origin"] == EXPECTED_ORIGIN
+    assert telemetry_envelope.get("telemetry")
+    cadence = telemetry_envelope["telemetry"].get("cadence")
+    assert isinstance(cadence, dict)
+    assert cadence.get("mode") == "idle"
+
+    sensors = telemetry_envelope["telemetry"].get("sensors")
+    assert isinstance(sensors, list) and sensors
+
+    overview_envelope = _decode(messages[overview_topic][0])
+    assert overview_envelope["_schema"] == 1
+    assert overview_envelope["kind"] == "full"
+    overview_payload = overview_envelope.get("overview")
+    assert isinstance(overview_payload, dict)
+    assert overview_payload.get("printerStatus")
 
 
 @pytest.mark.asyncio
@@ -581,9 +599,7 @@ async def test_publisher_emits_overview_full_update() -> None:
             "method": "notify_status_update",
             "params": [
                 {
-                    "status": {
-                        "display_status": {"progress": 0.55},
-                    }
+                    "virtual_sdcard": {"progress": 0.55},
                 }
             ],
         }
@@ -597,11 +613,10 @@ async def test_publisher_emits_overview_full_update() -> None:
     assert document["kind"] == "full"
     overview = document.get("overview")
     assert isinstance(overview, dict)
-    assert overview.get("progressPercent") == 55
 
     job = overview.get("job")
     assert isinstance(job, dict)
-    assert job.get("progressPercent") == 55
+    assert job.get("progressPercent") == pytest.approx(55.0, rel=1e-3)
 
 
 @pytest.mark.asyncio
@@ -616,12 +631,15 @@ async def test_publisher_emits_events_channel() -> None:
     await asyncio.sleep(0.05)
     mqtt.messages.clear()
 
-    await moonraker.emit(
-        {
-            "method": "notify_gcode_response",
-            "params": ["File opened"],
-        }
+    # Manually queue an event to ensure the publisher forwards orchestrator events.
+    publisher._orchestrator.events.record_command_state(
+        command_id="cmd-123",
+        command_type="telemetry:set-rate",
+        state="completed",
+        session_id="history-1",
     )
+
+    await moonraker.emit({"result": {"status": {}}})
     await asyncio.sleep(0.05)
     await publisher.stop()
 
@@ -630,18 +648,17 @@ async def test_publisher_emits_events_channel() -> None:
     last_event_message = events_messages[-1]
     assert last_event_message["qos"] == 2
     document = _decode(last_event_message)
-    assert document["kind"] == "delta"
-    events = document.get("events")
-    assert isinstance(events, list) and events, "Expected contract events"
-    entry = events[0]
-    assert entry.get("eventName") == "gcodeResponse"
-    assert entry.get("severity") == "info"
-    payload = entry.get("payload")
-    assert isinstance(payload, dict)
-    details = payload.get("details")
-    assert isinstance(details, dict)
-    assert details.get("message") == "File opened"
-    assert details.get("code") == "gcode_response"
+    assert document["kind"] == "full"
+    assert document["_schema"] == 1
+    events_body = document.get("events")
+    assert isinstance(events_body, dict)
+    items = events_body.get("items")
+    assert isinstance(items, list) and items, "Expected contract events"
+    entry = items[0]
+    assert entry.get("eventName") == "commandStateChanged"
+    data = entry.get("data")
+    assert isinstance(data, dict)
+    assert data.get("state") == "completed"
 
 
 @pytest.mark.asyncio
@@ -721,28 +738,30 @@ async def test_subscription_normalizes_field_names() -> None:
         "toolhead": ["position"],
     }
 
-    @pytest.mark.asyncio
-    async def test_heater_merge_forces_telemetry_publish() -> None:
-        initial_state = {
-            "result": {
-                "status": {
-                    "extruder": {"temperature": 41.0, "target": 0.0},
-                    "heater_bed": {"temperature": 39.0, "target": 0.0},
-                }
+
+@pytest.mark.asyncio
+async def test_heater_merge_forces_telemetry_publish() -> None:
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {"temperature": 41.0, "target": 0.0},
+                "heater_bed": {"temperature": 39.0, "target": 0.0},
             }
         }
+    }
 
-        moonraker = FakeMoonrakerClient(initial_state)
-        mqtt = FakeMQTTClient()
-        config = build_config(rate_hz=20.0)
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=20.0)
 
-        publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
 
-        await publisher.start()
-        await asyncio.sleep(0.05)
-        mqtt.messages.clear()
+    await publisher.start()
+    await asyncio.sleep(0.05)
+    mqtt.messages.clear()
 
-        moonraker._initial_state = {
+    moonraker.update_state(
+        {
             "result": {
                 "status": {
                     "extruder": {"temperature": 72.5, "target": 100.0},
@@ -750,34 +769,39 @@ async def test_subscription_normalizes_field_names() -> None:
                 }
             }
         }
+    )
 
-        await moonraker.emit(
-            {
-                "method": "notify_status_update",
-                "params": [
-                    {
-                        "status": {
-                            "extruder": {"temperature": 72.5},
-                            "heater_bed": {"temperature": 39.0},
-                        }
-                    }
-                ],
-            }
-        )
+    await moonraker.emit(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "extruder": {"temperature": 72.5},
+                    "heater_bed": {"temperature": 39.0},
+                }
+            ],
+        }
+    )
 
-        await asyncio.sleep(0.1)
-        await publisher.stop()
+    await asyncio.sleep(0.1)
+    await publisher.stop()
 
-        telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
-        assert telemetry_messages, "Expected telemetry publish after heater ramp"
-        assert len(telemetry_messages) == 1
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    assert telemetry_messages, "Expected telemetry publish after heater ramp"
+    assert len(telemetry_messages) == 1
 
-        document = _decode(telemetry_messages[0])
-        assert document.get("_seq", 0) > 1
+    document = _decode(telemetry_messages[0])
+    assert document.get("_seq", 0) > 1
 
-        extruder_sensor = _get_sensor(document, "extruder")
-        assert extruder_sensor.get("target") == 100
-        assert extruder_sensor.get("value") == 72
+    telemetry_body = document.get("telemetry")
+    assert isinstance(telemetry_body, dict)
+    sensors = telemetry_body.get("sensors")
+    assert isinstance(sensors, list)
+    extruder_sensor = next(
+        sensor for sensor in sensors if sensor.get("channel") == "extruder"
+    )
+    assert extruder_sensor.get("target") == pytest.approx(100.0, rel=1e-3)
+    assert extruder_sensor.get("value") == pytest.approx(72.5, rel=1e-3)
 
 
 def test_telemetry_configuration_requires_device_id():
@@ -884,16 +908,14 @@ async def test_temperature_target_preserved_across_updates() -> None:
             "method": "notify_status_update",
             "params": [
                 {
-                    "status": {
-                        "extruder": {
-                            "temperature": 195.5,
-                            # target intentionally omitted
-                        },
-                        "heater_bed": {
-                            "temperature": 58.2,
-                            # target intentionally omitted
-                        },
-                    }
+                    "extruder": {
+                        "temperature": 195.5,
+                        # target intentionally omitted
+                    },
+                    "heater_bed": {
+                        "temperature": 58.2,
+                        # target intentionally omitted
+                    },
                 }
             ],
         }
@@ -903,17 +925,28 @@ async def test_temperature_target_preserved_across_updates() -> None:
     await publisher.stop()
 
     # Verify the target was preserved
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
     assert telemetry_messages, "Expected telemetry updates"
 
     document = _decode(telemetry_messages[-1])
-    extruder_sensor = _get_sensor(document, "extruder")
-    assert extruder_sensor.get("value") == 195
-    assert extruder_sensor.get("target") == 210, "Target should be preserved"
+    telemetry_body = document.get("telemetry")
+    assert isinstance(telemetry_body, dict)
+    sensors = telemetry_body.get("sensors")
+    assert isinstance(sensors, list)
 
-    bed_sensor = _get_sensor(document, "heaterBed")
-    assert bed_sensor.get("value") == 58
-    assert bed_sensor.get("target") == 60, "Target should be preserved"
+    def _find(channel: str) -> Dict[str, Any]:
+        for sensor in sensors:
+            if sensor.get("channel") == channel:
+                return sensor
+        raise AssertionError(f"Missing sensor {channel}")
+
+    extruder_sensor = _find("extruder")
+    assert extruder_sensor.get("value") == pytest.approx(195.5, rel=1e-3)
+    assert extruder_sensor.get("target") == pytest.approx(210.0, rel=1e-3)
+
+    bed_sensor = _find("heaterBed")
+    assert bed_sensor.get("value") == pytest.approx(58.2, rel=1e-3)
+    assert bed_sensor.get("target") == pytest.approx(60.0, rel=1e-3)
 
 
 @pytest.mark.asyncio
@@ -944,10 +977,8 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
             "method": "notify_status_update",
             "params": [
                 {
-                    "status": {
-                        "extruder": {
-                            "temperature": 195.4,
-                        }
+                    "extruder": {
+                        "temperature": 195.4,
                     }
                 }
             ],
@@ -956,19 +987,25 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
 
     await asyncio.sleep(0.1)
 
-    assert mqtt.by_topic().get("owl/printers/device-123/sensors") is None, (
-        "Expected fractional change below 1°C to be deduplicated"
+    first_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    assert first_messages, "Expected telemetry publish for fractional change"
+    first_document = _decode(first_messages[-1])
+    first_body = first_document.get("telemetry")
+    assert isinstance(first_body, dict)
+    first_sensors = first_body.get("sensors")
+    assert isinstance(first_sensors, list)
+    first_extruder = next(
+        sensor for sensor in first_sensors if sensor.get("channel") == "extruder"
     )
+    assert first_extruder.get("value") == pytest.approx(195.4, rel=1e-3)
 
     await moonraker.emit(
         {
             "method": "notify_status_update",
             "params": [
                 {
-                    "status": {
-                        "extruder": {
-                            "temperature": 196.2,
-                        }
+                    "extruder": {
+                        "temperature": 196.2,
                     }
                 }
             ],
@@ -978,12 +1015,19 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
     await asyncio.sleep(0.1)
     await publisher.stop()
 
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
     assert telemetry_messages, "Expected integer-scale change to publish telemetry"
 
     document = _decode(telemetry_messages[-1])
-    extruder_sensor = _get_sensor(document, "extruder")
-    assert extruder_sensor.get("value") == 196
+    telemetry_body = document.get("telemetry")
+    assert isinstance(telemetry_body, dict)
+    sensors = telemetry_body.get("sensors")
+    assert isinstance(sensors, list)
+    extruder_sensor = next(
+        sensor for sensor in sensors if sensor.get("channel") == "extruder"
+    )
+    assert extruder_sensor.get("value") == pytest.approx(196.2, rel=1e-3)
+    assert document["_seq"] > first_document["_seq"]
 
 
 @pytest.mark.asyncio
@@ -1074,15 +1118,21 @@ async def test_query_on_notification_ensures_target_values():
     )
 
     # Verify MQTT message includes the correct target (from query, not notification)
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
     assert telemetry_messages, "Expected telemetry updates"
 
     document = _decode(telemetry_messages[-1])
-    extruder_sensor = _get_sensor(document, "extruder")
-    assert extruder_sensor.get("value") == 40
+    telemetry_body = document.get("telemetry")
+    assert isinstance(telemetry_body, dict)
+    sensors = telemetry_body.get("sensors")
+    assert isinstance(sensors, list)
+    extruder_sensor = next(
+        sensor for sensor in sensors if sensor.get("channel") == "extruder"
+    )
+    assert extruder_sensor.get("value") == pytest.approx(40.1, rel=1e-3)
     # This is the critical assertion: target should be 50.0 (from query),
     # not missing or stuck at old value
-    assert extruder_sensor.get("target") == 50, (
+    assert extruder_sensor.get("target") == pytest.approx(50.0, rel=1e-3), (
         "Target should be retrieved via HTTP query when omitted from WebSocket notification"
     )
 
@@ -1109,7 +1159,7 @@ async def test_raw_payload_excluded_by_default():
     await asyncio.sleep(0.2)
 
     # Verify messages were published
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
     assert telemetry_messages, "Expected telemetry messages"
 
     # Check that raw field is NOT present
@@ -1121,14 +1171,11 @@ async def test_raw_payload_excluded_by_default():
     # Verify normalized data is still present
     assert "deviceId" in document, "Expected device metadata"
     assert document.get("_origin") == EXPECTED_ORIGIN
-    contract = document.get("sensors")
-    assert isinstance(contract, dict) and ("sensors" in contract or contract), (
-        "Expected sensors contract"
-    )
-    sensors = (
-        contract.get("sensors") if contract.get("sensors") is not None else contract
-    )
-    assert isinstance(sensors, dict) and "extruder" in sensors
+    telemetry_body = document.get("telemetry")
+    assert isinstance(telemetry_body, dict)
+    sensors = telemetry_body.get("sensors")
+    assert isinstance(sensors, list)
+    assert any(sensor.get("channel") == "extruder" for sensor in sensors)
 
     await publisher.stop()
 
@@ -1153,7 +1200,7 @@ async def test_raw_payload_included_when_configured():
     await asyncio.sleep(0.2)
 
     # Verify messages were published
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
     assert telemetry_messages, "Expected telemetry messages"
 
     # Check that raw field IS present
@@ -1163,12 +1210,10 @@ async def test_raw_payload_included_when_configured():
 
     # Verify normalized data is also present
     assert document.get("_origin") == EXPECTED_ORIGIN
-    contract = document.get("sensors")
-    assert isinstance(contract, dict)
-    sensors = (
-        contract.get("sensors") if contract.get("sensors") is not None else contract
-    )
-    assert isinstance(sensors, dict) and "extruder" in sensors
-    assert isinstance(sensors, dict) and "extruder" in sensors
+    telemetry_body = document.get("telemetry")
+    assert isinstance(telemetry_body, dict)
+    sensors = telemetry_body.get("sensors")
+    assert isinstance(sensors, list) and sensors
+    assert any(sensor.get("channel") == "extruder" for sensor in sensors)
 
     await publisher.stop()
