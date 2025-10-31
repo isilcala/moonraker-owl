@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Protocol
 from urllib.parse import quote
 
 from .config import OwlConfig
+from .telemetry import TelemetryPublisher
 
 LOGGER = logging.getLogger(__name__)
 
@@ -70,10 +71,12 @@ class CommandProcessor:
         config: OwlConfig,
         moonraker: MoonrakerCommandClient,
         mqtt: MQTTCommandsClient,
+        telemetry: Optional[TelemetryPublisher] = None,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
         self._mqtt = mqtt
+        self._telemetry = telemetry
 
         (
             self._tenant_id,
@@ -119,10 +122,20 @@ class CommandProcessor:
                 command_name,
                 exc.command_id,
                 "failed",
+                stage="dispatch",
                 error_code=exc.code or "invalid_payload",
                 error_message=str(exc),
             )
+            if exc.command_id:
+                placeholder = CommandMessage(exc.command_id, command_name, {})
+                self._record_command_state(
+                    placeholder,
+                    "rejected",
+                    details={"code": exc.code or "invalid_payload"},
+                )
             return
+
+        self._record_command_state(message, "dispatched")
 
         try:
             await self._publish_ack(
@@ -131,8 +144,9 @@ class CommandProcessor:
                 "accepted",
                 stage="dispatch",
             )
+            self._record_command_state(message, "accepted")
 
-            await self._execute(message)
+            details = await self._execute(message)
         except CommandProcessingError as exc:
             await self._publish_ack(
                 command_name,
@@ -142,15 +156,48 @@ class CommandProcessor:
                 error_code=exc.code or "command_failed",
                 error_message=str(exc),
             )
+            failure_details: Dict[str, Any] = {}
+            if exc.code:
+                failure_details["code"] = exc.code
+            failure_details["message"] = str(exc)
+            self._record_command_state(
+                message,
+                "failed",
+                details=failure_details or None,
+            )
         else:
             await self._publish_ack(
                 command_name,
                 message.command_id,
-                "success",
+                "completed",
                 stage="execution",
             )
+            self._record_command_state(message, "completed", details=details)
 
-    async def _execute(self, message: CommandMessage) -> None:
+    def _record_command_state(
+        self,
+        message: CommandMessage,
+        state: str,
+        *,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self._telemetry is None:
+            return
+
+        try:
+            self._telemetry.record_command_state(
+                command_id=message.command_id,
+                command_type=message.command,
+                state=state,
+                details=details,
+            )
+        except Exception:  # pragma: no cover - defensive
+            LOGGER.debug("Failed to record command state %s", state, exc_info=True)
+
+    async def _execute(self, message: CommandMessage) -> Optional[Dict[str, Any]]:
+        if message.command == "telemetry:set-rate":
+            return self._execute_telemetry_set_rate(message)
+
         try:
             await self._moonraker.execute_print_action(message.command)
         except ValueError as exc:
@@ -164,6 +211,79 @@ class CommandProcessor:
                 command_id=message.command_id,
             ) from exc
 
+        return {"command": message.command}
+
+    def _execute_telemetry_set_rate(self, message: CommandMessage) -> Dict[str, Any]:
+        if self._telemetry is None:
+            raise CommandProcessingError(
+                "Telemetry publisher unavailable",
+                code="telemetry_unavailable",
+                command_id=message.command_id,
+            )
+
+        params = message.parameters or {}
+
+        mode = str(params.get("mode", "idle")).strip().lower() or "idle"
+        max_hz_value = params.get("maxHz", 0.0)
+        try:
+            max_hz = float(max_hz_value)
+        except (TypeError, ValueError):
+            raise CommandProcessingError(
+                "maxHz must be numeric",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        requested_at = _parse_iso8601(params.get("issuedAt"))
+        if requested_at is None:
+            requested_at = _parse_iso8601(params.get("requestedAt"))
+
+        duration_value = params.get("durationSeconds")
+        duration_seconds: Optional[int]
+        if duration_value is None:
+            duration_seconds = None
+        else:
+            try:
+                duration_seconds = int(duration_value)
+            except (TypeError, ValueError):
+                raise CommandProcessingError(
+                    "durationSeconds must be an integer",
+                    code="invalid_parameters",
+                    command_id=message.command_id,
+                )
+            if duration_seconds < 0:
+                duration_seconds = None
+
+        expires_override = _parse_iso8601(params.get("expiresAt"))
+        if expires_override is not None:
+            baseline = requested_at or datetime.now(timezone.utc)
+            computed_duration = int((expires_override - baseline).total_seconds())
+            duration_seconds = max(0, computed_duration)
+
+        expires_at = self._telemetry.apply_telemetry_rate(
+            mode=mode,
+            max_hz=max_hz,
+            duration_seconds=duration_seconds,
+            requested_at=requested_at,
+        )
+
+        effective_expires = expires_override or expires_at
+
+        details: Dict[str, Any] = {
+            "mode": mode,
+            "maxHz": max(0.0, max_hz),
+        }
+        if duration_seconds is not None:
+            details["durationSeconds"] = duration_seconds
+        if requested_at is not None:
+            details["requestedAtUtc"] = requested_at.replace(microsecond=0).isoformat()
+        if effective_expires is not None:
+            details["watchWindowExpiresUtc"] = effective_expires.replace(
+                microsecond=0
+            ).isoformat()
+
+        return details
+
     async def _publish_ack(
         self,
         command_name: str,
@@ -174,28 +294,42 @@ class CommandProcessor:
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
     ) -> None:
-        if not command_id:
-            LOGGER.debug(
-                "Skipping acknowledgment for %s because command ID is not available",
-                command_name,
-            )
-            return
-
         topic = _build_ack_topic(self._device_id, command_name)
+        acknowledged_at = datetime.now(timezone.utc).replace(microsecond=0)
+        stage_value = stage.lower()
+        effective_command_id = command_id or ""
         document: Dict[str, Any] = {
-            "commandId": command_id,
+            "commandId": effective_command_id,
             "deviceId": self._device_id,
             "status": status,
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "stage": stage_value,
+            "timestamps": {
+                "acknowledgedAt": acknowledged_at.isoformat(timespec="seconds"),
+            },
         }
 
-        if stage:
-            document["stage"] = stage
+        if not command_id:
+            LOGGER.debug(
+                "Publishing acknowledgment for %s without a command ID", command_name
+            )
+
+        if stage_value == "dispatch":
+            document["timestamps"]["dispatchedAt"] = acknowledged_at.isoformat(
+                timespec="seconds"
+            )
 
         if self._tenant_id:
             document["tenantId"] = self._tenant_id
         if self._printer_id:
             document["printerId"] = self._printer_id
+        correlation: Dict[str, Any] = {}
+        if self._tenant_id:
+            correlation["tenantId"] = self._tenant_id
+        if self._printer_id:
+            correlation["printerId"] = self._printer_id
+        if correlation:
+            document["correlation"] = correlation
+
         if error_code or error_message:
             reason: Dict[str, Any] = {}
             if error_code:
@@ -206,7 +340,7 @@ class CommandProcessor:
                 document["reason"] = reason
 
         payload = json.dumps(document).encode("utf-8")
-        self._mqtt.publish(topic, payload, qos=1, retain=False)
+        self._mqtt.publish(topic, payload, qos=2, retain=False)
 
 
 def _parse_command(raw_payload: bytes, command_name: str) -> CommandMessage:
@@ -260,6 +394,28 @@ def _parse_command(raw_payload: bytes, command_name: str) -> CommandMessage:
 def _build_ack_topic(device_id: str, command_name: str) -> str:
     safe_command_name = quote(command_name, safe="")
     return f"owl/printers/{device_id}/acks/{safe_command_name}"
+
+
+def _parse_iso8601(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
 
 
 def _extract_command_name(topic: str, device_id: str) -> Optional[str]:

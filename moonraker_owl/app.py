@@ -158,6 +158,7 @@ class MoonrakerOwlApp:
                 self._config,
                 self._moonraker_client,
                 self._mqtt_client,
+                telemetry=self._telemetry_publisher,
             )
             await self._command_processor.start()
             await self._health.update("commands", True, None)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional, Set
 
 from ..version import __version__
 from .events import EventCollector
@@ -14,10 +14,12 @@ from .trackers import HeaterMonitor, PrintSessionTracker
 
 
 @dataclass
-class ChannelEnvelope:
+class ChannelPayload:
     channel: str
-    sequence: int
     payload: Dict[str, Any]
+    session_id: str
+    observed_at: datetime
+    forced: bool
 
 
 class TelemetryOrchestrator:
@@ -42,8 +44,6 @@ class TelemetryOrchestrator:
         self.telemetry_selector = TelemetrySelector()
         self.events_selector = EventsSelector()
 
-        self._channel_sequences: Dict[str, int] = {}
-
         self._telemetry_mode = "idle"
         self._telemetry_max_hz = 0.033
         self._watch_window_expires: Optional[datetime] = None
@@ -59,8 +59,17 @@ class TelemetryOrchestrator:
         self._telemetry_max_hz = max_hz
         self._watch_window_expires = watch_window_expires
 
-    def build_envelopes(self) -> Dict[str, Dict[str, Any]]:
+    @property
+    def origin(self) -> str:
+        return self._origin
+
+    def build_payloads(
+        self,
+        *,
+        forced_channels: Optional[Iterable[str]] = None,
+    ) -> Dict[str, ChannelPayload]:
         observed_at = self._clock()
+        forced: Set[str] = set(forced_channels or ())
         session = self.session_tracker.compute(self.store)
 
         overview_payload = self.overview_selector.build(
@@ -81,53 +90,35 @@ class TelemetryOrchestrator:
             observed_at=observed_at,
         )
 
-        frames: Dict[str, Dict[str, Any]] = {}
+        frames: Dict[str, ChannelPayload] = {}
         if overview_payload:
             overview_payload["flags"]["watchWindowActive"] = (
                 self._telemetry_mode != "idle"
             )
-            frames["overview"] = self._wrap_envelope(
+            frames["overview"] = ChannelPayload(
                 channel="overview",
-                body=overview_payload,
+                payload=overview_payload,
                 session_id=session.session_id,
+                observed_at=observed_at,
+                forced="overview" in forced,
             )
 
         if telemetry_payload:
-            frames["telemetry"] = self._wrap_envelope(
+            frames["telemetry"] = ChannelPayload(
                 channel="telemetry",
-                body=telemetry_payload,
+                payload=telemetry_payload,
                 session_id=session.session_id,
+                observed_at=observed_at,
+                forced="telemetry" in forced,
             )
 
         if events_payload:
-            frames["events"] = self._wrap_envelope(
+            frames["events"] = ChannelPayload(
                 channel="events",
-                body=events_payload,
+                payload=events_payload,
                 session_id=session.session_id,
+                observed_at=observed_at,
+                forced="events" in forced,
             )
 
         return frames
-
-    def _wrap_envelope(
-        self,
-        *,
-        channel: str,
-        body: Dict[str, Any],
-        session_id: str,
-    ) -> Dict[str, Any]:
-        sequence = self._next_sequence(channel)
-        envelope = {
-            "_schema": 1,
-            "kind": "full",
-            "_ts": self._clock().replace(microsecond=0).isoformat(),
-            "_origin": self._origin,
-            "_seq": sequence,
-            "sessionId": session_id,
-            channel: body,
-        }
-        return envelope
-
-    def _next_sequence(self, channel: str) -> int:
-        current = self._channel_sequences.get(channel, 0) + 1
-        self._channel_sequences[channel] = current
-        return current

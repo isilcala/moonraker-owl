@@ -124,18 +124,22 @@ async def test_command_processor_executes_action_and_sends_ack(config):
     assert accepted["commandId"] == "cmd-1"
     assert accepted["stage"] == "dispatch"
     assert "reason" not in accepted
-    assert qos == 1
+    assert "timestamps" in accepted
+    assert "acknowledgedAt" in accepted["timestamps"]
+    assert qos == 2
     assert retain is False
 
     # Second ack reports final outcome
     topic, payload, qos, retain = mqtt.published[1]
     completed = json.loads(payload.decode("utf-8"))
     assert topic == "owl/printers/device-123/acks/pause"
-    assert completed["status"] == "success"
+    assert completed["status"] == "completed"
     assert completed["stage"] == "execution"
     assert completed["commandId"] == "cmd-1"
     assert "reason" not in completed
-    assert qos == 1
+    assert "timestamps" in completed
+    assert "acknowledgedAt" in completed["timestamps"]
+    assert qos == 2
     assert retain is False
 
     await processor.stop()
@@ -162,11 +166,14 @@ async def test_command_processor_handles_unknown_action(config):
     accepted = json.loads(mqtt.published[0][1].decode("utf-8"))
     assert accepted["status"] == "accepted"
     assert accepted["stage"] == "dispatch"
+    assert accepted["correlation"]["tenantId"] == "tenant-99"
+    assert mqtt.published[0][2] == 2
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
     assert failed["status"] == "failed"
     assert failed["stage"] == "execution"
     assert failed["reason"]["code"] == "unsupported_command"
+    assert mqtt.published[1][2] == 2
     assert not moonraker.actions
 
     await processor.stop()
@@ -187,7 +194,11 @@ async def test_command_processor_rejects_invalid_payload(config):
     if hasattr(result, "__await__"):
         await result
 
-    assert mqtt.published == []
+    assert len(mqtt.published) == 1
+    payload = json.loads(mqtt.published[0][1].decode("utf-8"))
+    assert payload["status"] == "failed"
+    assert payload.get("reason", {}).get("code") == "invalid_json"
+    assert payload["stage"] == "dispatch"
 
     await processor.stop()
 
@@ -211,6 +222,7 @@ async def test_command_processor_rejects_invalid_parameters(config):
     assert len(mqtt.published) == 1
     payload = json.loads(mqtt.published[0][1].decode("utf-8"))
     assert payload["status"] == "failed"
+    assert payload["stage"] == "dispatch"
     assert payload.get("reason", {}).get("code") == "invalid_parameters"
 
     await processor.stop()

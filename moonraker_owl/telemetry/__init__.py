@@ -7,10 +7,10 @@ import contextlib
 import copy
 import json
 import logging
-import math
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional, Protocol
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, Optional, Protocol, Set
 
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
@@ -21,6 +21,7 @@ from ..config import OwlConfig
 from ..core import PrinterAdapter, deep_merge
 from .orchestrator import TelemetryOrchestrator
 from .state_store import MoonrakerStateStore
+from ..telemetry_state import TelemetryHasher
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +42,13 @@ def get_heater_objects(objects: Dict[str, Any]) -> Dict[str, Optional[list[str]]
 
 class TelemetryConfigurationError(RuntimeError):
     """Raised when required telemetry configuration values are missing."""
+
+
+@dataclass
+class _ChannelPublishState:
+    sequence: int = 0
+    hash: Optional[str] = None
+    last_publish: float = 0.0
 
 
 class MQTTClientLike(Protocol):
@@ -88,8 +96,21 @@ class TelemetryPublisher:
             "telemetry": 0,
             "events": 2,
         }
+        self._channel_state: Dict[str, _ChannelPublishState] = {
+            name: _ChannelPublishState() for name in self._channel_topics
+        }
+        self._hasher = TelemetryHasher()
 
-        self._min_interval = _derive_interval_seconds(config.telemetry.rate_hz)
+        self._min_interval = 0.05
+        idle_hz = config.telemetry.rate_hz or 0.033
+        self._idle_interval = _hz_to_interval(idle_hz) or 30.0
+        self._watch_interval = _hz_to_interval(1.0) or 1.0
+        self._telemetry_interval = self._idle_interval
+        self._channel_caps = {
+            "overview": None,
+            "telemetry": self._telemetry_interval,
+            "events": 1.0,
+        }
         self._include_fields = _normalise_fields(config.include_fields)
         self._exclude_fields = _normalise_fields(config.exclude_fields)
         self._subscription_objects: dict[str, Optional[list[str]]] = (
@@ -110,16 +131,16 @@ class TelemetryPublisher:
         self._last_payload_snapshot: Optional[Dict[str, Any]] = None
         self._overview_idle_interval = 60.0
         self._overview_active_interval = 15.0
+        self._telemetry_watchdog_seconds = 300.0
+        self._watch_window_expires: Optional[datetime] = None
+        self._current_mode = "idle"
 
         self._orchestrator = TelemetryOrchestrator(
             clock=lambda: datetime.now(timezone.utc)
         )
-        idle_hz = config.telemetry.rate_hz or 0.0
-        if idle_hz <= 0:
-            idle_hz = 0.033
         self._orchestrator.set_telemetry_mode(
             mode="idle",
-            max_hz=idle_hz,
+            max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
             watch_window_expires=None,
         )
 
@@ -246,16 +267,19 @@ class TelemetryPublisher:
         last_sent = 0.0
 
         pending: Optional[Dict[str, Any]] = None
+        pending_forced: Set[str] = set()
 
         while not self._stop_event.is_set():
             if pending is None:
                 heartbeat_payload = self._prepare_heartbeat_payload()
                 if heartbeat_payload is not None:
                     pending = heartbeat_payload
+                    pending_forced = {"overview"}
                 else:
                     await self._event.wait()
                     self._event.clear()
                     pending = self._gather_payloads()
+                    pending_forced = set()
                     if pending is None:
                         continue
 
@@ -274,18 +298,20 @@ class TelemetryPublisher:
                 self._event.clear()
                 pending = self._gather_payloads(pending)
                 if pending is None:
+                    pending_forced = set()
                     break
 
             if pending is None:
                 continue
 
             try:
-                self._process_payload(pending)
+                self._process_payload(pending, forced_channels=pending_forced)
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception("Telemetry pipeline failed")
 
             last_sent = loop.time()
             pending = self._gather_payloads()
+            pending_forced = set()
 
         LOGGER.debug("TelemetryPublisher loop terminated")
 
@@ -307,11 +333,16 @@ class TelemetryPublisher:
 
         return merged
 
-    def _process_payload(self, payload: Dict[str, Any]) -> None:
+    def _process_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        forced_channels: Optional[Iterable[str]] = None,
+    ) -> None:
         self._orchestrator.ingest(payload)
         self._last_payload_snapshot = copy.deepcopy(payload)
 
-        frames = self._orchestrator.build_envelopes()
+        frames = self._orchestrator.build_payloads(forced_channels=forced_channels)
         if not frames:
             return
 
@@ -320,29 +351,27 @@ class TelemetryPublisher:
         if include_raw:
             raw_json = json.dumps(payload, default=_json_default)
 
-        for channel, document in frames.items():
+        now_monotonic = time.monotonic()
+
+        for channel, frame in frames.items():
             topic = self._channel_topics.get(channel)
             if topic is None:
                 continue
 
-            publish_document = copy.deepcopy(document)
-            publish_document["deviceId"] = self._device_id
-            if self._tenant_id:
-                publish_document["tenantId"] = self._tenant_id
-            if self._printer_id:
-                publish_document["printerId"] = self._printer_id
-            if include_raw and raw_json is not None:
-                publish_document["raw"] = raw_json
+            if not self._should_publish_channel(channel, frame.payload, now_monotonic, forced=frame.forced):
+                continue
+
+            envelope = self._wrap_envelope(channel, frame, include_raw=include_raw, raw_json=raw_json)
 
             if channel == "overview":
-                overview_body = publish_document.get("overview")
+                overview_body = envelope.get("overview")
                 if isinstance(overview_body, dict):
                     status_value = overview_body.get("printerStatus")
                     if isinstance(status_value, str) and status_value:
                         self._last_overview_status = status_value
-                        self._last_overview_publish_time = time.monotonic()
+                        self._last_overview_publish_time = now_monotonic
 
-            self._publish(channel, topic, publish_document)
+            self._publish(channel, topic, envelope)
 
     def _prepare_heartbeat_payload(self) -> Optional[Dict[str, Any]]:
         if not self._should_emit_overview_heartbeat():
@@ -364,6 +393,131 @@ class TelemetryPublisher:
         )
 
         return time.monotonic() - self._last_overview_publish_time >= interval
+
+    def apply_telemetry_rate(
+        self,
+        *,
+        mode: str,
+        max_hz: float,
+        duration_seconds: Optional[int],
+        requested_at: Optional[datetime] = None,
+    ) -> Optional[datetime]:
+        mode = (mode or "idle").strip().lower() or "idle"
+        max_hz = max(0.0, max_hz)
+        requested_at = requested_at or datetime.now(timezone.utc)
+        expires_at: Optional[datetime] = None
+        if duration_seconds and duration_seconds > 0:
+            expires_at = requested_at + timedelta(seconds=duration_seconds)
+
+        interval = _hz_to_interval(max_hz)
+        if mode == "watch":
+            interval = min(interval or self._watch_interval, self._watch_interval)
+        else:
+            interval = interval or self._idle_interval
+
+        interval = interval or self._idle_interval
+        effective_hz = 0.0 if interval <= 0 else 1.0 / interval
+
+        self._telemetry_interval = interval
+        self._channel_caps["telemetry"] = interval
+        self._watch_window_expires = expires_at
+        if interval > 0:
+            self._telemetry_watchdog_seconds = max(300.0, interval * 5)
+        self._orchestrator.set_telemetry_mode(
+            mode=mode,
+            max_hz=effective_hz,
+            watch_window_expires=expires_at,
+        )
+        self._current_mode = mode
+
+        for channel in ("telemetry", "overview"):
+            state = self._channel_state.get(channel)
+            if state:
+                state.hash = None
+                state.last_publish = 0.0
+
+        self._event.set()
+        return expires_at
+
+    def record_command_state(
+        self,
+        *,
+        command_id: str,
+        command_type: str,
+        state: str,
+        session_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._orchestrator.events.record_command_state(
+            command_id=command_id,
+            command_type=command_type,
+            state=state,
+            session_id=session_id,
+            details=details,
+        )
+        self._event.set()
+
+    def _wrap_envelope(
+        self,
+        channel: str,
+        frame: ChannelPayload,
+        *,
+        include_raw: bool,
+        raw_json: Optional[str],
+    ) -> Dict[str, Any]:
+        state = self._channel_state[channel]
+        state.sequence += 1
+
+        document: Dict[str, Any] = {
+            "_schema": 1,
+            "kind": "full",
+            "_ts": frame.observed_at.replace(microsecond=0).isoformat(),
+            "_origin": self._orchestrator.origin,
+            "_seq": state.sequence,
+            "sessionId": frame.session_id,
+            channel: frame.payload,
+            "deviceId": self._device_id,
+        }
+
+        if self._tenant_id:
+            document["tenantId"] = self._tenant_id
+        if self._printer_id:
+            document["printerId"] = self._printer_id
+        if include_raw and raw_json is not None:
+            document["raw"] = raw_json
+
+        return document
+
+    def _should_publish_channel(
+        self,
+        channel: str,
+        payload: Dict[str, Any],
+        now_monotonic: float,
+        *,
+        forced: bool,
+    ) -> bool:
+        state = self._channel_state[channel]
+
+        effective_forced = forced
+
+        if channel == "telemetry":
+            elapsed_since_publish = now_monotonic - state.last_publish
+            if state.last_publish == 0.0 or elapsed_since_publish >= self._telemetry_watchdog_seconds:
+                effective_forced = True
+
+        cadence_interval = self._channel_caps.get(channel)
+        if cadence_interval:
+            elapsed = now_monotonic - state.last_publish
+            if not effective_forced and elapsed < cadence_interval:
+                return False
+
+        payload_hash = self._hasher.hash_payload(payload)
+        if not effective_forced and payload_hash == state.hash:
+            return False
+
+        state.hash = payload_hash
+        state.last_publish = now_monotonic
+        return True
 
     def _publish(self, channel: str, topic: str, document: Dict[str, Any]) -> None:
         payload_bytes = json.dumps(document, default=_json_default).encode("utf-8")
@@ -410,7 +564,7 @@ def _round_temperature(value: Any) -> Optional[float]:
         numeric = float(value)
     except (TypeError, ValueError):
         return None
-    return math.floor(numeric * 10.0) / 10.0
+    return float(round(numeric))
 
 
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
@@ -453,10 +607,10 @@ def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
     return tenant_id, device_id, printer_id, device_token
 
 
-def _derive_interval_seconds(rate_hz: float) -> float:
+def _hz_to_interval(rate_hz: float) -> Optional[float]:
     if rate_hz <= 0:
-        return 1.0
-    return max(0.05, 1.0 / rate_hz)
+        return None
+    return max(0.1, 1.0 / rate_hz)
 
 
 def build_subscription_manifest(

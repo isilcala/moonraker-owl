@@ -61,7 +61,7 @@ class MoonrakerConfig:
 
 @dataclass(slots=True)
 class TelemetryConfig:
-    rate_hz: float = 1.0
+    rate_hz: float = 1/30
     include_raw_payload: bool = False  # Set to True to include raw Moonraker payload (adds ~450 bytes per message)
     include_fields: List[str] = field(
         default_factory=lambda: list(DEFAULT_TELEMETRY_FIELDS)

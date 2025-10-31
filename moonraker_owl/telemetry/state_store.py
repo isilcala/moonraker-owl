@@ -25,6 +25,7 @@ class MoonrakerStateStore:
     def __init__(self, *, clock: Optional[Callable[[], datetime]] = None) -> None:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._sections: Dict[str, SectionSnapshot] = {}
+        self._latest_observed_at: Optional[datetime] = None
 
     def ingest(self, payload: Mapping[str, Any]) -> None:
         observed_at = self._clock()
@@ -47,6 +48,9 @@ class MoonrakerStateStore:
 
     def as_dict(self) -> Dict[str, Mapping[str, Any]]:
         return {name: snapshot.data for name, snapshot in self._sections.items()}
+
+    def latest_observed_at(self) -> Optional[datetime]:
+        return self._latest_observed_at
 
     def _ingest_status(
         self, status: Any, observed_at: datetime
@@ -92,8 +96,12 @@ class MoonrakerStateStore:
         incoming = dict(section)
         existing = self._sections.get(name)
         if existing is not None:
-            base: Dict[str, Any] = copy.deepcopy(dict(existing.data))
+            baseline_dict = dict(existing.data)
+            base: Dict[str, Any] = copy.deepcopy(baseline_dict)
             deep_merge(base, incoming)
+
+            if base == baseline_dict:
+                return
         else:
             base = copy.deepcopy(incoming)
 
@@ -103,6 +111,7 @@ class MoonrakerStateStore:
             data=base,
         )
         self._sections[name] = snapshot
+        self._latest_observed_at = observed_at
 
 
 def _iter_dicts(params: Any) -> Iterable[Mapping[str, Any]]:

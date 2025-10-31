@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from .state_engine import PrinterContext, PrinterStateEngine
-from .state_store import MoonrakerStateStore
+from .state_store import MoonrakerStateStore, SectionSnapshot
 from .trackers import HeaterMonitor, SessionInfo
 
 
@@ -14,6 +16,8 @@ class OverviewSelector:
     def __init__(self, *, heartbeat_seconds: int = 60) -> None:
         self._heartbeat_seconds = heartbeat_seconds
         self._state_engine = PrinterStateEngine()
+        self._last_contract_hash: Optional[str] = None
+        self._last_updated: Optional[datetime] = None
 
     def build(
         self,
@@ -56,15 +60,30 @@ class OverviewSelector:
             "watchWindowActive": False,
         }
 
+        contract_hash = json.dumps(overview, sort_keys=True, default=str)
+        if contract_hash != self._last_contract_hash:
+            self._last_contract_hash = contract_hash
+            self._last_updated = observed_at
+
+        last_updated = self._last_updated or observed_at
+
         overview["heartbeatSeconds"] = self._heartbeat_seconds
-        overview["lastUpdatedUtc"] = observed_at.replace(microsecond=0).isoformat()
+        overview["lastUpdatedUtc"] = last_updated.replace(microsecond=0).isoformat()
 
         return overview
 
 
+@dataclass
+class _SensorState:
+    value: Optional[float]
+    target: Optional[float]
+    status: str
+    last_updated: datetime
+
+
 class TelemetrySelector:
     def __init__(self) -> None:
-        pass
+        self._sensor_state: Dict[str, _SensorState] = {}
 
     def build(
         self,
@@ -75,7 +94,7 @@ class TelemetrySelector:
         watch_window_expires: Optional[datetime],
         observed_at: datetime,
     ) -> Optional[Dict[str, Any]]:
-        sensors = _collect_sensors(store)
+        sensors = self._collect_sensors(store)
         cadence: Dict[str, Any] = {
             "mode": mode,
             "maxHz": max_hz,
@@ -89,6 +108,68 @@ class TelemetrySelector:
             "cadence": cadence,
             "sensors": sensors,
         }
+
+    def _collect_sensors(self, store: MoonrakerStateStore) -> List[Dict[str, Any]]:
+        sensors: List[Dict[str, Any]] = []
+        seen_channels: set[str] = set()
+
+        for section in store.iter_sections():
+            channel = _normalise_channel_name(section.name)
+            if channel is None:
+                continue
+
+            payload, state = self._build_sensor_payload(channel, section)
+            sensors.append(payload)
+            self._sensor_state[channel] = state
+            seen_channels.add(channel)
+
+        for channel in list(self._sensor_state.keys()):
+            if channel not in seen_channels:
+                self._sensor_state.pop(channel)
+
+        sensors.sort(key=lambda entry: entry["channel"])
+        return sensors
+
+    def _build_sensor_payload(
+        self,
+        channel: str,
+        section: SectionSnapshot,
+    ) -> tuple[Dict[str, Any], _SensorState]:
+        sensor_type = _infer_sensor_type(section.name)
+        unit = _infer_unit(section.name)
+
+        raw_value = section.data.get("temperature")
+        if raw_value is None:
+            raw_value = section.data.get("value")
+
+        value = _round_sensor_value(sensor_type, raw_value)
+        target = _round_sensor_value(sensor_type, section.data.get("target"))
+        status = _normalise_sensor_state(section.data.get("state"))
+
+        previous = self._sensor_state.get(channel)
+        signature = (value, target, status)
+        if previous and (previous.value, previous.target, previous.status) == signature:
+            last_updated = previous.last_updated
+        else:
+            last_updated = section.observed_at
+            previous = _SensorState(
+                value=value,
+                target=target,
+                status=status,
+                last_updated=last_updated,
+            )
+
+        payload = {
+            "channel": channel,
+            "type": sensor_type,
+            "unit": unit,
+            "value": value,
+            **({"target": target} if target is not None else {}),
+            "status": status,
+            "lastUpdatedUtc": last_updated.replace(microsecond=0).isoformat(),
+        }
+
+        return payload, previous
 
 
 class EventsSelector:
@@ -126,7 +207,7 @@ def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
     if session.progress_percent is not None:
         payload["progressPercent"] = round(session.progress_percent, 3)
 
-    layers = {}
+    layers: Dict[str, int] = {}
     if session.layer_current is not None:
         layers["current"] = session.layer_current
     if session.layer_total is not None:
@@ -143,40 +224,6 @@ def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
         payload["message"] = session.message
 
     return payload
-
-
-def _collect_sensors(store: MoonrakerStateStore) -> List[Dict[str, Any]]:
-    sensors: List[Dict[str, Any]] = []
-
-    for section in store.iter_sections():
-        channel = _normalise_channel_name(section.name)
-        if channel is None:
-            continue
-
-        sensor_type = _infer_sensor_type(section.name)
-        unit = _infer_unit(section.name)
-        value = _round_float(
-            section.data.get("temperature") or section.data.get("value")
-        )
-        target = _round_float(section.data.get("target"))
-        status = section.data.get("state") or "ok"
-
-        sensors.append(
-            {
-                "channel": channel,
-                "type": sensor_type,
-                "unit": unit,
-                "value": value,
-                **({"target": target} if target is not None else {}),
-                "status": status,
-                "lastUpdatedUtc": section.observed_at.replace(
-                    microsecond=0
-                ).isoformat(),
-            }
-        )
-
-    sensors.sort(key=lambda entry: entry["channel"])
-    return sensors
 
 
 def _normalise_channel_name(name: str) -> Optional[str]:
@@ -206,10 +253,25 @@ def _infer_unit(name: str) -> str:
     return "percent"
 
 
-def _round_float(value: Any) -> Optional[float]:
+def _normalise_sensor_state(status: Any) -> str:
+    if isinstance(status, str) and status:
+        return status
+    return "ok"
+
+
+def _round_sensor_value(sensor_type: str, value: Any) -> Optional[float]:
+    numeric = _to_float(value)
+    if numeric is None:
+        return None
+    if sensor_type == "heater":
+        return float(round(numeric))
+    return round(numeric, 1)
+
+
+def _to_float(value: Any) -> Optional[float]:
     if value is None:
         return None
     try:
-        return round(float(value), 1)
+        return float(value)
     except (TypeError, ValueError):
         return None

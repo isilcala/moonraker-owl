@@ -65,6 +65,8 @@ def test_state_store_tracks_sections(baseline_snapshot: dict) -> None:
     clock = FakeClock(
         datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc),
         datetime(2025, 10, 10, 16, 42, 4, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 5, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 6, tzinfo=timezone.utc),
     )
     store = MoonrakerStateStore(clock=clock)
 
@@ -84,6 +86,31 @@ def test_state_store_tracks_sections(baseline_snapshot: dict) -> None:
     extruder = store.get("extruder")
     assert extruder is not None
     assert extruder.data["temperature"] == 210.0
+
+    duplicate = {
+        "method": "notify_status_update",
+        "params": [{"extruder": {"temperature": 210.0}}],
+    }
+
+    store.ingest(duplicate)
+
+    extruder_after_duplicate = store.get("extruder")
+    assert extruder_after_duplicate is not None
+    assert extruder_after_duplicate.observed_at == extruder.observed_at
+    assert store.latest_observed_at() == extruder.observed_at
+
+    changed = {
+        "method": "notify_status_update",
+        "params": [{"extruder": {"temperature": 211.0}}],
+    }
+
+    store.ingest(changed)
+
+    extruder_changed = store.get("extruder")
+    assert extruder_changed is not None
+    assert extruder_changed.data["temperature"] == 211.0
+    assert extruder_changed.observed_at > extruder.observed_at
+    assert store.latest_observed_at() == extruder_changed.observed_at
 
 
 def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
@@ -110,34 +137,100 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
         session_id="history-4062",
     )
 
-    frames = orchestrator.build_envelopes()
+    frames = orchestrator.build_payloads()
 
     assert set(frames.keys()) == {"overview", "telemetry", "events"}
 
-    overview = frames["overview"]
-    assert overview["_schema"] == 1
-    assert overview["kind"] == "full"
-    assert overview["sessionId"].startswith("history-")
-
-    overview_body = overview["overview"]
+    overview_frame = frames["overview"]
+    assert overview_frame.channel == "overview"
+    assert overview_frame.session_id.startswith("history-")
+    overview_body = overview_frame.payload
     assert overview_body["printerStatus"] == "Printing"
     assert overview_body["flags"]["watchWindowActive"] is True
     assert overview_body["job"]["progressPercent"] == pytest.approx(12.0, rel=1e-3)
 
-    telemetry = frames["telemetry"]["telemetry"]
+    telemetry_frame = frames["telemetry"]
+    telemetry = telemetry_frame.payload
     assert telemetry["cadence"]["mode"] == "watch"
     assert telemetry["cadence"]["maxHz"] == 1.0
     assert len(telemetry["sensors"]) == 3
 
-    events = frames["events"]["events"]
+    events_frame = frames["events"]
+    events = events_frame.payload
     assert len(events["items"]) == 1
     event = events["items"][0]
     assert event["eventName"] == "commandStateChanged"
     assert event["data"]["state"] == "completed"
 
-    frames_second = orchestrator.build_envelopes()
-    assert frames_second["overview"]["_seq"] == overview["_seq"] + 1
-    assert frames_second["telemetry"]["_seq"] == frames["telemetry"]["_seq"] + 1
+    frames_second = orchestrator.build_payloads()
+    assert frames_second["overview"].observed_at >= overview_frame.observed_at
+    assert frames_second["telemetry"].observed_at >= telemetry_frame.observed_at
+
+
+def test_overview_last_updated_remains_stable_without_state_changes(
+    baseline_snapshot: dict,
+) -> None:
+    clock = FakeClock(
+        datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 4, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 5, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 6, tzinfo=timezone.utc),
+    )
+
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    orchestrator.ingest(baseline_snapshot)
+
+    first_frames = orchestrator.build_payloads()
+    first_overview = first_frames["overview"].payload
+    first_last_updated = first_overview["lastUpdatedUtc"]
+
+    orchestrator.ingest(baseline_snapshot)
+
+    second_frames = orchestrator.build_payloads()
+    second_overview = second_frames["overview"].payload
+    assert second_overview["lastUpdatedUtc"] == first_last_updated
+
+
+def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> None:
+    clock = FakeClock(
+        datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 4, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 5, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 6, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 7, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 8, tzinfo=timezone.utc),
+        datetime(2025, 10, 10, 16, 42, 9, tzinfo=timezone.utc),
+    )
+
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    orchestrator.ingest(baseline_snapshot)
+
+    first_frames = orchestrator.build_payloads()
+    sensors_first = first_frames["telemetry"].payload["sensors"]
+    extruder_first = next(sensor for sensor in sensors_first if sensor["channel"] == "extruder")
+    first_last_updated = extruder_first["lastUpdatedUtc"]
+
+    noise_update = {
+        "method": "notify_status_update",
+        "params": [{"extruder": {"temperature": 204.4, "target": 215.0}}],
+    }
+
+    orchestrator.ingest(noise_update)
+    second_frames = orchestrator.build_payloads()
+    sensors_second = second_frames["telemetry"].payload["sensors"]
+    extruder_second = next(sensor for sensor in sensors_second if sensor["channel"] == "extruder")
+    assert extruder_second["lastUpdatedUtc"] == first_last_updated
+
+    change_update = {
+        "method": "notify_status_update",
+        "params": [{"extruder": {"temperature": 205.6, "target": 216.0}}],
+    }
+
+    orchestrator.ingest(change_update)
+    third_frames = orchestrator.build_payloads()
+    sensors_third = third_frames["telemetry"].payload["sensors"]
+    extruder_third = next(sensor for sensor in sensors_third if sensor["channel"] == "extruder")
+    assert extruder_third["lastUpdatedUtc"] != first_last_updated
 
 
 def test_watch_window_flag_reflects_idle_mode(baseline_snapshot: dict) -> None:
@@ -149,7 +242,7 @@ def test_watch_window_flag_reflects_idle_mode(baseline_snapshot: dict) -> None:
         mode="idle", max_hz=0.033, watch_window_expires=None
     )
 
-    frames = orchestrator.build_envelopes()
+    frames = orchestrator.build_payloads()
 
-    overview_flags = frames["overview"]["overview"]["flags"]
+    overview_flags = frames["overview"].payload["flags"]
     assert overview_flags["watchWindowActive"] is False
