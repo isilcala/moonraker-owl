@@ -39,24 +39,28 @@ class OverviewSelector:
             is_heating=heater_monitor.is_heating_for_print(),
         )
 
-        overview: Dict[str, Any] = {
-            "printerStatus": self._state_engine.resolve(state, context)
+        phase = self._state_engine.resolve(state, context)
+
+        lifecycle: Dict[str, Any] = {
+            "phase": phase,
+            "statusLabel": phase,
+            "isHeating": heater_monitor.is_heating_for_print(),
+            "hasActiveJob": session.has_active_job,
         }
 
         if session.message:
-            overview["subStatus"] = session.message
+            lifecycle["reason"] = session.message
+
+        overview: Dict[str, Any] = {
+            "lifecycle": lifecycle
+        }
 
         job_payload = _build_job_payload(session)
         if job_payload:
             overview["job"] = job_payload
 
-        if session.progress_percent is not None:
-            overview["elapsedSeconds"] = session.elapsed_seconds or 0
-            overview["estimatedTimeRemainingSeconds"] = session.remaining_seconds or 0
-
-        overview["flags"] = {
-            "isHeating": heater_monitor.is_heating_for_print(),
-            "hasActiveJob": session.has_active_job,
+        overview["cadence"] = {
+            "heartbeatSeconds": self._heartbeat_seconds,
             "watchWindowActive": False,
         }
 
@@ -67,7 +71,6 @@ class OverviewSelector:
 
         last_updated = self._last_updated or observed_at
 
-        overview["heartbeatSeconds"] = self._heartbeat_seconds
         overview["lastUpdatedUtc"] = last_updated.replace(microsecond=0).isoformat()
 
         return overview
