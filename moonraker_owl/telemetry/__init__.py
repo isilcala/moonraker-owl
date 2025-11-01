@@ -103,6 +103,7 @@ class TelemetryPublisher:
 
         self._min_interval = 0.05
         idle_hz = config.telemetry.rate_hz or 0.033
+        self._idle_hz = idle_hz
         self._idle_interval = _hz_to_interval(idle_hz) or 30.0
         self._watch_interval = _hz_to_interval(1.0) or 1.0
         self._telemetry_interval = self._idle_interval
@@ -124,6 +125,8 @@ class TelemetryPublisher:
         self._stop_event = asyncio.Event()
         self._worker: Optional[asyncio.Task[None]] = None
         self._callback_registered = False
+        self._pending_payload: Optional[Dict[str, Any]] = None
+        self._pending_timer_handle: Optional[asyncio.TimerHandle] = None
 
         self._heater_merge_cache: Dict[str, Any] = {}
         self._last_overview_publish_time = 0.0
@@ -142,6 +145,14 @@ class TelemetryPublisher:
             mode="idle",
             max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
             watch_window_expires=None,
+        )
+
+        # Emit an initial cadence log to capture baseline configuration.
+        self.apply_telemetry_rate(
+            mode="idle",
+            max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
+            duration_seconds=None,
+            requested_at=datetime.now(timezone.utc),
         )
 
     async def start(self) -> None:
@@ -167,6 +178,7 @@ class TelemetryPublisher:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
             self._worker = None
+        self._cancel_pending_timer()
 
         if self._callback_registered:
             self._moonraker.remove_callback(self._handle_moonraker_update)
@@ -271,17 +283,28 @@ class TelemetryPublisher:
 
         while not self._stop_event.is_set():
             if pending is None:
+                if self._pending_payload is not None:
+                    pending = copy.deepcopy(self._pending_payload)
+                    pending_forced = set()
+                    self._pending_payload = None
+                    self._cancel_pending_timer()
+                else:
+                    heartbeat_payload = self._prepare_heartbeat_payload()
+                    if heartbeat_payload is not None:
+                        pending = heartbeat_payload
+                        pending_forced = {"overview"}
+                    else:
+                        await self._event.wait()
+                        self._event.clear()
+                        pending = self._gather_payloads()
+                        pending_forced = set()
+                        if pending is None:
+                            continue
+            else:
                 heartbeat_payload = self._prepare_heartbeat_payload()
                 if heartbeat_payload is not None:
                     pending = heartbeat_payload
                     pending_forced = {"overview"}
-                else:
-                    await self._event.wait()
-                    self._event.clear()
-                    pending = self._gather_payloads()
-                    pending_forced = set()
-                    if pending is None:
-                        continue
 
             while not self._stop_event.is_set():
                 now = loop.time()
@@ -339,6 +362,7 @@ class TelemetryPublisher:
         *,
         forced_channels: Optional[Iterable[str]] = None,
     ) -> None:
+        self._maybe_expire_watch_window()
         self._orchestrator.ingest(payload)
         self._last_payload_snapshot = copy.deepcopy(payload)
 
@@ -353,12 +377,25 @@ class TelemetryPublisher:
 
         now_monotonic = time.monotonic()
 
+        deferred = False
+        min_delay: Optional[float] = None
+
         for channel, frame in frames.items():
             topic = self._channel_topics.get(channel)
             if topic is None:
                 continue
 
-            if not self._should_publish_channel(channel, frame.payload, now_monotonic, forced=frame.forced):
+            should_publish, delay = self._should_publish_channel(
+                channel,
+                frame.payload,
+                now_monotonic,
+                forced=frame.forced,
+            )
+            if not should_publish:
+                if delay is not None:
+                    deferred = True
+                    if min_delay is None or delay < min_delay:
+                        min_delay = delay
                 continue
 
             envelope = self._wrap_envelope(channel, frame, include_raw=include_raw, raw_json=raw_json)
@@ -372,6 +409,11 @@ class TelemetryPublisher:
                         self._last_overview_publish_time = now_monotonic
 
             self._publish(channel, topic, envelope)
+
+        if deferred:
+            self._store_pending_payload(payload)
+            if min_delay is not None:
+                self._schedule_cadence_check(min_delay)
 
     def _prepare_heartbeat_payload(self) -> Optional[Dict[str, Any]]:
         if not self._should_emit_overview_heartbeat():
@@ -393,6 +435,29 @@ class TelemetryPublisher:
         )
 
         return time.monotonic() - self._last_overview_publish_time >= interval
+
+    def _maybe_expire_watch_window(self, *, now: Optional[datetime] = None) -> None:
+        if self._current_mode == "idle":
+            return
+
+        expires_at = self._watch_window_expires
+        if expires_at is None:
+            return
+
+        current_time = now or datetime.now(timezone.utc)
+        if current_time < expires_at:
+            return
+
+        LOGGER.info(
+            "Telemetry watch window expired at %s; reverting to idle cadence",
+            expires_at.isoformat(),
+        )
+        self.apply_telemetry_rate(
+            mode="idle",
+            max_hz=self._idle_hz,
+            duration_seconds=None,
+            requested_at=current_time,
+        )
 
     def apply_telemetry_rate(
         self,
@@ -418,6 +483,9 @@ class TelemetryPublisher:
         interval = interval or self._idle_interval
         effective_hz = 0.0 if interval <= 0 else 1.0 / interval
 
+        previous_mode = self._current_mode
+        previous_interval = self._telemetry_interval
+
         self._telemetry_interval = interval
         self._channel_caps["telemetry"] = interval
         self._watch_window_expires = expires_at
@@ -429,6 +497,17 @@ class TelemetryPublisher:
             watch_window_expires=expires_at,
         )
         self._current_mode = mode
+
+        if LOGGER.isEnabledFor(logging.INFO):
+            LOGGER.info(
+                "Telemetry cadence change: mode=%s (prev=%s) max_hz=%.3f interval=%.2fs (prev=%.2fs) expires=%s",
+                mode,
+                previous_mode,
+                max_hz,
+                interval,
+                previous_interval,
+                expires_at.isoformat() if expires_at else "<none>",
+            )
 
         for channel in ("telemetry", "overview"):
             state = self._channel_state.get(channel)
@@ -495,7 +574,7 @@ class TelemetryPublisher:
         now_monotonic: float,
         *,
         forced: bool,
-    ) -> bool:
+    ) -> tuple[bool, Optional[float]]:
         state = self._channel_state[channel]
 
         effective_forced = forced
@@ -509,15 +588,15 @@ class TelemetryPublisher:
         if cadence_interval:
             elapsed = now_monotonic - state.last_publish
             if not effective_forced and elapsed < cadence_interval:
-                return False
+                return False, cadence_interval - elapsed
 
         payload_hash = self._hasher.hash_payload(payload)
         if not effective_forced and payload_hash == state.hash:
-            return False
+            return False, None
 
         state.hash = payload_hash
         state.last_publish = now_monotonic
-        return True
+        return True, None
 
     def _publish(self, channel: str, topic: str, document: Dict[str, Any]) -> None:
         payload_bytes = json.dumps(document, default=_json_default).encode("utf-8")
@@ -540,6 +619,37 @@ class TelemetryPublisher:
             LOGGER.exception(
                 "Unexpected error publishing telemetry for channel %s", channel
             )
+
+    def _store_pending_payload(self, payload: Dict[str, Any]) -> None:
+        if self._pending_payload is None:
+            self._pending_payload = copy.deepcopy(payload)
+        else:
+            _merge_payload_dicts(self._pending_payload, payload)
+
+    def _schedule_cadence_check(self, delay: float) -> None:
+        if self._loop is None:
+            return
+        if delay <= 0:
+            self._event.set()
+            return
+
+        handle = self._pending_timer_handle
+        if handle is not None and not handle.cancelled():
+            current_remaining = handle.when() - self._loop.time()
+            if current_remaining <= delay + 1e-6:
+                return
+            handle.cancel()
+
+        def _trigger() -> None:
+            self._pending_timer_handle = None
+            self._event.set()
+
+        self._pending_timer_handle = self._loop.call_later(delay, _trigger)
+
+    def _cancel_pending_timer(self) -> None:
+        if self._pending_timer_handle is not None:
+            self._pending_timer_handle.cancel()
+            self._pending_timer_handle = None
 
 
 def _normalise_heater_snapshot(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:

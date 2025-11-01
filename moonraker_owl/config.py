@@ -41,6 +41,9 @@ DEFAULT_TELEMETRY_EXCLUDE_FIELDS: list[str] = [
 ]
 
 
+DEFAULT_TELEMETRY_RATE_HZ: float = 1 / 30
+
+
 @dataclass(slots=True)
 class CloudConfig:
     base_url: str = constants.DEFAULT_LINK_BASE_URL
@@ -61,7 +64,7 @@ class MoonrakerConfig:
 
 @dataclass(slots=True)
 class TelemetryConfig:
-    rate_hz: float = 1/30
+    rate_hz: float = DEFAULT_TELEMETRY_RATE_HZ
     include_raw_payload: bool = False  # Set to True to include raw Moonraker payload (adds ~450 bytes per message)
     include_fields: List[str] = field(
         default_factory=lambda: list(DEFAULT_TELEMETRY_FIELDS)
@@ -135,7 +138,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "transport": "websocket",
             },
             "telemetry": {
-                "rate_hz": "1.0",
+                "rate_hz": str(DEFAULT_TELEMETRY_RATE_HZ),
                 "include_fields": ",".join(DEFAULT_TELEMETRY_FIELDS),
                 "exclude_fields": ",".join(DEFAULT_TELEMETRY_EXCLUDE_FIELDS),
             },
@@ -189,8 +192,14 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         api_key=parser.get("moonraker", "api_key", fallback=None),
     )
 
+    default_rate_hz = TelemetryConfig().rate_hz
+    try:
+        rate_hz_value = parser.getfloat("telemetry", "rate_hz", fallback=default_rate_hz)
+    except ValueError:
+        rate_hz_value = default_rate_hz
+
     telemetry = TelemetryConfig(
-        rate_hz=parser.getfloat("telemetry", "rate_hz", fallback=1.0),
+        rate_hz=rate_hz_value,
         include_raw_payload=parser.getboolean(
             "telemetry", "include_raw_payload", fallback=False
         ),

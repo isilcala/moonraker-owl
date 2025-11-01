@@ -759,6 +759,7 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
     await publisher.start()
     await asyncio.sleep(0.05)
     mqtt.messages.clear()
+    await asyncio.sleep(0.15)
 
     moonraker.update_state(
         {
@@ -801,7 +802,7 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
         sensor for sensor in sensors if sensor.get("channel") == "extruder"
     )
     assert extruder_sensor.get("target") == pytest.approx(100.0, rel=1e-3)
-    assert extruder_sensor.get("value") == pytest.approx(72.5, rel=1e-3)
+    assert extruder_sensor.get("value") == pytest.approx(72.0, rel=1e-3)
 
 
 def test_telemetry_configuration_requires_device_id():
@@ -901,6 +902,7 @@ async def test_temperature_target_preserved_across_updates() -> None:
 
     # Initial message should have both temperature and target
     mqtt.messages.clear()
+    await asyncio.sleep(0.15)
 
     # Emit update with only temperature (target omitted, simulating Moonraker behavior)
     await moonraker.emit(
@@ -941,11 +943,11 @@ async def test_temperature_target_preserved_across_updates() -> None:
         raise AssertionError(f"Missing sensor {channel}")
 
     extruder_sensor = _find("extruder")
-    assert extruder_sensor.get("value") == pytest.approx(195.5, rel=1e-3)
+    assert extruder_sensor.get("value") == pytest.approx(196.0, rel=1e-3)
     assert extruder_sensor.get("target") == pytest.approx(210.0, rel=1e-3)
 
     bed_sensor = _find("heaterBed")
-    assert bed_sensor.get("value") == pytest.approx(58.2, rel=1e-3)
+    assert bed_sensor.get("value") == pytest.approx(58.0, rel=1e-3)
     assert bed_sensor.get("target") == pytest.approx(60.0, rel=1e-3)
 
 
@@ -971,6 +973,7 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
     await publisher.start()
     await asyncio.sleep(0.05)
     mqtt.messages.clear()
+    await asyncio.sleep(0.15)
 
     await moonraker.emit(
         {
@@ -988,16 +991,7 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
     await asyncio.sleep(0.1)
 
     first_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
-    assert first_messages, "Expected telemetry publish for fractional change"
-    first_document = _decode(first_messages[-1])
-    first_body = first_document.get("telemetry")
-    assert isinstance(first_body, dict)
-    first_sensors = first_body.get("sensors")
-    assert isinstance(first_sensors, list)
-    first_extruder = next(
-        sensor for sensor in first_sensors if sensor.get("channel") == "extruder"
-    )
-    assert first_extruder.get("value") == pytest.approx(195.4, rel=1e-3)
+    assert not first_messages, "Expected fractional change to be suppressed by rounding"
 
     await moonraker.emit(
         {
@@ -1026,8 +1020,105 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
     extruder_sensor = next(
         sensor for sensor in sensors if sensor.get("channel") == "extruder"
     )
-    assert extruder_sensor.get("value") == pytest.approx(196.2, rel=1e-3)
-    assert document["_seq"] > first_document["_seq"]
+    assert extruder_sensor.get("value") == pytest.approx(196.0, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_idle_cadence_flushes_latest_payload() -> None:
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {
+                    "temperature": 40.0,
+                    "target": 60.0,
+                }
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=0.5, include_fields=["extruder"])
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+    mqtt.messages.clear()
+
+    await moonraker.emit(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "extruder": {
+                        "temperature": 50.0,
+                    }
+                }
+            ],
+        }
+    )
+
+    await asyncio.sleep(0.1)
+
+    await moonraker.emit(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "extruder": {
+                        "temperature": 60.0,
+                    }
+                }
+            ],
+        }
+    )
+
+    await asyncio.sleep(2.5)
+    await publisher.stop()
+
+    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    assert telemetry_messages, "Expected deferred payload to flush"
+
+    document = _decode(telemetry_messages[-1])
+    telemetry_body = document.get("telemetry")
+    assert isinstance(telemetry_body, dict)
+    sensors = telemetry_body.get("sensors")
+    assert isinstance(sensors, list)
+
+    extruder_sensor = next(
+        sensor for sensor in sensors if sensor.get("channel") == "extruder"
+    )
+    assert extruder_sensor.get("value") == pytest.approx(60.0, rel=1e-3)
+
+
+def test_watch_window_expiration_reverts_to_idle_rate() -> None:
+    request_at = datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc)
+
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt)
+
+    expires_at = publisher.apply_telemetry_rate(
+        mode="watch",
+        max_hz=2.0,
+        duration_seconds=90,
+        requested_at=request_at,
+    )
+
+    assert publisher._current_mode == "watch"
+    assert expires_at == request_at + timedelta(seconds=90)
+
+    publisher._maybe_expire_watch_window(now=expires_at + timedelta(seconds=1))
+
+    assert publisher._current_mode == "idle"
+    assert publisher._watch_window_expires is None
+    assert publisher._channel_caps["telemetry"] == pytest.approx(
+        publisher._idle_interval,
+        rel=1e-6,
+    )
 
 
 @pytest.mark.asyncio
@@ -1074,6 +1165,7 @@ async def test_query_on_notification_ensures_target_values():
 
     # Clear initial messages
     mqtt.messages.clear()
+    await asyncio.sleep(0.15)
     initial_query_count = moonraker.query_count
 
     # Simulate user setting target to 50°C in Mainsail
@@ -1129,7 +1221,7 @@ async def test_query_on_notification_ensures_target_values():
     extruder_sensor = next(
         sensor for sensor in sensors if sensor.get("channel") == "extruder"
     )
-    assert extruder_sensor.get("value") == pytest.approx(40.1, rel=1e-3)
+    assert extruder_sensor.get("value") == pytest.approx(40.0, rel=1e-3)
     # This is the critical assertion: target should be 50.0 (from query),
     # not missing or stuck at old value
     assert extruder_sensor.get("target") == pytest.approx(50.0, rel=1e-3), (
