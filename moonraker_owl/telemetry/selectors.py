@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -12,12 +13,16 @@ from .state_store import MoonrakerStateStore, SectionSnapshot
 from .trackers import HeaterMonitor, SessionInfo
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class OverviewSelector:
     def __init__(self, *, heartbeat_seconds: int = 60) -> None:
         self._heartbeat_seconds = heartbeat_seconds
         self._state_engine = PrinterStateEngine()
         self._last_contract_hash: Optional[str] = None
         self._last_updated: Optional[datetime] = None
+        self._last_debug_signature: Optional[tuple[Any, ...]] = None
 
     def build(
         self,
@@ -27,16 +32,19 @@ class OverviewSelector:
         observed_at: datetime,
     ) -> Optional[Dict[str, Any]]:
         print_stats_snapshot = store.get("print_stats")
-        state = (
-            print_stats_snapshot.data.get("state")
-            if print_stats_snapshot is not None
-            else None
-        )
+        state = session.raw_state
+        if state is None and print_stats_snapshot is not None:
+            state = print_stats_snapshot.data.get("state")
 
         context = PrinterContext(
             observed_at=observed_at,
             has_active_job=session.has_active_job,
             is_heating=heater_monitor.is_heating_for_print(),
+            idle_state=session.idle_timeout_state,
+            timelapse_paused=session.timelapse_paused,
+            progress_percent=session.progress_percent,
+            progress_trend=session.progress_trend,
+            job_status=session.job_status,
         )
 
         phase = self._state_engine.resolve(state, context)
@@ -72,6 +80,45 @@ class OverviewSelector:
         last_updated = self._last_updated or observed_at
 
         overview["lastUpdatedUtc"] = last_updated.replace(microsecond=0).isoformat()
+
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            signature = (
+                phase,
+                lifecycle.get("reason"),
+                session.session_id,
+                session.has_active_job,
+                session.progress_percent,
+                session.elapsed_seconds,
+                session.remaining_seconds,
+                session.layer_current,
+                session.layer_total,
+                heater_monitor.is_heating_for_print(),
+                state,
+                session.idle_timeout_state,
+                session.timelapse_paused,
+                session.progress_trend,
+                session.job_status,
+            )
+            if signature != self._last_debug_signature:
+                LOGGER.debug(
+                    "Overview lifecycle resolved: raw_state=%s phase=%s reason=%s session=%s has_active_job=%s is_heating=%s progress=%s%% elapsed=%s remaining=%s layers=%s/%s idle_timeout_state=%s timelapse_paused=%s progress_trend=%s job_status=%s",
+                    state,
+                    phase,
+                    lifecycle.get("reason"),
+                    session.session_id,
+                    session.has_active_job,
+                    heater_monitor.is_heating_for_print(),
+                    session.progress_percent,
+                    session.elapsed_seconds,
+                    session.remaining_seconds,
+                    session.layer_current,
+                    session.layer_total,
+                    session.idle_timeout_state,
+                    session.timelapse_paused,
+                    session.progress_trend,
+                    session.job_status,
+                )
+                self._last_debug_signature = signature
 
         return overview
 
