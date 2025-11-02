@@ -32,6 +32,7 @@ class OverviewSelector:
         observed_at: datetime,
     ) -> Optional[Dict[str, Any]]:
         print_stats_snapshot = store.get("print_stats")
+        display_status_snapshot = store.get("display_status")
         state = session.raw_state
         if state is None and print_stats_snapshot is not None:
             state = print_stats_snapshot.data.get("state")
@@ -60,12 +61,53 @@ class OverviewSelector:
             lifecycle["reason"] = session.message
 
         overview: Dict[str, Any] = {
-            "lifecycle": lifecycle
+            "printerStatus": phase,
+            "lifecycle": lifecycle,
+            "flags": {
+                "watchWindowActive": False,
+                "hasActiveJob": session.has_active_job,
+            },
         }
+
+        if session.message:
+            overview["subStatus"] = session.message
+        elif display_status_snapshot is not None:
+            candidate = display_status_snapshot.data.get("message")
+            if isinstance(candidate, str):
+                cleaned = candidate.strip()
+                if cleaned and _should_use_display_message(cleaned, session):
+                    overview["subStatus"] = cleaned
+
+        if session.progress_percent is not None:
+            overview["progressPercent"] = round(session.progress_percent, 3)
+        if session.elapsed_seconds is not None:
+            overview["elapsedSeconds"] = session.elapsed_seconds
+        estimated_remaining = session.remaining_seconds
+        if estimated_remaining is None and print_stats_snapshot is not None:
+            total_duration = _to_float(
+                print_stats_snapshot.data.get("total_duration")
+            )
+            elapsed_duration = _to_float(
+                print_stats_snapshot.data.get("print_duration")
+            )
+            if (
+                total_duration is not None
+                and elapsed_duration is not None
+                and total_duration >= elapsed_duration
+            ):
+                estimated_remaining = max(int(total_duration - elapsed_duration), 0)
+
+        if estimated_remaining is not None:
+            overview["estimatedTimeRemainingSeconds"] = estimated_remaining
 
         job_payload = _build_job_payload(session)
         if job_payload:
             overview["job"] = job_payload
+            if estimated_remaining is not None:
+                progress_section = job_payload.setdefault("progress", {})
+                progress_section["estimatedTimeRemainingSeconds"] = (
+                    estimated_remaining
+                )
 
         overview["cadence"] = {
             "heartbeatSeconds": self._heartbeat_seconds,
@@ -274,6 +316,34 @@ def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
         payload["message"] = session.message
 
     return payload
+
+
+def _should_use_display_message(message: str, session: SessionInfo) -> bool:
+    normalized = message.lower()
+    redundant = {"printing", "resuming", "pausing", "paused", "idle", "ready", "busy"}
+    terminal_states = {
+        "cancelled",
+        "canceled",
+        "completed",
+        "complete",
+        "error",
+        "failed",
+        "aborted",
+    }
+
+    if not session.has_active_job and normalized in redundant:
+        return False
+
+    if session.raw_state in terminal_states and normalized in redundant:
+        return False
+
+    if session.job_status in terminal_states and normalized in redundant:
+        return False
+
+    if session.idle_timeout_state in {"idle", "ready"} and normalized in redundant:
+        return False
+
+    return True
 
 
 def _normalise_channel_name(name: str) -> Optional[str]:

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, Optional, Sequence
 
 from ..core import deep_merge
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,9 @@ class MoonrakerStateStore:
         else:
             base = copy.deepcopy(incoming)
 
+        if name == "print_stats":
+            self._log_print_state_transition(existing, base)
+
         snapshot = SectionSnapshot(
             name=name,
             observed_at=observed_at,
@@ -112,6 +118,53 @@ class MoonrakerStateStore:
         )
         self._sections[name] = snapshot
         self._latest_observed_at = observed_at
+
+    def _log_print_state_transition(
+        self,
+        existing: Optional[SectionSnapshot],
+        updated: Mapping[str, Any],
+    ) -> None:
+        previous_state = (existing.data.get("state") if existing else None)
+        current_state = updated.get("state")
+
+        if previous_state == current_state:
+            return
+
+        LOGGER.debug(
+            "print_stats state transition: %s -> %s",
+            previous_state,
+            current_state,
+        )
+
+        if not isinstance(current_state, str):  # pragma: no cover - defensive guard
+            return
+
+        terminal_states = {
+            "cancelled",
+            "canceled",
+            "complete",
+            "completed",
+            "error",
+            "failed",
+            "aborted",
+        }
+        if current_state.lower() not in terminal_states:
+            return
+
+        sd_snapshot = self._sections.get("virtual_sdcard")
+        sd_data = sd_snapshot.data if sd_snapshot else {}
+        is_active = sd_data.get("is_active")
+        is_printing = sd_data.get("is_printing")
+        progress = sd_data.get("progress")
+
+        LOGGER.warning(
+            "Terminal state '%s' while virtual_sdcard=%s (active=%s printing=%s progress=%s)",
+            current_state,
+            "present" if sd_snapshot else "missing",
+            is_active,
+            is_printing,
+            progress,
+        )
 
 
 def _iter_dicts(params: Any) -> Iterable[Mapping[str, Any]]:

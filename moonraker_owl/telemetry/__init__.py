@@ -34,12 +34,6 @@ def is_heater_object(obj_name: str) -> bool:
     )
 
 
-def get_heater_objects(objects: Dict[str, Any]) -> Dict[str, Optional[list[str]]]:
-    """Extract heater objects from a subscription manifest."""
-
-    return {obj: None for obj in objects if is_heater_object(obj)}
-
-
 class TelemetryConfigurationError(RuntimeError):
     """Raised when required telemetry configuration values are missing."""
 
@@ -128,7 +122,6 @@ class TelemetryPublisher:
         self._pending_payload: Optional[Dict[str, Any]] = None
         self._pending_timer_handle: Optional[asyncio.TimerHandle] = None
 
-        self._heater_merge_cache: Dict[str, Any] = {}
         self._last_overview_publish_time = 0.0
         self._last_overview_status = "Idle"
         self._last_payload_snapshot: Optional[Dict[str, Any]] = None
@@ -162,10 +155,10 @@ class TelemetryPublisher:
         self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
 
+        await self._prime_initial_state()
+
         await self._moonraker.start(self._handle_moonraker_update)
         self._callback_registered = True
-
-        await self._prime_initial_state()
 
         self._worker = asyncio.create_task(self._run())
 
@@ -200,66 +193,7 @@ class TelemetryPublisher:
         await self._enqueue(snapshot)
 
     async def _handle_moonraker_update(self, payload: Dict[str, Any]) -> None:
-        if payload.get("method") == "notify_status_update":
-            try:
-                heater_objects = get_heater_objects(self._subscription_objects or {})
-
-                if heater_objects:
-                    heater_state = await self._moonraker.fetch_printer_state(
-                        heater_objects, timeout=5.0
-                    )
-                    heater_status = (
-                        heater_state.get("result", {}).get("status")
-                        if isinstance(heater_state, dict)
-                        else None
-                    )
-
-                    if heater_status:
-                        has_new_details = self._track_heater_snapshot(heater_status)
-
-                        if has_new_details:
-                            await self._enqueue({"result": {"status": heater_status}})
-            except Exception as exc:  # pragma: no cover - defensive logging
-                LOGGER.debug("Failed to query heater state: %s", exc)
-
         await self._enqueue(payload)
-
-    def _track_heater_snapshot(self, heater_status: Dict[str, Any]) -> bool:
-        has_new_details = False
-
-        for key, data in heater_status.items():
-            if isinstance(data, dict):
-                snapshot = _normalise_heater_snapshot(data)
-                if not snapshot:
-                    if key in self._heater_merge_cache:
-                        self._heater_merge_cache.pop(key, None)
-                        has_new_details = True
-                    continue
-
-                previous_snapshot = self._heater_merge_cache.get(key)
-                self._heater_merge_cache[key] = snapshot
-
-                if not isinstance(previous_snapshot, dict):
-                    has_new_details = True
-                    continue
-
-                previous_contract = (
-                    previous_snapshot.get("temperature"),
-                    previous_snapshot.get("target"),
-                )
-                current_contract = (
-                    snapshot.get("temperature"),
-                    snapshot.get("target"),
-                )
-
-                if previous_contract != current_contract:
-                    has_new_details = True
-            else:
-                if self._heater_merge_cache.get(key) != data:
-                    self._heater_merge_cache[key] = copy.deepcopy(data)
-                    has_new_details = True
-
-        return has_new_details
 
     async def _enqueue(self, payload: Dict[str, Any]) -> None:
         if self._stop_event.is_set():
@@ -398,7 +332,12 @@ class TelemetryPublisher:
                         min_delay = delay
                 continue
 
-            envelope = self._wrap_envelope(channel, frame, include_raw=include_raw, raw_json=raw_json)
+            envelope = self._wrap_envelope(
+                channel,
+                frame,
+                include_raw=include_raw,
+                raw_json=raw_json,
+            )
 
             if channel == "overview":
                 overview_body = envelope.get("overview")
@@ -650,33 +589,6 @@ class TelemetryPublisher:
         if self._pending_timer_handle is not None:
             self._pending_timer_handle.cancel()
             self._pending_timer_handle = None
-
-
-def _normalise_heater_snapshot(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    snapshot: Dict[str, Any] = {}
-    for field in ("temperature", "target", "power"):
-        value = data.get(field)
-        if value is None:
-            continue
-
-        rounded = _round_temperature(value)
-        if rounded is not None:
-            snapshot[field] = rounded
-            continue
-
-        snapshot[field] = value
-
-    return snapshot or None
-
-
-def _round_temperature(value: Any) -> Optional[float]:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    return float(round(numeric))
-
-
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
     raw = config.raw
 

@@ -69,6 +69,14 @@ class PrinterStateEngine:
                 return idle_hint
             return normalized
 
+        inactive_states = {"Cancelled", "Completed", "Error"}
+        if (
+            normalized not in {"Printing", "Paused", "Resuming", "Pausing", "Cancelling"}
+            and job_hint in inactive_states
+            and not context.has_active_job
+        ):
+            return job_hint
+
         if normalized == "Cancelled":
             if context.is_heating:
                 return "Heating"

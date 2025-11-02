@@ -55,15 +55,22 @@ class PrintSessionTracker:
 
         observed_at = store.latest_observed_at()
 
-        history_id = _extract_history_id(print_stats)
-        filename = _extract_filename(print_stats) or _extract_filename(virtual_sdcard)
-        job_id = _extract_job_id(print_stats)
-        message = _extract_message(display_status, print_stats)
+        history_id = _extract_history_id(print_stats) or _extract_history_id(history_event)
+        filename = (
+            _extract_filename(print_stats)
+            or _extract_filename(virtual_sdcard)
+            or _extract_filename(history_event)
+        )
+        job_id = _extract_job_id(print_stats) or _extract_job_id(history_event)
 
         raw_state = _normalise_state(print_stats.get("state"))
         idle_state = _normalise_state(idle_timeout.get("state"))
-        job_status = _normalise_state(history_event.get("status"))
+        job_status = _normalise_state(_extract_job_status(history_event))
         timelapse_paused = bool(_as_bool(timelapse_macro.get("is_paused")))
+
+        sd_active = bool(_as_bool(virtual_sdcard.get("is_active")))
+        sd_printing = bool(_as_bool(virtual_sdcard.get("is_printing")))
+        sd_paused = bool(_as_bool(virtual_sdcard.get("is_paused")))
 
         session_id = self._resolve_session_id(history_id, filename, job_id)
         progress_percent = _extract_progress_percent(virtual_sdcard)
@@ -73,16 +80,22 @@ class PrintSessionTracker:
 
         progress_value = _as_float(progress_percent)
         progress_trend = self._derive_progress_trend(progress_value, observed_at)
-
         has_active_job = self._is_active_job(
-            session_id=session_id,
             raw_state=raw_state,
             idle_state=idle_state,
             job_status=job_status,
             timelapse_paused=timelapse_paused,
-            progress_value=progress_value,
-            progress_trend=progress_trend,
-            elapsed_seconds=elapsed_seconds,
+            sd_active=sd_active,
+            sd_printing=sd_printing,
+            sd_paused=sd_paused,
+        )
+        message = _extract_message(display_status, print_stats)
+        message = _normalise_message(
+            message,
+            raw_state=raw_state,
+            idle_state=idle_state,
+            job_status=job_status,
+            has_active_job=has_active_job,
         )
 
         if LOGGER.isEnabledFor(logging.DEBUG):
@@ -99,10 +112,13 @@ class PrintSessionTracker:
                 job_status,
                 timelapse_paused,
                 progress_trend,
+                sd_active,
+                sd_printing,
+                sd_paused,
             )
             if signature != self._last_debug_signature:
                 LOGGER.debug(
-                    "Session resolved: session=%s raw_state=%s history_id=%s job_id=%s filename=%s progress=%s%% has_active_job=%s message=%s idle_state=%s job_status=%s timelapse_paused=%s progress_trend=%s",
+                    "Session resolved: session=%s raw_state=%s history_id=%s job_id=%s filename=%s progress=%s%% has_active_job=%s message=%s idle_state=%s job_status=%s timelapse_paused=%s progress_trend=%s sd_active=%s sd_printing=%s sd_paused=%s",
                     session_id,
                     raw_state,
                     history_id,
@@ -115,6 +131,9 @@ class PrintSessionTracker:
                     job_status,
                     timelapse_paused,
                     progress_trend,
+                    sd_active,
+                    sd_printing,
+                    sd_paused,
                 )
                 if session_id == "offline":
                     LOGGER.debug(
@@ -197,71 +216,52 @@ class PrintSessionTracker:
     def _is_active_job(
         self,
         *,
-        session_id: Optional[str],
         raw_state: Optional[str],
         idle_state: Optional[str],
-        job_status: Optional[str],
-        timelapse_paused: bool,
-        progress_value: Optional[float],
-        progress_trend: str,
-        elapsed_seconds: Optional[int],
+        job_status: Optional[str] = None,
+        timelapse_paused: bool = False,
+        sd_active: Optional[bool] = None,
+        sd_printing: Optional[bool] = None,
+        sd_paused: Optional[bool] = None,
     ) -> bool:
-        has_session = bool(session_id) and session_id != "offline"
+        raw_state = (raw_state or "unknown").lower()
+        idle_state = (idle_state or "unknown").lower()
+        job_status = (job_status or "unknown").lower()
+        job_status = job_status.replace("-", "_")
 
-        raw_state = raw_state or "unknown"
-        idle_state = idle_state or "unknown"
-        job_status = job_status or ""
+        sd_active = bool(sd_active)
+        sd_printing = bool(sd_printing)
+        sd_paused = bool(sd_paused)
 
-        progress_value = progress_value or 0.0
-        elapsed_seconds = elapsed_seconds or 0
+        terminal_states = {"complete", "completed", "cancelled", "canceled", "error", "failed", "aborted"}
+        active_states = {"printing", "paused", "resuming", "cancelling", "pausing"}
+        active_job_statuses = {"in_progress", "printing", "running", "resuming", "starting"}
 
-        progress_active = progress_value > 0.0
-        progress_increasing = progress_trend == "increasing"
-        elapsed_active = elapsed_seconds > 0
-        idle_printing = idle_state in {"printing", "busy"}
-
-        job_terminal_states = {"completed", "complete", "cancelled", "canceled", "error", "failed", "aborted"}
-        raw_terminal_states = {"complete", "completed", "cancelled", "canceled", "error"}
-
-        active_signals = any(
-            (
-                raw_state in {"printing", "paused", "resuming", "cancelling", "pausing"},
-                timelapse_paused,
-                progress_increasing,
-                (progress_active and job_status not in job_terminal_states),
-                (elapsed_active and job_status not in job_terminal_states),
-                idle_printing,
-            )
-        )
-
-        if active_signals:
+        if job_status in active_job_statuses:
             return True
 
-        if raw_state in raw_terminal_states:
-            if job_status in job_terminal_states or (
-                progress_value >= 99.9 and progress_trend != "increasing"
-            ):
-                return False
-            if LOGGER.isEnabledFor(logging.DEBUG):
-                LOGGER.debug(
-                    "Active job gating: raw_state=%s job_status=%s progress=%s%% trend=%s timelapse_paused=%s",
-                    raw_state,
-                    job_status or "",
-                    progress_value,
-                    progress_trend,
-                    timelapse_paused,
-                )
+        if raw_state in active_states:
             return True
 
-        if raw_state in {"standby", "idle", "ready"}:
+        if sd_printing:
+            return True
+
+        if sd_active and not sd_paused and job_status not in terminal_states:
+            return True
+
+        if raw_state in terminal_states:
             return False
 
-        if not has_session:
-            return progress_increasing or (
-                progress_active and job_status not in job_terminal_states
-            ) or elapsed_active
+        if job_status in terminal_states:
+            return False
 
-        return (progress_active and job_status not in job_terminal_states) or progress_increasing
+        if idle_state in {"printing", "busy"}:
+            return True
+
+        if timelapse_paused:
+            return True
+
+        return False
 
 
 @dataclass
@@ -308,27 +308,66 @@ def _coerce_section(snapshot: Optional[SectionSnapshot]) -> Mapping[str, Any]:
 
 
 def _extract_history_id(section: Mapping[str, Any]) -> Optional[str]:
-    for key in ("history_id", "historyId"):
-        value = section.get(key)
-        if value:
-            return str(value)
+    for candidate in _iter_candidate_sections(section):
+        for key in ("history_id", "historyId"):
+            value = candidate.get(key)
+            if value:
+                return str(value)
     return None
 
 
 def _extract_filename(section: Mapping[str, Any]) -> Optional[str]:
-    for key in ("filename", "file_path", "filePath"):
-        value = section.get(key)
-        if isinstance(value, str) and value:
-            return value
+    filename_keys = ("filename", "file_path", "filePath", "job_path")
+    for candidate in _iter_candidate_sections(section):
+        for key in filename_keys:
+            value = candidate.get(key)
+            if isinstance(value, str) and value:
+                return value
     return None
 
 
 def _extract_job_id(section: Mapping[str, Any]) -> Optional[str]:
-    for key in ("job_id", "jobId"):
-        value = section.get(key)
-        if isinstance(value, str) and value:
+    for candidate in _iter_candidate_sections(section):
+        for key in ("job_id", "jobId"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _extract_job_status(section: Mapping[str, Any]) -> Optional[str]:
+    for candidate in _iter_candidate_sections(section):
+        value = candidate.get("status")
+        if isinstance(value, str) and value.strip():
             return value
     return None
+
+
+def _iter_candidate_sections(section: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    if not isinstance(section, Mapping):
+        return []
+
+    stack: list[Mapping[str, Any]] = [section]
+    seen: set[int] = set()
+    candidates: list[Mapping[str, Any]] = []
+
+    while stack:
+        current = stack.pop()
+        identifier = id(current)
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        candidates.append(current)
+
+        for value in current.values():
+            if isinstance(value, Mapping):
+                stack.append(value)
+            elif isinstance(value, (list, tuple)):
+                for entry in value:
+                    if isinstance(entry, Mapping):
+                        stack.append(entry)
+
+    return candidates
 
 
 def _extract_message(
@@ -340,6 +379,49 @@ def _extract_message(
         if isinstance(message, str) and message.strip():
             return message.strip()
     return None
+
+
+def _normalise_message(
+    message: Optional[str],
+    *,
+    raw_state: Optional[str],
+    idle_state: Optional[str],
+    job_status: Optional[str],
+    has_active_job: bool,
+) -> Optional[str]:
+    if not isinstance(message, str):
+        return None
+
+    cleaned = message.strip()
+    if not cleaned:
+        return None
+
+    normalized = cleaned.lower()
+    redundant = {"printing", "resuming", "pausing", "paused", "idle", "ready", "busy"}
+
+    if not has_active_job and normalized in redundant:
+        return None
+
+    terminal_states = {
+        "cancelled",
+        "canceled",
+        "complete",
+        "completed",
+        "error",
+        "failed",
+        "aborted",
+    }
+
+    if raw_state in terminal_states and normalized in redundant:
+        return None
+
+    if job_status in terminal_states and normalized in redundant:
+        return None
+
+    if idle_state in {"idle", "ready"} and normalized in redundant:
+        return None
+
+    return cleaned
 
 
 def _extract_progress_percent(section: Mapping[str, Any]) -> Optional[float]:

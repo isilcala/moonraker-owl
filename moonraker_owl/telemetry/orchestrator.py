@@ -94,6 +94,9 @@ class TelemetryOrchestrator:
         if overview_payload:
             cadence = overview_payload.setdefault("cadence", {})
             cadence["watchWindowActive"] = self._telemetry_mode != "idle"
+            overview_payload.setdefault("flags", {})["watchWindowActive"] = (
+                self._telemetry_mode != "idle"
+            )
             frames["overview"] = ChannelPayload(
                 channel="overview",
                 payload=overview_payload,

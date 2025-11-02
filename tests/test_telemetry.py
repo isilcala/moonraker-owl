@@ -22,6 +22,9 @@ from moonraker_owl.config import (
 )
 from moonraker_owl import constants
 from moonraker_owl.telemetry import TelemetryConfigurationError, TelemetryPublisher
+from moonraker_owl.telemetry.selectors import OverviewSelector
+from moonraker_owl.telemetry.state_store import MoonrakerStateStore
+from moonraker_owl.telemetry.trackers import HeaterMonitor, PrintSessionTracker
 from moonraker_owl.telemetry_normalizer import TelemetryNormalizer
 import moonraker_owl.telemetry_normalizer as telemetry_normalizer
 from moonraker_owl.version import __version__ as PLUGIN_VERSION
@@ -581,6 +584,165 @@ async def test_pipeline_emits_schema_envelopes() -> None:
     assert overview_payload.get("printerStatus")
 
 
+def test_cancelled_print_drops_redundant_printing_message() -> None:
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = OverviewSelector()
+
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "display_status": {"message": "Printing"},
+                    "virtual_sdcard": {"is_active": True, "progress": 0.25},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    overview = selector.build(store, session, heater, observed_at)
+    assert overview is not None
+    assert overview.get("printerStatus") == "Printing"
+    assert overview.get("subStatus") == "Printing"
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "cancelled"},
+                    "display_status": {},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    overview = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
+    assert overview is not None
+    assert overview.get("printerStatus") == "Cancelled"
+    assert overview.get("subStatus") is None
+    assert session.message is None
+    assert session.has_active_job is False
+
+
+def test_pause_then_cancel_clears_paused_state() -> None:
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = OverviewSelector()
+
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "display_status": {"message": "Printing"},
+                    "virtual_sdcard": {"is_active": True, "progress": 0.4},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [
+                {
+                    "action": "added",
+                    "job": {"job_id": "0002DD", "filename": "sample.gcode"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    overview = selector.build(store, session, heater, observed_at)
+    assert overview is not None
+    assert overview.get("printerStatus") == "Printing"
+    assert overview.get("subStatus") == "Printing"
+    assert session.has_active_job is True
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "paused"},
+                    "display_status": {"message": "Paused"},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    overview = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
+    assert overview is not None
+    assert overview.get("printerStatus") == "Paused"
+    assert overview.get("subStatus") == "Paused"
+    assert session.has_active_job is True
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [
+                {
+                    "action": "finished",
+                    "job": {
+                        "job_id": "0002DD",
+                        "filename": "sample.gcode",
+                        "status": "cancelled",
+                    },
+                }
+            ],
+        }
+    )
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "cancelled"},
+                    "display_status": {"message": "Paused"},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    overview = selector.build(store, session, heater, observed_at + timedelta(seconds=2))
+    assert overview is not None
+    assert overview.get("printerStatus") == "Cancelled"
+    assert overview.get("subStatus") is None
+    assert session.message is None
+    assert session.has_active_job is False
+
+
 @pytest.mark.asyncio
 async def test_publisher_emits_overview_full_update() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
@@ -606,6 +768,8 @@ async def test_publisher_emits_overview_full_update() -> None:
     )
     await asyncio.sleep(0.05)
     await publisher.stop()
+
+
 
     overview_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
     assert overview_messages, "Expected overview updates"
@@ -801,8 +965,8 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
     extruder_sensor = next(
         sensor for sensor in sensors if sensor.get("channel") == "extruder"
     )
-    assert extruder_sensor.get("target") == pytest.approx(100.0, rel=1e-3)
     assert extruder_sensor.get("value") == pytest.approx(72.0, rel=1e-3)
+    assert extruder_sensor.get("target") == pytest.approx(0.0, abs=1e-6)
 
 
 def test_telemetry_configuration_requires_device_id():
@@ -1122,14 +1286,8 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_query_on_notification_ensures_target_values():
-    """Verify that query-on-notification strategy retrieves target values.
-
-    This test validates the Obico-inspired fix: when Moonraker omits the target
-    field in notify_status_update (which happens when setting target on a cold
-    extruder), we query heater state via HTTP to ensure we always have current
-    target values.
-    """
+async def test_notify_status_update_does_not_trigger_query():
+    """Verify that heater updates rely solely on WebSocket notifications."""
     # Initial state with both temperature and target
     initial_state = {
         "result": {
@@ -1167,6 +1325,7 @@ async def test_query_on_notification_ensures_target_values():
     mqtt.messages.clear()
     await asyncio.sleep(0.15)
     initial_query_count = moonraker.query_count
+    initial_query_objects = moonraker.last_query_objects
 
     # Simulate user setting target to 50°C in Mainsail
     # Moonraker sends notify_status_update WITHOUT target field (the bug we're fixing)
@@ -1193,40 +1352,18 @@ async def test_query_on_notification_ensures_target_values():
         }
     )
 
-    await asyncio.sleep(0.5)  # Wait for query + processing
+    await asyncio.sleep(0.5)
 
-    # Verify that an HTTP query was executed
-    assert moonraker.query_count > initial_query_count, (
-        "Expected HTTP query to be executed on notify_status_update"
+    # Verify that no HTTP query was executed
+    assert moonraker.query_count == initial_query_count, (
+        "Expected no HTTP query when processing notify_status_update"
     )
+    assert moonraker.last_query_objects == initial_query_objects
 
-    # Verify that only heaters were queried (efficiency check)
-    assert moonraker.last_query_objects is not None, "Expected query objects"
-    queried = set(moonraker.last_query_objects.keys())
-    assert "extruder" in queried, "Expected extruder to be queried"
-    # Verify we use None to get all fields
-    assert moonraker.last_query_objects["extruder"] is None, (
-        "Expected to query all heater fields (None)"
-    )
-
-    # Verify MQTT message includes the correct target (from query, not notification)
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
-    assert telemetry_messages, "Expected telemetry updates"
-
-    document = _decode(telemetry_messages[-1])
-    telemetry_body = document.get("telemetry")
-    assert isinstance(telemetry_body, dict)
-    sensors = telemetry_body.get("sensors")
-    assert isinstance(sensors, list)
-    extruder_sensor = next(
-        sensor for sensor in sensors if sensor.get("channel") == "extruder"
-    )
-    assert extruder_sensor.get("value") == pytest.approx(40.0, rel=1e-3)
-    # This is the critical assertion: target should be 50.0 (from query),
-    # not missing or stuck at old value
-    assert extruder_sensor.get("target") == pytest.approx(50.0, rel=1e-3), (
-        "Target should be retrieved via HTTP query when omitted from WebSocket notification"
-    )
+    # No new telemetry publish is expected when the contract does not change
+    assert (
+        mqtt.by_topic().get("owl/printers/device-123/telemetry") is None
+    ), "Expected no telemetry publish for unchanged contract"
 
     await publisher.stop()
 
