@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from .state_engine import PrinterContext, PrinterStateEngine
@@ -22,6 +23,7 @@ class OverviewSelector:
         self._state_engine = PrinterStateEngine()
         self._last_contract_hash: Optional[str] = None
         self._last_updated: Optional[datetime] = None
+        self._last_emitted_at: Optional[datetime] = None
         self._last_debug_signature: Optional[tuple[Any, ...]] = None
 
     def build(
@@ -79,7 +81,8 @@ class OverviewSelector:
                     overview["subStatus"] = cleaned
 
         if session.progress_percent is not None:
-            overview["progressPercent"] = round(session.progress_percent, 3)
+            quantized_progress = max(0, min(100, int(math.floor(session.progress_percent))))
+            overview["progressPercent"] = quantized_progress
         if session.elapsed_seconds is not None:
             overview["elapsedSeconds"] = session.elapsed_seconds
         estimated_remaining = session.remaining_seconds
@@ -114,14 +117,24 @@ class OverviewSelector:
             "watchWindowActive": False,
         }
 
-        contract_hash = json.dumps(overview, sort_keys=True, default=str)
-        if contract_hash != self._last_contract_hash:
+        contract_hash = self._build_contract_hash(overview)
+        heartbeat_due = (
+            self._last_emitted_at is None
+            or (observed_at - self._last_emitted_at) >= timedelta(seconds=self._heartbeat_seconds)
+        )
+        has_meaningful_change = contract_hash != self._last_contract_hash
+
+        if not has_meaningful_change and not heartbeat_due:
+            return None
+
+        if has_meaningful_change:
             self._last_contract_hash = contract_hash
             self._last_updated = observed_at
 
         last_updated = self._last_updated or observed_at
 
         overview["lastUpdatedUtc"] = last_updated.replace(microsecond=0).isoformat()
+        self._last_emitted_at = observed_at
 
         if LOGGER.isEnabledFor(logging.DEBUG):
             signature = (
@@ -163,6 +176,24 @@ class OverviewSelector:
                 self._last_debug_signature = signature
 
         return overview
+
+    def _build_contract_hash(self, payload: Dict[str, Any]) -> str:
+        time_keys = {"elapsedSeconds", "estimatedTimeRemainingSeconds", "lastUpdatedUtc"}
+
+        def sanitize(value: Any) -> Any:
+            if isinstance(value, dict):
+                result: Dict[str, Any] = {}
+                for key, inner in value.items():
+                    if key in time_keys:
+                        continue
+                    result[key] = sanitize(inner)
+                return result
+            if isinstance(value, list):
+                return [sanitize(item) for item in value]
+            return value
+
+        sanitized = sanitize(payload)
+        return json.dumps(sanitized, sort_keys=True, default=str)
 
 
 @dataclass
@@ -297,7 +328,7 @@ def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
         payload.setdefault("sourcePath", session.source_path or session.job_name)
 
     if session.progress_percent is not None:
-        payload["progressPercent"] = round(session.progress_percent, 3)
+        payload["progressPercent"] = max(0, min(100, int(math.floor(session.progress_percent))))
 
     layers: Dict[str, int] = {}
     if session.layer_current is not None:
