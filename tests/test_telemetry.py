@@ -21,7 +21,12 @@ from moonraker_owl.config import (
     DEFAULT_TELEMETRY_EXCLUDE_FIELDS,
 )
 from moonraker_owl import constants
-from moonraker_owl.telemetry import TelemetryConfigurationError, TelemetryPublisher
+from moonraker_owl.telemetry import (
+    TelemetryConfigurationError,
+    TelemetryPublisher,
+    PollSpec,
+    build_subscription_manifest,
+)
 from moonraker_owl.telemetry.selectors import OverviewSelector
 from moonraker_owl.telemetry.state_store import MoonrakerStateStore
 from moonraker_owl.telemetry.trackers import HeaterMonitor, PrintSessionTracker
@@ -37,6 +42,8 @@ class FakeMoonrakerClient:
         self._callback = None
         self._initial_state = initial_state
         self.subscription_objects = None
+        self.last_query_objects = None
+        self.query_log: list[Optional[Dict[str, Optional[list[str]]]]] = []
 
     async def start(self, callback):
         self._callback = callback
@@ -49,7 +56,8 @@ class FakeMoonrakerClient:
         self.subscription_objects = objects
 
     async def fetch_printer_state(self, objects=None, timeout=5.0):
-        self.subscription_objects = objects
+        self.last_query_objects = objects
+        self.query_log.append(objects)
         return self._initial_state
 
     async def execute_print_action(self, action: str) -> None:
@@ -478,7 +486,7 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=20.0)
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -550,7 +558,7 @@ async def test_pipeline_emits_schema_envelopes() -> None:
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=20.0)
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -750,7 +758,7 @@ async def test_publisher_emits_overview_full_update() -> None:
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=50.0)
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -789,7 +797,7 @@ async def test_publisher_emits_events_channel() -> None:
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=50.0)
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -832,22 +840,15 @@ async def test_subscription_skips_excluded_objects() -> None:
     config = build_config()
     config.telemetry.exclude_fields = list(DEFAULT_TELEMETRY_EXCLUDE_FIELDS)
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
     await publisher.stop()
 
-    expected_objects: dict[str, Optional[list[str]]] = {
-        field: None
-        for field in DEFAULT_TELEMETRY_FIELDS
-        if field and field not in DEFAULT_TELEMETRY_EXCLUDE_FIELDS
-    }
-
-    # Heaters explicitly subscribe to temperature and target fields
-    # (optimization to ensure both are always present)
-    expected_objects["extruder"] = ["temperature", "target"]
-    expected_objects["heater_bed"] = ["temperature", "target"]
+    expected_objects = build_subscription_manifest(
+        DEFAULT_TELEMETRY_FIELDS, DEFAULT_TELEMETRY_EXCLUDE_FIELDS
+    )
 
     assert moonraker.subscription_objects == expected_objects
 
@@ -865,7 +866,7 @@ async def test_subscription_handles_attribute_selection() -> None:
     )
     config.telemetry.exclude_fields = []
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -890,7 +891,7 @@ async def test_subscription_normalizes_field_names() -> None:
     )
     config.telemetry.exclude_fields = [' "moonraker_stats" ']
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -901,6 +902,58 @@ async def test_subscription_normalizes_field_names() -> None:
         "temperature_sensor ambient": None,
         "toolhead": ["position"],
     }
+
+
+@pytest.mark.asyncio
+async def test_polling_fetches_unsubscribed_objects() -> None:
+    initial_state = {"result": {"status": {}}}
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(include_fields=["print_stats"])
+
+    poll_spec = PollSpec(
+        name="test-poll",
+        fields=("temperature_sensor ambient",),
+        interval_seconds=0.05,
+        initial_delay_seconds=0.0,
+    )
+
+    publisher = TelemetryPublisher(
+        config,
+        moonraker,
+        mqtt,
+        poll_specs=(poll_spec,),
+    )
+
+    await publisher.start()
+
+    moonraker.update_state(
+        {
+            "result": {
+                "status": {
+                    "temperature_sensor ambient": {"temperature": 27.3},
+                }
+            }
+        }
+    )
+
+    await asyncio.sleep(0.2)
+    await publisher.stop()
+
+    polled_objects = next(
+        (
+            entry
+            for entry in reversed(moonraker.query_log)
+            if isinstance(entry, dict)
+            and "temperature_sensor ambient" in entry
+        ),
+        None,
+    )
+    assert polled_objects is not None, "Expected poller to query ambient sensor"
+
+    snapshot = publisher._orchestrator.store.get("temperature_sensor ambient")
+    assert snapshot is not None
+    assert snapshot.data.get("temperature") == 27.3
 
 
 @pytest.mark.asyncio
@@ -918,7 +971,7 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=20.0)
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -985,7 +1038,9 @@ def test_telemetry_configuration_requires_device_id():
     )
 
     with pytest.raises(TelemetryConfigurationError):
-        TelemetryPublisher(config, FakeMoonrakerClient({}), FakeMQTTClient())
+        TelemetryPublisher(
+            config, FakeMoonrakerClient({}), FakeMQTTClient(), poll_specs=()
+        )
 
 
 def test_telemetry_configuration_requires_device_token():
@@ -1005,7 +1060,9 @@ def test_telemetry_configuration_requires_device_token():
     )
 
     with pytest.raises(TelemetryConfigurationError):
-        TelemetryPublisher(config, FakeMoonrakerClient({}), FakeMQTTClient())
+        TelemetryPublisher(
+            config, FakeMoonrakerClient({}), FakeMQTTClient(), poll_specs=()
+        )
 
 
 @pytest.mark.asyncio
@@ -1022,7 +1079,7 @@ async def test_heater_subscriptions_include_temperature_and_target_fields() -> N
     )
     config.telemetry.exclude_fields = []
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -1059,7 +1116,7 @@ async def test_temperature_target_preserved_across_updates() -> None:
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=50.0, include_fields=["extruder", "heater_bed"])
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -1132,7 +1189,7 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=50.0, include_fields=["extruder"])
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -1204,7 +1261,7 @@ async def test_idle_cadence_flushes_latest_payload() -> None:
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=0.5, include_fields=["extruder"])
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -1263,7 +1320,7 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=1 / 30)
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     expires_at = publisher.apply_telemetry_rate(
         mode="watch",
@@ -1303,21 +1360,20 @@ async def test_notify_status_update_does_not_trigger_query():
         def __init__(self, initial_state):
             super().__init__(initial_state)
             self.query_count = 0
-            self.last_query_objects = None
             # State that will be returned by subsequent queries
             self.current_state = initial_state
 
         async def fetch_printer_state(self, objects=None, timeout=5.0):
             self.query_count += 1
             self.last_query_objects = objects
-            self.subscription_objects = objects
+            self.query_log.append(objects)
             return self.current_state
 
     moonraker = QueryTrackingFakeClient(initial_state)
     mqtt = FakeMQTTClient()
     config = build_config()
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
     await publisher.start()
     await asyncio.sleep(0.1)
 
@@ -1383,7 +1439,7 @@ async def test_raw_payload_excluded_by_default():
     mqtt = FakeMQTTClient()
     config = build_config()  # Default: include_raw_payload=False
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
     await publisher.start()
     await asyncio.sleep(0.2)
 
@@ -1424,7 +1480,7 @@ async def test_raw_payload_included_when_configured():
     mqtt = FakeMQTTClient()
     config = build_config(include_raw_payload=True)  # Explicitly enable
 
-    publisher = TelemetryPublisher(config, moonraker, mqtt)
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
     await publisher.start()
     await asyncio.sleep(0.2)
 

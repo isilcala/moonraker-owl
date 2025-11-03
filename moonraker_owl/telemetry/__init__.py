@@ -10,7 +10,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, Optional, Protocol, Set
+from typing import Any, Dict, Iterable, Optional, Protocol, Sequence, Set
 
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
@@ -45,6 +45,50 @@ class _ChannelPublishState:
     last_publish: float = 0.0
 
 
+@dataclass(frozen=True)
+class PollSpec:
+    """Declarative definition for a Moonraker polling schedule."""
+
+    name: str
+    fields: Sequence[str]
+    interval_seconds: float
+    initial_delay_seconds: float = 0.0
+
+
+@dataclass
+class _PollGroup:
+    name: str
+    objects: dict[str, Optional[list[str]]]
+    interval: float
+    initial_delay: float
+
+
+DEFAULT_POLL_SPECS: tuple[PollSpec, ...] = (
+    PollSpec(
+        name="environment-sensors",
+        fields=(
+            "temperature_sensor ambient",
+            "temperature_sensor chamber",
+        ),
+        interval_seconds=30.0,
+        initial_delay_seconds=5.0,
+    ),
+    PollSpec(
+        name="diagnostics",
+        fields=(
+            "moonraker_stats",
+            "system_cpu_usage",
+            "system_memory",
+            "network",
+            "websocket_connections",
+            "cpu_temp",
+        ),
+        interval_seconds=60.0,
+        initial_delay_seconds=10.0,
+    ),
+)
+
+
 class MQTTClientLike(Protocol):
     def publish(
         self,
@@ -67,6 +111,7 @@ class TelemetryPublisher:
         mqtt: MQTTClientLike,
         *,
         queue_size: int = 16,
+        poll_specs: Optional[Iterable[PollSpec]] = None,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
@@ -112,6 +157,10 @@ class TelemetryPublisher:
             build_subscription_manifest(self._include_fields, self._exclude_fields)
         )
         self._moonraker.set_subscription_objects(self._subscription_objects)
+
+        self._poll_specs = tuple(poll_specs or DEFAULT_POLL_SPECS)
+        self._poll_groups = self._build_poll_groups()
+        self._poll_tasks: list[asyncio.Task[None]] = []
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=max(queue_size, 1))
@@ -161,10 +210,13 @@ class TelemetryPublisher:
         self._callback_registered = True
 
         self._worker = asyncio.create_task(self._run())
+        self._start_pollers()
 
     async def stop(self) -> None:
         self._stop_event.set()
         self._event.set()
+
+        await self._cancel_pollers()
 
         if self._worker is not None:
             self._worker.cancel()
@@ -207,6 +259,90 @@ class TelemetryPublisher:
 
         await self._queue.put(payload)
         self._event.set()
+
+    def _build_poll_groups(self) -> list[_PollGroup]:
+        if not self._poll_specs:
+            return []
+
+        subscribed = set(self._subscription_objects.keys())
+        groups: list[_PollGroup] = []
+
+        for spec in self._poll_specs:
+            manifest = build_subscription_manifest(spec.fields, ())
+            filtered = {
+                key: value
+                for key, value in manifest.items()
+                if key and key not in subscribed
+            }
+
+            if not filtered:
+                continue
+
+            interval = spec.interval_seconds if spec.interval_seconds > 0 else 60.0
+            initial_delay = (
+                spec.initial_delay_seconds if spec.initial_delay_seconds > 0 else 0.0
+            )
+
+            groups.append(
+                _PollGroup(
+                    name=spec.name,
+                    objects=filtered,
+                    interval=interval,
+                    initial_delay=initial_delay,
+                )
+            )
+
+        return groups
+
+    def _start_pollers(self) -> None:
+        if self._poll_tasks or not self._poll_groups:
+            return
+
+        for group in self._poll_groups:
+            task = asyncio.create_task(self._poll_loop(group))
+            self._poll_tasks.append(task)
+
+    async def _cancel_pollers(self) -> None:
+        if not self._poll_tasks:
+            return
+
+        for task in self._poll_tasks:
+            task.cancel()
+
+        for task in self._poll_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        self._poll_tasks.clear()
+
+    async def _poll_loop(self, group: _PollGroup) -> None:
+        if not group.objects:
+            return
+
+        delay = max(group.initial_delay, 0.0)
+        if delay:
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                return
+            except asyncio.TimeoutError:
+                pass
+
+        while not self._stop_event.is_set():
+            try:
+                payload = await self._moonraker.fetch_printer_state(group.objects)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.debug("Polling '%s' failed: %s", group.name, exc)
+            else:
+                await self._enqueue(payload)
+
+            interval = max(group.interval, 0.1)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                break
+            except asyncio.TimeoutError:
+                continue
 
     async def _run(self) -> None:
         loop = self._loop or asyncio.get_running_loop()
@@ -717,5 +853,6 @@ __all__ = [
     "TelemetryPublisher",
     "TelemetryOrchestrator",
     "MoonrakerStateStore",
+    "PollSpec",
     "build_subscription_manifest",
 ]

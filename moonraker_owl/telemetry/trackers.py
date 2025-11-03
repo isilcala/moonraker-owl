@@ -237,6 +237,12 @@ class PrintSessionTracker:
         active_states = {"printing", "paused", "resuming", "cancelling", "pausing"}
         active_job_statuses = {"in_progress", "printing", "running", "resuming", "starting"}
 
+        if job_status in terminal_states:
+            return False
+
+        if raw_state in terminal_states:
+            return False
+
         if job_status in active_job_statuses:
             return True
 
@@ -246,14 +252,8 @@ class PrintSessionTracker:
         if sd_printing:
             return True
 
-        if sd_active and not sd_paused and job_status not in terminal_states:
+        if sd_active and not sd_paused:
             return True
-
-        if raw_state in terminal_states:
-            return False
-
-        if job_status in terminal_states:
-            return False
 
         if idle_state in {"printing", "busy"}:
             return True

@@ -10,35 +10,28 @@ from typing import Iterable, List, Optional
 from . import constants
 
 DEFAULT_TELEMETRY_FIELDS = [
-    "print_stats",
+    "print_stats.state",
+    "print_stats.message",
+    "print_stats.filename",
+    "print_stats.info",
+    "webhooks.state",
+    "webhooks.state_message",
+    "gcode_move.speed_factor",
+    "gcode_move.extrude_factor",
+    "history",
+    "gcode_macro _OBICO_LAYER_CHANGE",
+    "fan.speed",
     "toolhead",
-    "gcode_move",
-    "heater_bed",
-    "extruder",
-    "fan",
+    "virtual_sdcard",
     "display_status",
     "idle_timeout",
-    "virtual_sdcard",
     "gcode_macro TIMELAPSE_TAKE_FRAME",
-    "temperature_sensor ambient",
-    "temperature_sensor chamber",
-    "moonraker_stats",
-    "cpu_temp",
-    "system_cpu_usage",
-    "system_memory",
-    "network",
-    "websocket_connections",
+    "extruder",
+    "heater_bed",
 ]
 
 
-DEFAULT_TELEMETRY_EXCLUDE_FIELDS: list[str] = [
-    "moonraker_stats",
-    "cpu_temp",
-    "system_cpu_usage",
-    "system_memory",
-    "network",
-    "websocket_connections",
-]
+DEFAULT_TELEMETRY_EXCLUDE_FIELDS: list[str] = []
 
 
 DEFAULT_TELEMETRY_RATE_HZ: float = 1 / 30
