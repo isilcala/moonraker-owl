@@ -84,6 +84,7 @@ class TelemetryOrchestrator:
             max_hz=self._telemetry_max_hz,
             watch_window_expires=self._watch_window_expires,
             observed_at=observed_at,
+            force_emit="telemetry" in forced,
         )
         events_payload = self.events_selector.build(
             events=self.events.drain(),

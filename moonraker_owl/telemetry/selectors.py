@@ -81,7 +81,10 @@ class OverviewSelector:
                     overview["subStatus"] = cleaned
 
         if session.progress_percent is not None:
-            quantized_progress = max(0, min(100, int(math.floor(session.progress_percent))))
+            quantized_progress = max(
+                0,
+                min(100, int(math.floor(session.progress_percent))),
+            )
             overview["progressPercent"] = quantized_progress
         if session.elapsed_seconds is not None:
             overview["elapsedSeconds"] = session.elapsed_seconds
@@ -207,6 +210,7 @@ class _SensorState:
 class TelemetrySelector:
     def __init__(self) -> None:
         self._sensor_state: Dict[str, _SensorState] = {}
+        self._last_contract_hash: Optional[str] = None
 
     def build(
         self,
@@ -216,6 +220,7 @@ class TelemetrySelector:
         max_hz: float,
         watch_window_expires: Optional[datetime],
         observed_at: datetime,
+        force_emit: bool = False,
     ) -> Optional[Dict[str, Any]]:
         sensors = self._collect_sensors(store)
         cadence: Dict[str, Any] = {
@@ -227,10 +232,17 @@ class TelemetrySelector:
                 microsecond=0
             ).isoformat()
 
-        return {
+        payload = {
             "cadence": cadence,
             "sensors": sensors,
         }
+
+        contract_hash = json.dumps(payload, sort_keys=True, default=str)
+        if not force_emit and contract_hash == self._last_contract_hash:
+            return None
+
+        self._last_contract_hash = contract_hash
+        return payload
 
     def _collect_sensors(self, store: MoonrakerStateStore) -> List[Dict[str, Any]]:
         sensors: List[Dict[str, Any]] = []
@@ -328,7 +340,10 @@ def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
         payload.setdefault("sourcePath", session.source_path or session.job_name)
 
     if session.progress_percent is not None:
-        payload["progressPercent"] = max(0, min(100, int(math.floor(session.progress_percent))))
+        payload["progressPercent"] = max(
+            0,
+            min(100, int(math.floor(session.progress_percent))),
+        )
 
     layers: Dict[str, int] = {}
     if session.layer_current is not None:
@@ -415,7 +430,7 @@ def _round_sensor_value(sensor_type: str, value: Any) -> Optional[float]:
     if numeric is None:
         return None
     if sensor_type == "heater":
-        return float(round(numeric))
+        return float(math.floor(numeric))
     return round(numeric, 1)
 
 

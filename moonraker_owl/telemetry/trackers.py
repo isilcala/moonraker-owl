@@ -73,13 +73,16 @@ class PrintSessionTracker:
         sd_paused = bool(_as_bool(virtual_sdcard.get("is_paused")))
 
         session_id = self._resolve_session_id(history_id, filename, job_id)
-        progress_percent = _extract_progress_percent(virtual_sdcard)
+        progress_percent = _extract_progress_percent(
+            display_status,
+            virtual_sdcard,
+            history_event,
+            filename,
+        )
         elapsed_seconds = _as_int(print_stats.get("print_duration"))
         remaining_seconds = _as_int(print_stats.get("print_duration_remaining"))
         layer_current, layer_total = _extract_layers(print_stats)
 
-        progress_value = _as_float(progress_percent)
-        progress_trend = self._derive_progress_trend(progress_value, observed_at)
         has_active_job = self._is_active_job(
             raw_state=raw_state,
             idle_state=idle_state,
@@ -89,6 +92,11 @@ class PrintSessionTracker:
             sd_printing=sd_printing,
             sd_paused=sd_paused,
         )
+
+    # Monotonic clamp removed after verifying parity with Mainsail’s progress feed.
+
+        progress_value = _as_float(progress_percent)
+        progress_trend = self._derive_progress_trend(progress_value, observed_at)
         message = _extract_message(display_status, print_stats)
         message = _normalise_message(
             message,
@@ -169,6 +177,7 @@ class PrintSessionTracker:
         filename: Optional[str],
         job_id: Optional[str],
     ) -> str:
+        previous_session = self._current_session_id
         if history_id:
             self._current_session_id = f"history-{history_id}"
         elif job_id:
@@ -182,6 +191,9 @@ class PrintSessionTracker:
         self._last_history_id = history_id or self._last_history_id
         self._last_filename = filename or self._last_filename
         self._last_job_id = job_id or self._last_job_id
+
+        if self._current_session_id != previous_session:
+            self._last_progress_sample = None
 
         return self._current_session_id or "offline"
 
@@ -316,6 +328,39 @@ def _extract_history_id(section: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def _extract_history_metadata(
+    section: Mapping[str, Any],
+    filename: Optional[str],
+) -> Optional[tuple[int, int, int]]:
+    for candidate in _iter_candidate_sections(section):
+        job = candidate.get("job")
+        if not isinstance(job, Mapping):
+            continue
+
+        job_filename = job.get("filename")
+        if filename and isinstance(job_filename, str) and job_filename:
+            if job_filename.strip() != filename:
+                continue
+
+        metadata = job.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+
+        start_byte = _as_int(metadata.get("gcode_start_byte"))
+        end_byte = _as_int(metadata.get("gcode_end_byte"))
+        file_size = _as_int(metadata.get("size"))
+
+        if start_byte is None or end_byte is None or file_size is None:
+            continue
+
+        if end_byte <= start_byte or file_size <= 0:
+            continue
+
+        return start_byte, end_byte, file_size
+
+    return None
+
+
 def _extract_filename(section: Mapping[str, Any]) -> Optional[str]:
     filename_keys = ("filename", "file_path", "filePath", "job_path")
     for candidate in _iter_candidate_sections(section):
@@ -424,14 +469,35 @@ def _normalise_message(
     return cleaned
 
 
-def _extract_progress_percent(section: Mapping[str, Any]) -> Optional[float]:
-    progress = section.get("progress")
-    if progress is None:
-        return None
-    progress_value = _as_float(progress)
-    if progress_value is None:
-        return None
-    return max(0.0, min(progress_value * 100.0, 100.0))
+def _extract_progress_percent(
+    display_status: Mapping[str, Any],
+    virtual_sdcard: Mapping[str, Any],
+    history_event: Mapping[str, Any],
+    filename: Optional[str],
+) -> Optional[float]:
+    metadata = _extract_history_metadata(history_event, filename)
+    sd_progress = _as_float(virtual_sdcard.get("progress"))
+
+    if metadata is not None and sd_progress is not None:
+        start_byte, end_byte, file_size = metadata
+        span = end_byte - start_byte
+        if file_size and span > 0:
+            file_position = sd_progress * float(file_size)
+            relative = (file_position - float(start_byte)) / float(span)
+            if relative < 0:
+                relative = 0.0
+            elif relative > 1:
+                relative = 1.0
+            return relative * 100.0
+
+    display_progress = _as_float(display_status.get("progress"))
+    if display_progress is not None:
+        return max(0.0, min(display_progress * 100.0, 100.0))
+
+    if sd_progress is not None:
+        return max(0.0, min(sd_progress * 100.0, 100.0))
+
+    return None
 
 
 def _extract_layers(section: Mapping[str, Any]) -> tuple[Optional[int], Optional[int]]:
