@@ -65,6 +65,17 @@ class TelemetryOrchestrator:
         self._telemetry_max_hz = 0.033
         self._watch_window_expires: Optional[datetime] = None
 
+    def reset(self) -> None:
+        self.store = MoonrakerStateStore(clock=self._clock)
+        self.overview_selector.reset()
+        self.telemetry_selector.reset()
+        self.events.reset()
+        self.session_tracker = PrintSessionTracker()
+        self.heater_monitor = HeaterMonitor()
+        self._telemetry_mode = "idle"
+        self._telemetry_max_hz = 0.033
+        self._watch_window_expires = None
+
     def ingest(self, payload: Dict[str, Any]) -> None:
         self.store.ingest(payload)
         self.heater_monitor.refresh(self.store)

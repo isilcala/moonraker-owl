@@ -141,6 +141,7 @@ class TelemetryPublisher:
             name: _ChannelPublishState() for name in self._channel_topics
         }
         self._hasher = TelemetryHasher()
+        self._retain_next_publish: Set[str] = {"overview", "telemetry"}
 
         self._min_interval = 0.05
         idle_hz = config.telemetry.rate_hz or 0.033
@@ -176,6 +177,7 @@ class TelemetryPublisher:
         self._pending_payload: Optional[Dict[str, Any]] = None
         self._pending_timer_handle: Optional[asyncio.TimerHandle] = None
         self._pending_forced_channels: Set[str] = set()
+        self._resume_snapshot: Optional[Dict[str, Any]] = None
 
         self._last_overview_publish_time = 0.0
         self._last_overview_status = "Idle"
@@ -212,6 +214,7 @@ class TelemetryPublisher:
 
         self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
+        self._reset_runtime_state()
 
         await self._prime_initial_state()
 
@@ -232,7 +235,11 @@ class TelemetryPublisher:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
             self._worker = None
+        if self._last_payload_snapshot is not None:
+            self._resume_snapshot = copy.deepcopy(self._last_payload_snapshot)
+            self._retain_next_publish.update({"overview", "telemetry"})
         self._cancel_pending_timer()
+        self._pending_forced_channels.clear()
 
         if self._callback_registered:
             self._moonraker.remove_callback(self._handle_moonraker_update)
@@ -497,7 +504,10 @@ class TelemetryPublisher:
                         self._last_overview_status = status_value
                         self._last_overview_publish_time = now_monotonic
 
-            self._publish(channel, topic, envelope)
+            retain = channel in self._retain_next_publish
+            if retain:
+                self._retain_next_publish.discard(channel)
+            self._publish(channel, topic, envelope, retain=retain)
             self._pending_forced_channels.discard(channel)
 
         if deferred:
@@ -688,7 +698,14 @@ class TelemetryPublisher:
         state.last_publish = now_monotonic
         return True, None
 
-    def _publish(self, channel: str, topic: str, document: Dict[str, Any]) -> None:
+    def _publish(
+        self,
+        channel: str,
+        topic: str,
+        document: Dict[str, Any],
+        *,
+        retain: bool = False,
+    ) -> None:
         payload_bytes = json.dumps(document, default=_json_default).encode("utf-8")
         properties = Properties(PacketTypes.PUBLISH)
         properties.UserProperty = [
@@ -700,7 +717,7 @@ class TelemetryPublisher:
                 topic,
                 payload_bytes,
                 qos=self._channel_qos.get(channel, 1),
-                retain=False,
+                retain=retain,
                 properties=properties,
             )
         except MQTTConnectionError as exc:
@@ -740,6 +757,35 @@ class TelemetryPublisher:
         if self._pending_timer_handle is not None:
             self._pending_timer_handle.cancel()
             self._pending_timer_handle = None
+
+    def _reset_runtime_state(self) -> None:
+        self._orchestrator.reset()
+        self._orchestrator.set_telemetry_mode(
+            mode="idle",
+            max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
+            watch_window_expires=None,
+        )
+        for state in self._channel_state.values():
+            state.hash = None
+            state.last_publish = 0.0
+        self._pending_payload = None
+        self._pending_forced_channels.clear()
+        if self._resume_snapshot is not None:
+            self._pending_payload = copy.deepcopy(self._resume_snapshot)
+            self._pending_forced_channels.update({"overview", "telemetry"})
+            self._retain_next_publish.update({"overview", "telemetry"})
+        self._resume_snapshot = None
+        self._last_payload_snapshot = None
+        self._last_overview_publish_time = 0.0
+        self._last_overview_status = "Idle"
+        if self._queue is not None:
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+        if self._pending_payload is not None:
+            self._event.set()
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
     raw = config.raw
 

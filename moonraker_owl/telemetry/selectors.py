@@ -26,6 +26,12 @@ class OverviewSelector:
         self._last_emitted_at: Optional[datetime] = None
         self._last_debug_signature: Optional[tuple[Any, ...]] = None
 
+    def reset(self) -> None:
+        self._last_contract_hash = None
+        self._last_updated = None
+        self._last_emitted_at = None
+        self._last_debug_signature = None
+
     def build(
         self,
         store: MoonrakerStateStore,
@@ -211,6 +217,10 @@ class TelemetrySelector:
     def __init__(self) -> None:
         self._sensor_state: Dict[str, _SensorState] = {}
         self._last_contract_hash: Optional[str] = None
+
+    def reset(self) -> None:
+        self._sensor_state.clear()
+        self._last_contract_hash = None
 
     def build(
         self,

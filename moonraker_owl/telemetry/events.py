@@ -42,3 +42,6 @@ class EventCollector:
         events = list(self._pending)
         self._pending.clear()
         return events
+
+    def reset(self) -> None:
+        self._pending.clear()
