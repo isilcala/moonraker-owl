@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +25,33 @@ class FakeClock:
             self._index += 1
             return value
         return self._timestamps[-1]
+
+
+class IncrementingClock:
+    def __init__(self, start: datetime, step: timedelta = timedelta(seconds=1)) -> None:
+        self._current = start
+        self._step = step
+
+    def __call__(self) -> datetime:
+        value = self._current
+        self._current += self._step
+        return value
+
+
+def _iter_stream_payloads(limit: int = 200) -> list[dict]:
+    stream_path = (
+        Path(__file__).resolve().parent / "fixtures" / "moonraker-stream-20251102T151954Z.jsonl"
+    )
+    payloads: list[dict] = []
+    with stream_path.open("r", encoding="utf-8") as handle:
+        for idx, line in enumerate(handle):
+            if limit and idx >= limit:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            payloads.append(json.loads(line)["payload"])
+    return payloads
 
 
 @pytest.fixture()
@@ -163,8 +192,7 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
     assert event["data"]["state"] == "completed"
 
     frames_second = orchestrator.build_payloads()
-    assert frames_second["overview"].observed_at >= overview_frame.observed_at
-    assert frames_second["telemetry"].observed_at >= telemetry_frame.observed_at
+    assert frames_second == {}
 
 
 def test_overview_last_updated_remains_stable_without_state_changes(
@@ -177,7 +205,7 @@ def test_overview_last_updated_remains_stable_without_state_changes(
         datetime(2025, 10, 10, 16, 42, 6, tzinfo=timezone.utc),
     )
 
-    orchestrator = TelemetryOrchestrator(clock=clock)
+    orchestrator = TelemetryOrchestrator(clock=clock, heartbeat_seconds=1)
     orchestrator.ingest(baseline_snapshot)
 
     first_frames = orchestrator.build_payloads()
@@ -216,7 +244,7 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
     }
 
     orchestrator.ingest(noise_update)
-    second_frames = orchestrator.build_payloads()
+    second_frames = orchestrator.build_payloads(forced_channels=["telemetry"])
     sensors_second = second_frames["telemetry"].payload["sensors"]
     extruder_second = next(sensor for sensor in sensors_second if sensor["channel"] == "extruder")
     assert extruder_second["lastUpdatedUtc"] == first_last_updated
@@ -246,3 +274,22 @@ def test_watch_window_flag_reflects_idle_mode(baseline_snapshot: dict) -> None:
 
     overview_flags = frames["overview"].payload["flags"]
     assert overview_flags["watchWindowActive"] is False
+
+
+def test_replay_stream_produces_progress() -> None:
+    clock = IncrementingClock(datetime(2025, 11, 2, 15, 19, tzinfo=timezone.utc))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+
+    for payload in _iter_stream_payloads(limit=0):
+        orchestrator.ingest(payload)
+
+    frames = orchestrator.build_payloads()
+    assert "overview" in frames
+    overview_payload = frames["overview"].payload
+
+    job_info = overview_payload.get("job", {})
+    assert job_info.get("name")
+    assert job_info.get("progress", {}).get("elapsedSeconds", 0) > 0
+
+    telemetry_payload = frames["telemetry"].payload
+    assert telemetry_payload["cadence"]["mode"] == "idle"

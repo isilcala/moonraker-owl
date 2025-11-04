@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional, Set
 
+from ..config import TelemetryCadenceConfig
 from ..version import __version__
 from .events import EventCollector
 from .selectors import EventsSelector, OverviewSelector, TelemetrySelector
@@ -23,26 +24,42 @@ class ChannelPayload:
 
 
 class TelemetryOrchestrator:
-    """Coordinates store, trackers, and selectors to emit channel payloads."""
+    """Coordinates store, trackers, and selectors to emit channel payloads.
+
+    The orchestrator is invoked from the telemetry publisher's asyncio event
+    loop; callers must treat it as single-threaded unless future refactors add
+    explicit locking.
+    """
 
     def __init__(
         self,
         *,
         origin: Optional[str] = None,
-        heartbeat_seconds: int = 60,
+        heartbeat_seconds: Optional[int] = None,
         clock=None,
+        cadence: Optional[TelemetryCadenceConfig] = None,
     ) -> None:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._origin = origin or f"moonraker-owl@{__version__}"
+
+        self._cadence = cadence or TelemetryCadenceConfig()
+        heartbeat = (
+            heartbeat_seconds
+            if heartbeat_seconds is not None
+            else self._cadence.overview_heartbeat_seconds
+        )
 
         self.store = MoonrakerStateStore(clock=self._clock)
         self.session_tracker = PrintSessionTracker()
         self.heater_monitor = HeaterMonitor()
         self.events = EventCollector()
 
-        self.overview_selector = OverviewSelector(heartbeat_seconds=heartbeat_seconds)
+        self.overview_selector = OverviewSelector(heartbeat_seconds=heartbeat)
         self.telemetry_selector = TelemetrySelector()
-        self.events_selector = EventsSelector()
+        self.events_selector = EventsSelector(
+            max_per_second=self._cadence.events_max_per_second,
+            max_per_minute=self._cadence.events_max_per_minute,
+        )
 
         self._telemetry_mode = "idle"
         self._telemetry_max_hz = 0.033

@@ -19,6 +19,7 @@ from moonraker_owl.config import (
     OwlConfig,
     ResilienceConfig,
     TelemetryConfig,
+    TelemetryCadenceConfig,
 )
 
 
@@ -86,6 +87,7 @@ def config() -> OwlConfig:
         ),
         moonraker=MoonrakerConfig(),
         telemetry=TelemetryConfig(),
+    telemetry_cadence=TelemetryCadenceConfig(),
         commands=CommandConfig(),
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),
@@ -236,6 +238,7 @@ def test_command_processor_requires_device_id():
         cloud=CloudConfig(),
         moonraker=MoonrakerConfig(),
         telemetry=TelemetryConfig(),
+        telemetry_cadence=TelemetryCadenceConfig(),
         commands=CommandConfig(),
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),

@@ -38,6 +38,16 @@ DEFAULT_TELEMETRY_RATE_HZ: float = 1 / 30
 
 
 @dataclass(slots=True)
+class TelemetryCadenceConfig:
+    overview_heartbeat_seconds: int = 60
+    overview_idle_interval_seconds: float = 60.0
+    overview_active_interval_seconds: float = 15.0
+    telemetry_watchdog_seconds: float = 300.0
+    events_max_per_second: int = 1
+    events_max_per_minute: int = 20
+
+
+@dataclass(slots=True)
 class CloudConfig:
     base_url: str = constants.DEFAULT_LINK_BASE_URL
     broker_host: str = constants.DEFAULT_BROKER_HOST
@@ -93,6 +103,7 @@ class OwlConfig:
     cloud: CloudConfig
     moonraker: MoonrakerConfig
     telemetry: TelemetryConfig
+    telemetry_cadence: TelemetryCadenceConfig
     commands: CommandConfig
     logging: LoggingConfig
     resilience: ResilienceConfig
@@ -137,6 +148,14 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             },
             "commands": {
                 "ack_timeout_seconds": "30.0",
+            },
+            "telemetry_cadence": {
+                "overview_heartbeat_seconds": "60",
+                "overview_idle_interval_seconds": "60",
+                "overview_active_interval_seconds": "15",
+                "telemetry_watchdog_seconds": "300",
+                "events_max_per_second": "1",
+                "events_max_per_minute": "20",
             },
             "logging": {
                 "level": "INFO",
@@ -220,6 +239,41 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         ),
     )
 
+    cadence_defaults = TelemetryCadenceConfig()
+
+    telemetry_cadence = TelemetryCadenceConfig(
+        overview_heartbeat_seconds=parser.getint(
+            "telemetry_cadence",
+            "overview_heartbeat_seconds",
+            fallback=cadence_defaults.overview_heartbeat_seconds,
+        ),
+        overview_idle_interval_seconds=parser.getfloat(
+            "telemetry_cadence",
+            "overview_idle_interval_seconds",
+            fallback=cadence_defaults.overview_idle_interval_seconds,
+        ),
+        overview_active_interval_seconds=parser.getfloat(
+            "telemetry_cadence",
+            "overview_active_interval_seconds",
+            fallback=cadence_defaults.overview_active_interval_seconds,
+        ),
+        telemetry_watchdog_seconds=parser.getfloat(
+            "telemetry_cadence",
+            "telemetry_watchdog_seconds",
+            fallback=cadence_defaults.telemetry_watchdog_seconds,
+        ),
+        events_max_per_second=parser.getint(
+            "telemetry_cadence",
+            "events_max_per_second",
+            fallback=cadence_defaults.events_max_per_second,
+        ),
+        events_max_per_minute=parser.getint(
+            "telemetry_cadence",
+            "events_max_per_minute",
+            fallback=cadence_defaults.events_max_per_minute,
+        ),
+    )
+
     logging_config = LoggingConfig(
         level=parser.get("logging", "level", fallback="INFO"),
         path=Path(
@@ -246,6 +300,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         cloud=cloud,
         moonraker=moonraker,
         telemetry=telemetry,
+    telemetry_cadence=telemetry_cadence,
         commands=commands,
         logging=logging_config,
         resilience=resilience,

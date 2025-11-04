@@ -124,6 +124,8 @@ class TelemetryPublisher:
             self._device_token,
         ) = _resolve_printer_identity(config)
 
+        self._cadence = config.telemetry_cadence
+
         self._base_topic = f"owl/printers/{self._device_id}"
         self._channel_topics: Dict[str, str] = {
             "overview": f"{self._base_topic}/overview",
@@ -146,10 +148,13 @@ class TelemetryPublisher:
         self._idle_interval = _hz_to_interval(idle_hz) or 30.0
         self._watch_interval = _hz_to_interval(1.0) or 1.0
         self._telemetry_interval = self._idle_interval
+        events_interval = None
+        if self._cadence.events_max_per_second > 0:
+            events_interval = 1.0 / float(self._cadence.events_max_per_second)
         self._channel_caps = {
             "overview": None,
             "telemetry": self._telemetry_interval,
-            "events": 1.0,
+            "events": events_interval,
         }
         self._include_fields = _normalise_fields(config.include_fields)
         self._exclude_fields = _normalise_fields(config.exclude_fields)
@@ -170,18 +175,22 @@ class TelemetryPublisher:
         self._callback_registered = False
         self._pending_payload: Optional[Dict[str, Any]] = None
         self._pending_timer_handle: Optional[asyncio.TimerHandle] = None
+        self._pending_forced_channels: Set[str] = set()
 
         self._last_overview_publish_time = 0.0
         self._last_overview_status = "Idle"
         self._last_payload_snapshot: Optional[Dict[str, Any]] = None
-        self._overview_idle_interval = 60.0
-        self._overview_active_interval = 15.0
-        self._telemetry_watchdog_seconds = 300.0
+        self._overview_idle_interval = self._cadence.overview_idle_interval_seconds
+        self._overview_active_interval = (
+            self._cadence.overview_active_interval_seconds
+        )
+        self._telemetry_watchdog_seconds = self._cadence.telemetry_watchdog_seconds
         self._watch_window_expires: Optional[datetime] = None
         self._current_mode = "idle"
 
         self._orchestrator = TelemetryOrchestrator(
-            clock=lambda: datetime.now(timezone.utc)
+            clock=lambda: datetime.now(timezone.utc),
+            cadence=self._cadence,
         )
         self._orchestrator.set_telemetry_mode(
             mode="idle",
@@ -251,6 +260,9 @@ class TelemetryPublisher:
         if self._stop_event.is_set():
             return
 
+        # NOTE: Moonraker callbacks execute on the asyncio event loop thread; stateful
+        # collaborators rely on this single-threaded access. Revisit if we add
+        # background workers that mutate shared state.
         if self._queue.full():
             try:
                 self._queue.get_nowait()
@@ -355,8 +367,9 @@ class TelemetryPublisher:
             if pending is None:
                 if self._pending_payload is not None:
                     pending = copy.deepcopy(self._pending_payload)
-                    pending_forced = set()
+                    pending_forced = set(self._pending_forced_channels)
                     self._pending_payload = None
+                    self._pending_forced_channels.clear()
                     self._cancel_pending_timer()
                 else:
                     heartbeat_payload = self._prepare_heartbeat_payload()
@@ -466,6 +479,7 @@ class TelemetryPublisher:
                     deferred = True
                     if min_delay is None or delay < min_delay:
                         min_delay = delay
+                    self._pending_forced_channels.add(channel)
                 continue
 
             envelope = self._wrap_envelope(
@@ -484,6 +498,7 @@ class TelemetryPublisher:
                         self._last_overview_publish_time = now_monotonic
 
             self._publish(channel, topic, envelope)
+            self._pending_forced_channels.discard(channel)
 
         if deferred:
             self._store_pending_payload(payload)

@@ -252,11 +252,11 @@ class PrintSessionTracker:
         if job_status in terminal_states:
             return False
 
-        if raw_state in terminal_states:
-            return False
-
         if job_status in active_job_statuses:
             return True
+
+        if raw_state in terminal_states:
+            return False
 
         if raw_state in active_states:
             return True
@@ -491,6 +491,10 @@ def _extract_progress_percent(
             return relative * 100.0
 
     display_progress = _as_float(display_status.get("progress"))
+    if display_progress is not None and sd_progress is not None:
+        chosen = max(display_progress, sd_progress)
+        return max(0.0, min(chosen * 100.0, 100.0))
+
     if display_progress is not None:
         return max(0.0, min(display_progress * 100.0, 100.0))
 

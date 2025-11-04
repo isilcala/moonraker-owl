@@ -308,6 +308,10 @@ class TelemetrySelector:
 
 
 class EventsSelector:
+    def __init__(self, *, max_per_second: int = 1, max_per_minute: int = 20) -> None:
+        self._max_per_second = max(0, max_per_second)
+        self._max_per_minute = max(0, max_per_minute)
+
     def build(
         self,
         *,
@@ -319,8 +323,8 @@ class EventsSelector:
 
         return {
             "cadence": {
-                "maxPerSecond": 1,
-                "maxPerMinute": 20,
+                "maxPerSecond": self._max_per_second,
+                "maxPerMinute": self._max_per_minute,
             },
             "items": events,
         }
@@ -430,7 +434,7 @@ def _round_sensor_value(sensor_type: str, value: Any) -> Optional[float]:
     if numeric is None:
         return None
     if sensor_type == "heater":
-        return float(math.floor(numeric))
+        return float(round(numeric))
     return round(numeric, 1)
 
 

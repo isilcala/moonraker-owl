@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 class EventCollector:
     def __init__(self) -> None:
         self._pending: List[Dict[str, Any]] = []
+        # TODO: Persist pending events so alert delivery survives process restarts.
 
     def record_command_state(
         self,
