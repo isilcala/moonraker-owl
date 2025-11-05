@@ -209,8 +209,7 @@ class TelemetryPublisher:
         )
 
     async def start(self) -> None:
-        if self._worker is not None:
-            raise RuntimeError("TelemetryPublisher already started")
+        await self._dispose_worker(remove_callback=True)
 
         self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
@@ -230,24 +229,29 @@ class TelemetryPublisher:
 
         await self._cancel_pollers()
 
-        if self._worker is not None:
-            self._worker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._worker
-            self._worker = None
+        await self._dispose_worker(remove_callback=True)
         if self._last_payload_snapshot is not None:
             self._resume_snapshot = copy.deepcopy(self._last_payload_snapshot)
             self._retain_next_publish.update({"overview", "telemetry"})
         self._cancel_pending_timer()
         self._pending_forced_channels.clear()
 
-        if self._callback_registered:
-            self._moonraker.remove_callback(self._handle_moonraker_update)
-            self._callback_registered = False
-
     @property
     def topic(self) -> str:
         return self._channel_topics["telemetry"]
+
+    async def _dispose_worker(self, *, remove_callback: bool = False) -> None:
+        worker = self._worker
+        if worker is not None:
+            if not worker.done():
+                worker.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await worker
+            self._worker = None
+
+        if remove_callback and self._callback_registered:
+            self._moonraker.remove_callback(self._handle_moonraker_update)
+            self._callback_registered = False
 
     async def _prime_initial_state(self) -> None:
         try:

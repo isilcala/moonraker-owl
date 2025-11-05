@@ -215,6 +215,7 @@ class MoonrakerOwlApp:
             except Exception:  # pragma: no cover - defensive cleanup
                 LOGGER.debug("Error stopping command processor", exc_info=True)
             await self._health.update("commands", False, reason)
+            self._command_processor = None
 
         if self._telemetry_publisher is not None:
             try:
@@ -222,26 +223,68 @@ class MoonrakerOwlApp:
             except Exception:  # pragma: no cover - defensive cleanup
                 LOGGER.debug("Error stopping telemetry publisher", exc_info=True)
             await self._health.update("telemetry", False, reason)
+            self._telemetry_publisher = None
 
     async def _restart_components(self) -> None:
-        if self._telemetry_publisher is not None:
+        telemetry = self._telemetry_publisher
+
+        if telemetry is None:
+            if self._moonraker_client is None or self._mqtt_client is None:
+                LOGGER.warning("Skipping telemetry restart; dependencies missing")
+            else:
+                telemetry = TelemetryPublisher(
+                    self._config, self._moonraker_client, self._mqtt_client
+                )
+                self._telemetry_publisher = telemetry
+
+        if telemetry is not None:
             try:
-                await self._telemetry_publisher.start()
+                await telemetry.start()
             except RuntimeError:
                 pass
+            except TelemetryConfigurationError as exc:
+                LOGGER.warning("Telemetry restart disabled: %s", exc)
+                await self._health.update("telemetry", False, str(exc))
+                self._telemetry_publisher = None
+                telemetry = None
+            except Exception:
+                LOGGER.exception("Failed to restart telemetry publisher")
+                await self._health.update("telemetry", False, "restart failure")
+                self._telemetry_publisher = None
+                telemetry = None
             else:
                 await self._health.update("telemetry", True, None)
-                LOGGER.info(
-                    "Telemetry publisher started on topic %s",
-                    self._telemetry_publisher.topic,
-                )
+                LOGGER.info("Telemetry publisher started on topic %s", telemetry.topic)
 
-        if self._command_processor is not None:
+        processor = self._command_processor
+
+        if processor is None and telemetry is not None:
+            if self._moonraker_client is None or self._mqtt_client is None:
+                LOGGER.warning("Skipping command restart; dependencies missing")
+            else:
+                try:
+                    processor = CommandProcessor(
+                        self._config,
+                        self._moonraker_client,
+                        self._mqtt_client,
+                        telemetry=telemetry,
+                    )
+                except CommandConfigurationError as exc:
+                    LOGGER.warning("Command processor disabled: %s", exc)
+                    await self._health.update("commands", False, str(exc))
+                    processor = None
+                except Exception as exc:
+                    LOGGER.exception("Failed to rehydrate command processor")
+                    await self._health.update("commands", False, str(exc))
+                    processor = None
+                else:
+                    self._command_processor = processor
+
+        if processor is not None:
             try:
-                await self._command_processor.start()
+                await processor.start()
                 await self._health.update("commands", True, None)
             except RuntimeError:
-                # Already active; ignore
                 pass
             except Exception as exc:
                 LOGGER.warning("Command processor restart failed: %s", exc)

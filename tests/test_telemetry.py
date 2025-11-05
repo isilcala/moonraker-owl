@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextlib import suppress
 from configparser import ConfigParser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1315,6 +1316,62 @@ async def test_idle_cadence_flushes_latest_payload() -> None:
         sensor for sensor in sensors if sensor.get("channel") == "extruder"
     )
     assert extruder_sensor.get("value") == pytest.approx(60.0, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_restart_publishes_resume_snapshot() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    initial_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
+    assert initial_messages, "Expected initial overview publish"
+
+    await publisher.stop()
+    mqtt.messages.clear()
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    resumed_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
+    assert resumed_messages, "Expected overview publish after restart"
+    assert resumed_messages[0]["retain"] is True
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_recovers_after_loop_termination() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    assert publisher._worker is not None  # type: ignore[attr-defined]
+    publisher._worker.cancel()  # type: ignore[attr-defined]
+    with suppress(asyncio.CancelledError):
+        await publisher._worker  # type: ignore[attr-defined]
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    overview_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
+    assert overview_messages, "Expected overview publish after recovering start"
+
+    await publisher.stop()
 
 
 def test_watch_window_expiration_reverts_to_idle_rate() -> None:
