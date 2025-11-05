@@ -123,7 +123,7 @@ async def test_moonraker_recovery_restarts_components() -> None:
         state: str,
         *,
         retain: bool = True,
-    detail: Optional[str] = None,
+        detail: Optional[str] = None,
     ) -> None:
         presence_calls.append((state, retain, detail))
 
@@ -145,3 +145,75 @@ async def test_moonraker_recovery_restarts_components() -> None:
     assert commands.stop_calls == 0
     assert commands.abandon_reasons == []
     assert telemetry.stop_calls == 0
+
+
+def _build_snapshot(
+    *,
+    webhooks_state: Optional[str] = None,
+    printer_state: Optional[str] = None,
+    printer_shutdown: Optional[bool] = None,
+    print_state: Optional[str] = None,
+    print_message: Optional[str] = None,
+) -> dict:
+    status: dict[str, dict[str, object]] = {}
+    if webhooks_state is not None:
+        status["webhooks"] = {"state": webhooks_state}
+    if printer_state is not None or printer_shutdown is not None:
+        node: dict[str, object] = {}
+        if printer_state is not None:
+            node["state"] = printer_state
+        if printer_shutdown is not None:
+            node["is_shutdown"] = printer_shutdown
+        status["printer"] = node
+    if print_state is not None or print_message is not None:
+        node = {}
+        if print_state is not None:
+            node["state"] = print_state
+        if print_message is not None:
+            node["message"] = print_message
+        status["print_stats"] = node
+
+    return {"result": {"status": status}}
+
+
+def test_moonraker_assessment_detects_shutdown_state() -> None:
+    app = MoonrakerOwlApp(_build_config())
+    snapshot = _build_snapshot(
+        webhooks_state="shutdown",
+        print_message="Emergency stop",
+    )
+
+    assessment = app._analyse_moonraker_snapshot(snapshot)
+
+    assert assessment.healthy is False
+    assert assessment.force_trip is True
+    assert assessment.detail == "Emergency stop"
+
+
+def test_moonraker_assessment_reports_healthy_state() -> None:
+    app = MoonrakerOwlApp(_build_config())
+    snapshot = _build_snapshot(
+        webhooks_state="ready",
+        printer_state="ready",
+        print_state="standby",
+    )
+
+    assessment = app._analyse_moonraker_snapshot(snapshot)
+
+    assert assessment.healthy is True
+    assert assessment.force_trip is False
+    assert assessment.detail is None
+
+
+@pytest.mark.asyncio
+async def test_moonraker_failure_force_trip_bypasses_threshold() -> None:
+    config = _build_config(breaker_threshold=5)
+    app = MoonrakerOwlApp(config)
+    app._loop = asyncio.get_running_loop()
+
+    await app._register_moonraker_failure(
+        "moonraker shutdown",
+        force_trip=True,
+    )
+
+    assert app._moonraker_breaker_tripped is True

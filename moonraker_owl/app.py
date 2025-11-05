@@ -32,6 +32,13 @@ class AppContext:
     config: OwlConfig
 
 
+@dataclass(slots=True)
+class _MoonrakerAssessment:
+    healthy: bool
+    detail: Optional[str] = None
+    force_trip: bool = False
+
+
 class AgentState(str, Enum):
     COLD_START = "cold_start"
     AWAITING_MQTT = "awaiting_mqtt"
@@ -355,12 +362,19 @@ class MoonrakerOwlApp:
             await self._moonraker_monitor_task
         self._moonraker_monitor_task = None
 
-    async def _register_moonraker_failure(self, reason: str) -> None:
+    async def _register_moonraker_failure(
+        self,
+        reason: str,
+        *,
+        force_trip: bool = False,
+    ) -> None:
         detail = reason or "moonraker failure"
         self._moonraker_failures += 1
         await self._health.update("moonraker", False, detail)
 
         threshold = max(1, self._config.resilience.moonraker_breaker_threshold)
+        if force_trip and self._moonraker_failures < threshold:
+            self._moonraker_failures = threshold
         if self._moonraker_failures < threshold or self._moonraker_breaker_tripped:
             return
 
@@ -426,12 +440,66 @@ class MoonrakerOwlApp:
                 continue
 
             try:
-                await self._moonraker_client.fetch_printer_state({})
+                snapshot = await self._moonraker_client.fetch_printer_state(
+                    {
+                        "webhooks": ["state"],
+                        "printer": ["state", "is_shutdown"],
+                        "print_stats": ["state", "message"],
+                    }
+                )
             except Exception as exc:  # pragma: no cover - defensive logging
                 await self._register_moonraker_failure(str(exc))
                 continue
 
+            assessment = self._analyse_moonraker_snapshot(snapshot)
+            if not assessment.healthy:
+                await self._register_moonraker_failure(
+                    assessment.detail or "moonraker reported error",
+                    force_trip=assessment.force_trip,
+                )
+                continue
+
             await self._register_moonraker_recovery()
+
+    def _analyse_moonraker_snapshot(self, snapshot: dict) -> _MoonrakerAssessment:
+        if not isinstance(snapshot, dict):
+            return _MoonrakerAssessment(
+                healthy=False,
+                detail="moonraker response not a mapping",
+                force_trip=True,
+            )
+
+        status = snapshot.get("result", {}).get("status", {})
+        if not isinstance(status, dict):
+            status = {}
+
+        webhooks_state = _normalise_state(status.get("webhooks"), "state")
+        printer_state = _normalise_state(status.get("printer"), "state")
+        printer_shutdown = _extract_bool(status.get("printer"), "is_shutdown")
+        print_stats_state = _normalise_state(status.get("print_stats"), "state")
+        print_stats_message = _extract_str(status.get("print_stats"), "message")
+
+        failure_detail: Optional[str] = None
+        force_trip = False
+
+        if printer_shutdown:
+            failure_detail = print_stats_message or "moonraker reports printer shutdown"
+            force_trip = True
+        elif printer_state in {"shutdown", "error"}:
+            failure_detail = print_stats_message or f"printer state {printer_state}"
+            force_trip = True
+        elif webhooks_state in {"shutdown", "error"}:
+            failure_detail = print_stats_message or f"webhooks state {webhooks_state}"
+            force_trip = True
+
+        if failure_detail is not None:
+            return _MoonrakerAssessment(
+                healthy=False,
+                detail=failure_detail,
+                force_trip=force_trip,
+            )
+
+        return _MoonrakerAssessment(healthy=True)
 
     async def _connect_mqtt(self) -> bool:
         if self._mqtt_client is None:
@@ -757,3 +825,33 @@ def _resolve_device_id(config: OwlConfig) -> Optional[str]:
 def _build_client_id(device_id: Optional[str]) -> str:
     suffix = device_id or str(os.getpid())
     return f"{constants.APP_NAME}-{suffix}"
+
+
+def _normalise_state(node: object, field: str) -> Optional[str]:
+    if not isinstance(node, dict):
+        return None
+    value = node.get(field)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped.lower()
+    return None
+
+
+def _extract_str(node: object, field: str) -> Optional[str]:
+    if not isinstance(node, dict):
+        return None
+    value = node.get(field)
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return None
+
+
+def _extract_bool(node: object, field: str) -> bool:
+    if not isinstance(node, dict):
+        return False
+    value = node.get(field)
+    if isinstance(value, bool):
+        return value
+    return False
