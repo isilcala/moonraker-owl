@@ -8,9 +8,10 @@ import copy
 import json
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, Optional, Protocol, Sequence, Set
+from typing import Any, Deque, Dict, Iterable, Optional, Protocol, Sequence, Set
 
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
@@ -19,7 +20,7 @@ from .. import constants
 from ..adapters import MQTTConnectionError
 from ..config import OwlConfig
 from ..core import PrinterAdapter, deep_merge
-from .orchestrator import TelemetryOrchestrator
+from .orchestrator import ChannelPayload, TelemetryOrchestrator
 from .state_store import MoonrakerStateStore
 from ..telemetry_state import TelemetryHasher
 
@@ -43,6 +44,14 @@ class _ChannelPublishState:
     sequence: int = 0
     hash: Optional[str] = None
     last_publish: float = 0.0
+
+
+@dataclass
+class _BufferedFrame:
+    channel: str
+    payload: Dict[str, Any]
+    session_id: str
+    observed_at: datetime
 
 
 @dataclass(frozen=True)
@@ -142,6 +151,12 @@ class TelemetryPublisher:
         }
         self._hasher = TelemetryHasher()
         self._retain_next_publish: Set[str] = {"overview", "telemetry"}
+        self._buffer_window_seconds = max(
+            0.0, config.resilience.buffer_window_seconds
+        )
+        self._frame_buffer: Deque[_BufferedFrame] = deque()
+        self._pending_replay_frames: list[_BufferedFrame] = []
+        self._should_replay_on_start = False
 
         self._min_interval = 0.05
         idle_hz = config.telemetry.rate_hz or 0.033
@@ -215,6 +230,10 @@ class TelemetryPublisher:
         self._stop_event.clear()
         self._reset_runtime_state()
 
+        if self._should_replay_on_start and self._buffer_window_seconds > 0:
+            self._pending_replay_frames = list(self._frame_buffer)
+            self._should_replay_on_start = False
+
         await self._prime_initial_state()
 
         await self._moonraker.start(self._handle_moonraker_update)
@@ -228,6 +247,9 @@ class TelemetryPublisher:
         self._event.set()
 
         await self._cancel_pollers()
+
+        if self._buffer_window_seconds > 0:
+            self._should_replay_on_start = True
 
         await self._dispose_worker(remove_callback=True)
         if self._last_payload_snapshot is not None:
@@ -374,6 +396,10 @@ class TelemetryPublisher:
         pending: Optional[Dict[str, Any]] = None
         pending_forced: Set[str] = set()
 
+        if self._pending_replay_frames:
+            if self._flush_replay_frames():
+                last_sent = loop.time()
+
         while not self._stop_event.is_set():
             if pending is None:
                 if self._pending_payload is not None:
@@ -450,6 +476,63 @@ class TelemetryPublisher:
 
         return merged
 
+    def _flush_replay_frames(self) -> bool:
+        if not self._pending_replay_frames:
+            return False
+
+        frame_count = len(self._pending_replay_frames)
+        LOGGER.info("Replaying %d buffered telemetry frames", frame_count)
+
+        published = False
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(
+            seconds=self._buffer_window_seconds
+        )
+
+        for buffered in self._pending_replay_frames:
+            if self._buffer_window_seconds > 0 and buffered.observed_at < cutoff_time:
+                continue
+
+            topic = self._channel_topics.get(buffered.channel)
+            if topic is None:
+                continue
+
+            frame = ChannelPayload(
+                channel=buffered.channel,
+                payload=copy.deepcopy(buffered.payload),
+                session_id=buffered.session_id,
+                observed_at=buffered.observed_at,
+                forced=True,
+            )
+
+            should_publish, _ = self._should_publish_channel(
+                buffered.channel,
+                frame.payload,
+                time.monotonic(),
+                forced=True,
+            )
+            if not should_publish:
+                continue
+
+            envelope = self._wrap_envelope(
+                buffered.channel,
+                frame,
+                include_raw=False,
+                raw_json=None,
+            )
+
+            retain = buffered.channel in self._retain_next_publish
+            if buffered.channel == "telemetry":
+                retain = False
+            elif retain:
+                self._retain_next_publish.discard(buffered.channel)
+
+            self._publish(buffered.channel, topic, envelope, retain=retain)
+            published = True
+
+        self._pending_replay_frames.clear()
+        return published
+
     def _process_payload(
         self,
         payload: Dict[str, Any],
@@ -513,6 +596,7 @@ class TelemetryPublisher:
                 self._retain_next_publish.discard(channel)
             self._publish(channel, topic, envelope, retain=retain)
             self._pending_forced_channels.discard(channel)
+            self._record_buffer_frame(frame)
 
         if deferred:
             self._store_pending_payload(payload)
@@ -762,6 +846,22 @@ class TelemetryPublisher:
             self._pending_timer_handle.cancel()
             self._pending_timer_handle = None
 
+    def _record_buffer_frame(self, frame: ChannelPayload) -> None:
+        if self._buffer_window_seconds <= 0:
+            return
+
+        buffered = _BufferedFrame(
+            channel=frame.channel,
+            payload=copy.deepcopy(frame.payload),
+            session_id=frame.session_id,
+            observed_at=frame.observed_at,
+        )
+        self._frame_buffer.append(buffered)
+
+        cutoff = frame.observed_at - timedelta(seconds=self._buffer_window_seconds)
+        while self._frame_buffer and self._frame_buffer[0].observed_at < cutoff:
+            self._frame_buffer.popleft()
+
     def _reset_runtime_state(self) -> None:
         self._orchestrator.reset()
         self._orchestrator.set_telemetry_mode(
@@ -774,6 +874,7 @@ class TelemetryPublisher:
             state.last_publish = 0.0
         self._pending_payload = None
         self._pending_forced_channels.clear()
+        self._pending_replay_frames = []
         if self._resume_snapshot is not None:
             self._pending_payload = copy.deepcopy(self._resume_snapshot)
             self._pending_forced_channels.update({"overview", "telemetry"})

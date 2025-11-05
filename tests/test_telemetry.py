@@ -492,7 +492,7 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.1)
     await publisher.stop()
 
     messages = mqtt.by_topic()
@@ -564,7 +564,7 @@ async def test_pipeline_emits_schema_envelopes() -> None:
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     await publisher.start()
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.1)
     await publisher.stop()
 
     messages = mqtt.by_topic()
@@ -940,9 +940,12 @@ async def test_polling_fetches_unsubscribed_objects() -> None:
         }
     )
 
-    await asyncio.sleep(0.2)
-    await publisher.stop()
+    await asyncio.sleep(0.1)
 
+    topics = mqtt.by_topic()
+    assert topics, f"Expected telemetry replay topics, found: {topics}"
+
+    replay_messages = topics.get("owl/printers/device-123/telemetry")
     polled_objects = next(
         (
             entry
@@ -1336,6 +1339,7 @@ async def test_restart_publishes_resume_snapshot() -> None:
 
     await publisher.stop()
     mqtt.messages.clear()
+    assert publisher._frame_buffer, "Expected buffered frames to persist after stop"
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -1370,6 +1374,43 @@ async def test_start_recovers_after_loop_termination() -> None:
 
     overview_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
     assert overview_messages, "Expected overview publish after recovering start"
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_restart_replays_buffered_frames() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+    config.resilience.buffer_window_seconds = 120.0
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    initial_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    assert initial_messages, "Expected telemetry publish on first start"
+
+    await publisher.stop()
+    mqtt.messages.clear()
+    telemetry_frames = [frame for frame in publisher._frame_buffer if frame.channel == "telemetry"]
+    assert telemetry_frames, "Expected telemetry frames in buffer"
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+    assert publisher._worker is not None
+    assert not publisher._worker.done()
+
+    topics = mqtt.by_topic()
+    assert topics, f"Expected telemetry replay topics, found: {topics}"
+
+    replay_messages = topics.get("owl/printers/device-123/telemetry")
+    assert replay_messages, "Expected buffered telemetry replay after restart"
+    assert replay_messages[0]["retain"] is False
 
     await publisher.stop()
 

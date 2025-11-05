@@ -7,6 +7,8 @@ import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import paho.mqtt.client as mqtt
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.properties import Properties
 
 from ..config import CloudConfig
 
@@ -44,7 +46,13 @@ class MQTTClient:
         self._connect_handlers: List[Callable[[int], None]] = []
         self._last_will: Optional[Dict[str, Any]] = None
 
-    async def connect(self, timeout: float = 30.0) -> None:
+    async def connect(
+        self,
+        timeout: float = 30.0,
+        *,
+        clean_start: bool = True,
+        session_expiry: Optional[int] = None,
+    ) -> None:
         """Connect to the MQTT broker and wait for acknowledgement."""
 
         self._loop = asyncio.get_running_loop()
@@ -82,8 +90,23 @@ class MQTTClient:
             self.config.broker_port,
         )
 
+        connect_kwargs: Dict[str, Any] = {}
+        if not clean_start:
+            connect_kwargs["clean_start"] = False
+
+        properties = None
+        if session_expiry is not None:
+            properties = Properties(PacketTypes.CONNECT)
+            properties.SessionExpiryInterval = session_expiry
+
+        if properties is not None:
+            connect_kwargs["properties"] = properties
+
         client.connect_async(
-            self.config.broker_host, self.config.broker_port, self.keepalive
+            self.config.broker_host,
+            self.config.broker_port,
+            self.keepalive,
+            **connect_kwargs,
         )
         client.loop_start()
 

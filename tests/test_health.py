@@ -23,6 +23,22 @@ async def test_health_reporter_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_health_reporter_agent_state_affects_status():
+    reporter = HealthReporter()
+
+    await reporter.update("mqtt", True)
+    await reporter.set_agent_state("awaiting_mqtt", healthy=False)
+
+    snapshot = await reporter.snapshot()
+
+    assert snapshot["status"] == "degraded"
+    agent = snapshot.get("agentState")
+    assert agent is not None
+    assert agent["state"] == "awaiting_mqtt"
+    assert agent["healthy"] is False
+
+
+@pytest.mark.asyncio
 async def test_health_server_serves_snapshot(unused_tcp_port):
     reporter = HealthReporter()
     await reporter.update("mqtt", True)

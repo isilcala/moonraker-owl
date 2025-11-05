@@ -3,12 +3,13 @@
 import json
 from configparser import ConfigParser
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pytest
 
 from moonraker_owl.commands import (
     CommandConfigurationError,
+    CommandMessage,
     CommandProcessor,
 )
 from moonraker_owl.config import (
@@ -67,6 +68,30 @@ class FakeMQTT:
         result = self.handler(topic, data)
         if hasattr(result, "__await__"):
             await result
+
+
+class FakeTelemetry:
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+
+    def record_command_state(
+        self,
+        *,
+        command_id: str,
+        command_type: str,
+        state: str,
+        session_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.records.append(
+            {
+                "command_id": command_id,
+                "command_type": command_type,
+                "state": state,
+                "details": details,
+                "session_id": session_id,
+            }
+        )
 
 
 @pytest.fixture
@@ -128,7 +153,7 @@ async def test_command_processor_executes_action_and_sends_ack(config):
     assert "reason" not in accepted
     assert "timestamps" in accepted
     assert "acknowledgedAt" in accepted["timestamps"]
-    assert qos == 2
+    assert qos == 1
     assert retain is False
 
     # Second ack reports final outcome
@@ -141,7 +166,7 @@ async def test_command_processor_executes_action_and_sends_ack(config):
     assert "reason" not in completed
     assert "timestamps" in completed
     assert "acknowledgedAt" in completed["timestamps"]
-    assert qos == 2
+    assert qos == 1
     assert retain is False
 
     await processor.stop()
@@ -169,13 +194,13 @@ async def test_command_processor_handles_unknown_action(config):
     assert accepted["status"] == "accepted"
     assert accepted["stage"] == "dispatch"
     assert accepted["correlation"]["tenantId"] == "tenant-99"
-    assert mqtt.published[0][2] == 2
+    assert mqtt.published[0][2] == 1
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
     assert failed["status"] == "failed"
     assert failed["stage"] == "execution"
     assert failed["reason"]["code"] == "unsupported_command"
-    assert mqtt.published[1][2] == 2
+    assert mqtt.published[1][2] == 1
     assert not moonraker.actions
 
     await processor.stop()
@@ -226,6 +251,71 @@ async def test_command_processor_rejects_invalid_parameters(config):
     assert payload["status"] == "failed"
     assert payload["stage"] == "dispatch"
     assert payload.get("reason", {}).get("code") == "invalid_parameters"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_command_processor_abandons_inflight_on_stop(config):
+    mqtt = FakeMQTT()
+    telemetry = FakeTelemetry()
+    processor = CommandProcessor(config, FakeMoonraker(), mqtt, telemetry=telemetry)
+
+    message = CommandMessage(command_id="cmd-abandon", command="pause", parameters={})
+    processor._begin_inflight("pause", message)  # type: ignore[attr-defined]
+    assert processor.pending_count == 1
+
+    await processor.abandon_inflight("reconnecting")
+
+    assert processor.pending_count == 0
+    assert len(mqtt.published) == 1
+    topic, payload, qos, retain = mqtt.published[0]
+    abandoned = json.loads(payload.decode("utf-8"))
+    assert topic == "owl/printers/device-123/acks/pause"
+    assert abandoned["status"] == "failed"
+    assert abandoned["stage"] == "execution"
+    assert abandoned["reason"]["code"] == "agent_restart"
+    assert "reconnecting" in abandoned["reason"]["message"]
+    assert qos == 1
+    assert retain is False
+
+    assert telemetry.records
+    last_record = telemetry.records[-1]
+    assert last_record["state"] == "abandoned"
+    assert last_record["details"] is not None
+    assert last_record["details"]["reason"] == "agent_restart"
+
+
+@pytest.mark.asyncio
+async def test_command_processor_replays_cached_ack_for_duplicate(config):
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-dup",
+        "action": "pause",
+        "payload": {},
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    assert len(mqtt.published) == 2
+    assert moonraker.actions == ["pause"]
+
+    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+
+    assert len(mqtt.published) == 3
+    topic, payload, qos, retain = mqtt.published[-1]
+    replay = json.loads(payload.decode("utf-8"))
+    assert topic == "owl/printers/device-123/acks/pause"
+    assert replay["status"] == "completed"
+    assert replay["stage"] == "execution"
+    assert replay["commandId"] == "cmd-dup"
+    assert qos == 1
+    assert retain is False
+    assert moonraker.actions == ["pause"]
 
     await processor.stop()
 

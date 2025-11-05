@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Deque, Dict, Optional, Protocol
 from urllib.parse import quote
 
 from .config import OwlConfig
@@ -63,6 +64,21 @@ class CommandMessage:
     parameters: Dict[str, Any]
 
 
+@dataclass(slots=True)
+class _InflightCommand:
+    command_name: str
+    message: CommandMessage
+    dispatched_at: datetime
+
+
+@dataclass(slots=True)
+class _CommandHistoryEntry:
+    status: str
+    stage: str
+    error_code: Optional[str]
+    error_message: Optional[str]
+
+
 class CommandProcessor:
     """Consumes MQTT command messages and forwards them to Moonraker."""
 
@@ -87,6 +103,10 @@ class CommandProcessor:
         self._command_topic_prefix = f"owl/printers/{self._device_id}/commands"
         self._command_subscription = f"{self._command_topic_prefix}/#"
         self._handler_registered = False
+        self._inflight: Dict[str, _InflightCommand] = {}
+        self._history: Dict[str, _CommandHistoryEntry] = {}
+        self._history_order: Deque[str] = deque()
+        self._history_limit = 64
 
     async def start(self) -> None:
         if self._handler_registered:
@@ -135,6 +155,16 @@ class CommandProcessor:
                 )
             return
 
+        if await self._replay_duplicate(command_name, message.command_id):
+            return
+
+        if message.command_id in self._inflight:
+            LOGGER.debug(
+                "Duplicate inflight command received: %s", message.command_id
+            )
+            return
+
+        self._begin_inflight(command_name, message)
         self._record_command_state(message, "dispatched")
 
         try:
@@ -165,6 +195,7 @@ class CommandProcessor:
                 "failed",
                 details=failure_details or None,
             )
+            self._finish_inflight(message.command_id)
         else:
             await self._publish_ack(
                 command_name,
@@ -173,6 +204,7 @@ class CommandProcessor:
                 stage="execution",
             )
             self._record_command_state(message, "completed", details=details)
+            self._finish_inflight(message.command_id)
 
     def _record_command_state(
         self,
@@ -193,6 +225,83 @@ class CommandProcessor:
             )
         except Exception:  # pragma: no cover - defensive
             LOGGER.debug("Failed to record command state %s", state, exc_info=True)
+
+    def _begin_inflight(self, command_name: str, message: CommandMessage) -> None:
+        self._inflight[message.command_id] = _InflightCommand(
+            command_name=command_name,
+            message=message,
+            dispatched_at=datetime.now(timezone.utc),
+        )
+
+    def _finish_inflight(self, command_id: str) -> None:
+        self._inflight.pop(command_id, None)
+
+    def _remember_history(
+        self,
+        command_id: Optional[str],
+        *,
+        status: str,
+        stage: str,
+        error_code: Optional[str],
+        error_message: Optional[str],
+    ) -> None:
+        if not command_id:
+            return
+        self._history[command_id] = _CommandHistoryEntry(
+            status=status,
+            stage=stage,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        self._history_order.append(command_id)
+        while len(self._history_order) > self._history_limit:
+            expired = self._history_order.popleft()
+            self._history.pop(expired, None)
+
+    async def _replay_duplicate(self, command_name: str, command_id: str) -> bool:
+        entry = self._history.get(command_id)
+        if entry is None:
+            return False
+
+        LOGGER.debug("Replaying duplicate command %s with cached status", command_id)
+        await self._publish_ack(
+            command_name,
+            command_id,
+            entry.status,
+            stage=entry.stage,
+            error_code=entry.error_code,
+            error_message=entry.error_message,
+        )
+        return True
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._inflight)
+
+    async def abandon_inflight(self, reason: str) -> None:
+        if not self._inflight:
+            return
+
+        items = list(self._inflight.values())
+        self._inflight.clear()
+
+        for tracked in items:
+            await self._publish_ack(
+                tracked.command_name,
+                tracked.message.command_id,
+                "failed",
+                stage="execution",
+                error_code="agent_restart",
+                error_message=reason,
+            )
+            self._record_command_state(
+                tracked.message,
+                "abandoned",
+                details={
+                    "reason": "agent_restart",
+                    "detail": reason,
+                },
+            )
 
     async def _execute(self, message: CommandMessage) -> Optional[Dict[str, Any]]:
         if message.command == "telemetry:set-rate":
@@ -340,7 +449,16 @@ class CommandProcessor:
                 document["reason"] = reason
 
         payload = json.dumps(document).encode("utf-8")
-        self._mqtt.publish(topic, payload, qos=2, retain=False)
+        self._mqtt.publish(topic, payload, qos=1, retain=False)
+
+        if stage_value == "execution":
+            self._remember_history(
+                effective_command_id,
+                status=status,
+                stage=stage_value,
+                error_code=error_code,
+                error_message=error_message,
+            )
 
 
 def _parse_command(raw_payload: bytes, command_name: str) -> CommandMessage:

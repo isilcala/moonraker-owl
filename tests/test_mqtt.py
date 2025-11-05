@@ -44,8 +44,9 @@ class FakeMqttClient:
     def username_pw_set(self, username, password=None):
         self._events["auth"] = (username, password)
 
-    def connect_async(self, host, port, keepalive):
+    def connect_async(self, host, port, keepalive, **kwargs):
         self._events["connect_args"] = (host, port, keepalive)
+        self._events["connect_kwargs"] = dict(kwargs)
         if self.on_connect:
             self._loop.call_soon(
                 self.on_connect,
@@ -136,6 +137,7 @@ async def test_connect_configures_client(mqtt_client):
 
     assert events["connect_args"] == ("broker.owl.dev", 1883, 60)
     assert events["auth"] == ("tenant:device", "token")
+    assert events.get("connect_kwargs", {}) == {}
     assert events["loop_start"] == 1
 
 
@@ -175,6 +177,35 @@ async def test_last_will_applied_before_connect(monkeypatch):
         True,
         properties,
     )
+
+
+@pytest.mark.asyncio
+async def test_connect_with_session_expiry(monkeypatch):
+    loop = asyncio.get_running_loop()
+    events: dict = {}
+
+    def factory(*args, **kwargs):
+        return FakeMqttClient(loop, events, *args, **kwargs)
+
+    monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
+
+    config = CloudConfig(
+        base_url="https://api.owl.dev",
+        broker_host="broker.owl.dev",
+        broker_port=1883,
+    )
+
+    client = MQTTClient(config, client_id="persistent-1")
+    await client.connect(clean_start=False, session_expiry=120)
+
+    try:
+        kwargs = events.get("connect_kwargs", {})
+        assert kwargs.get("clean_start") is False
+        properties = kwargs.get("properties")
+        assert properties is not None
+        assert getattr(properties, "SessionExpiryInterval", None) == 120
+    finally:
+        await client.disconnect()
 
 
 @pytest.mark.asyncio

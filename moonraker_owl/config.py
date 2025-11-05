@@ -93,6 +93,11 @@ class LoggingConfig:
 class ResilienceConfig:
     reconnect_initial_seconds: float = 1.0
     reconnect_max_seconds: float = 30.0
+    reconnect_jitter_ratio: float = 0.5
+    session_expiry_seconds: int = 86400
+    buffer_window_seconds: float = 60.0
+    moonraker_breaker_threshold: int = 5
+    heartbeat_interval_seconds: int = 30
     health_enabled: bool = False
     health_host: str = "127.0.0.1"
     health_port: int = 0
@@ -165,6 +170,11 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             "resilience": {
                 "reconnect_initial_seconds": "1.0",
                 "reconnect_max_seconds": "30.0",
+                "reconnect_jitter_ratio": "0.5",
+                "session_expiry_seconds": "86400",
+                "buffer_window_seconds": "60.0",
+                "moonraker_breaker_threshold": "5",
+                "heartbeat_interval_seconds": "30",
                 "health_enabled": "false",
                 "health_host": "127.0.0.1",
                 "health_port": "0",
@@ -288,6 +298,29 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         ),
         reconnect_max_seconds=parser.getfloat(
             "resilience", "reconnect_max_seconds", fallback=30.0
+        ),
+        reconnect_jitter_ratio=max(
+            0.0,
+            min(
+                1.0,
+                parser.getfloat("resilience", "reconnect_jitter_ratio", fallback=0.5),
+            ),
+        ),
+        session_expiry_seconds=max(
+            0,
+            parser.getint("resilience", "session_expiry_seconds", fallback=86400),
+        ),
+        buffer_window_seconds=max(
+            0.0,
+            parser.getfloat("resilience", "buffer_window_seconds", fallback=60.0),
+        ),
+        moonraker_breaker_threshold=max(
+            1,
+            parser.getint("resilience", "moonraker_breaker_threshold", fallback=5),
+        ),
+        heartbeat_interval_seconds=max(
+            1,
+            parser.getint("resilience", "heartbeat_interval_seconds", fallback=30),
         ),
         health_enabled=parser.getboolean(
             "resilience", "health_enabled", fallback=False

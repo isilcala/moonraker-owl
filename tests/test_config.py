@@ -14,6 +14,9 @@ def test_load_config_defaults(tmp_path: Path) -> None:
     assert config.telemetry_cadence.events_max_per_second == 1
     assert config.resilience.reconnect_initial_seconds == 1.0
     assert config.resilience.health_port == 0
+    assert config.resilience.buffer_window_seconds == 60.0
+    assert config.resilience.session_expiry_seconds == 86400
+    assert config.resilience.moonraker_breaker_threshold == 5
 
 
 def test_load_config_parses_broker_host_with_port(tmp_path: Path) -> None:

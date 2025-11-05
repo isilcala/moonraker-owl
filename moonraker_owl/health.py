@@ -33,6 +33,8 @@ class ComponentStatus:
 class HealthReporter:
     """Tracks component statuses for the running service."""
 
+    _AGENT_KEY = "__agent_state__"
+
     def __init__(self) -> None:
         self._status: Dict[str, ComponentStatus] = {}
         self._lock = asyncio.Lock()
@@ -45,12 +47,38 @@ class HealthReporter:
                 name=name, healthy=healthy, detail=detail
             )
 
+    async def set_agent_state(
+        self, state: str, *, healthy: bool, detail: Optional[str] = None
+    ) -> None:
+        detail_value = detail if detail is not None else state
+        await self.update(self._AGENT_KEY, healthy, detail_value)
+
     async def snapshot(self) -> Dict[str, object]:
         async with self._lock:
-            components = [status.as_dict() for status in self._status.values()]
+            entries = list(self._status.values())
 
-        overall = "ok" if all(item["healthy"] for item in components) else "degraded"
-        return {"status": overall, "components": components}
+        agent_state: Optional[ComponentStatus] = None
+        components: list[Dict[str, object]] = []
+        for status in entries:
+            if status.name == self._AGENT_KEY:
+                agent_state = status
+                continue
+            components.append(status.as_dict())
+
+        overall_components_healthy = all(item["healthy"] for item in components)
+        overall = "ok" if overall_components_healthy else "degraded"
+        if agent_state is not None and not agent_state.healthy:
+            overall = "degraded"
+
+        payload: Dict[str, object] = {"status": overall, "components": components}
+        if agent_state is not None:
+            payload["agentState"] = {
+                "state": agent_state.detail,
+                "healthy": agent_state.healthy,
+                "updatedAt": agent_state.updated_at.isoformat(timespec="seconds"),
+            }
+
+        return payload
 
 
 class HealthServer:
