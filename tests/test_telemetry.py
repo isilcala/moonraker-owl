@@ -1412,6 +1412,39 @@ async def test_restart_replays_buffered_frames() -> None:
     assert replay_messages, "Expected buffered telemetry replay after restart"
     assert replay_messages[0]["retain"] is False
 
+
+@pytest.mark.asyncio
+async def test_publish_system_status_emits_error_snapshot() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    mqtt.messages.clear()
+
+    await publisher.publish_system_status(
+        printer_state="error",
+        message="Moonraker unavailable",
+    )
+
+    overview_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
+    assert overview_messages, "Expected overview publish for system status"
+
+    snapshot = json.loads(overview_messages[-1]["payload"].decode("utf-8"))
+    overview_body = snapshot.get("overview")
+    assert overview_body is not None
+    assert overview_body.get("printerStatus") == "Error"
+    assert overview_body.get("subStatus") == "Moonraker unavailable"
+    assert overview_messages[-1]["retain"] is True
+
+    await publisher.stop()
+
     await publisher.stop()
 
 

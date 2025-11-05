@@ -52,9 +52,18 @@ def _build_config(*, breaker_threshold: int = 2) -> OwlConfig:
 class _StubTelemetryPublisher:
     def __init__(self) -> None:
         self.stop_calls = 0
+        self.system_status_calls: list[tuple[str, Optional[str]]] = []
 
     async def stop(self) -> None:
         self.stop_calls += 1
+
+    async def publish_system_status(
+        self,
+        *,
+        printer_state: str,
+        message: Optional[str] = None,
+    ) -> None:
+        self.system_status_calls.append((printer_state, message))
 
 
 class _StubCommandProcessor:
@@ -96,6 +105,7 @@ async def test_moonraker_breaker_trips_after_failures() -> None:
     assert commands.stop_calls == 1
     assert commands.abandon_reasons == ["moonraker unavailable"]
     assert telemetry.stop_calls == 1
+    assert telemetry.system_status_calls == [("error", "rpc timeout")]
     assert app._telemetry_ready is False
 
 
@@ -211,9 +221,14 @@ async def test_moonraker_failure_force_trip_bypasses_threshold() -> None:
     app = MoonrakerOwlApp(config)
     app._loop = asyncio.get_running_loop()
 
+    telemetry = _StubTelemetryPublisher()
+    app._telemetry_publisher = telemetry
+    app._telemetry_ready = True
+
     await app._register_moonraker_failure(
         "moonraker shutdown",
         force_trip=True,
     )
 
     assert app._moonraker_breaker_tripped is True
+    assert telemetry.system_status_calls == [("error", "moonraker shutdown")]

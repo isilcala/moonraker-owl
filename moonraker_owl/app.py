@@ -388,6 +388,7 @@ class MoonrakerOwlApp:
             AgentState.DEGRADED,
             detail="moonraker unavailable",
         )
+        await self._publish_moonraker_degraded(detail)
         await self._deactivate_components("moonraker unavailable")
 
     async def _register_moonraker_recovery(self) -> None:
@@ -421,6 +422,19 @@ class MoonrakerOwlApp:
                 AgentState.DEGRADED,
                 detail="moonraker recovered; runtime still initialising",
             )
+
+    async def _publish_moonraker_degraded(self, reason: str) -> None:
+        if self._telemetry_publisher is None:
+            return
+
+        detail = reason or "Moonraker unavailable"
+        try:
+            await self._telemetry_publisher.publish_system_status(
+                printer_state="error",
+                message=detail,
+            )
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.debug("Failed to publish degraded telemetry snapshot", exc_info=True)
 
     async def _monitor_moonraker(self) -> None:
         resilience = self._config.resilience

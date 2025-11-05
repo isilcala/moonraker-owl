@@ -891,6 +891,38 @@ class TelemetryPublisher:
                     break
         if self._pending_payload is not None:
             self._event.set()
+
+    async def publish_system_status(
+        self,
+        *,
+        printer_state: str,
+        message: Optional[str] = None,
+    ) -> None:
+        if self._stop_event.is_set():
+            return
+
+        normalized_state = (printer_state or "").strip().lower() or "error"
+        detail = (message or "Moonraker unavailable").strip() or "Moonraker unavailable"
+
+        status_payload: Dict[str, Any] = {
+            "result": {
+                "status": {
+                    "print_stats": {
+                        "state": normalized_state,
+                        "message": detail,
+                    },
+                    "display_status": {
+                        "message": detail,
+                    },
+                    "webhooks": {
+                        "state": normalized_state,
+                    },
+                }
+            }
+        }
+
+        self._retain_next_publish.add("overview")
+        self._process_payload(status_payload, forced_channels={"overview"})
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
     raw = config.raw
 
