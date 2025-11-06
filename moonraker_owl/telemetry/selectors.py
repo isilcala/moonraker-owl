@@ -391,6 +391,9 @@ def _should_use_display_message(message: str, session: SessionInfo) -> bool:
         "aborted",
     }
 
+    if normalized.startswith("klippy ready"):
+        return False
+
     if not session.has_active_job and normalized in redundant:
         return False
 

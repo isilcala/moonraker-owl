@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import random
-from typing import Optional
+from typing import Awaitable, Callable, Dict, Optional
 
 from . import constants
 from .adapters import MoonrakerClient, MQTTClient, MQTTConnectionError
@@ -79,6 +79,10 @@ class MoonrakerOwlApp:
         self._moonraker_failures = 0
         self._moonraker_monitor_task: Optional[asyncio.Task[None]] = None
         self._moonraker_breaker_tripped = False
+        self._telemetry_status_listener: Callable[[Dict[str, Any]], Awaitable[None]] = (
+            self._handle_telemetry_status_update
+        )
+        self._status_listener_registered = False
 
     async def run(self) -> None:
         """Run the main supervisor loop.
@@ -367,6 +371,7 @@ class MoonrakerOwlApp:
         reason: str,
         *,
         force_trip: bool = False,
+        source: str = "monitor",
     ) -> None:
         detail = reason or "moonraker failure"
         self._moonraker_failures += 1
@@ -379,8 +384,10 @@ class MoonrakerOwlApp:
             return
 
         LOGGER.warning(
-            "Moonraker breaker tripped after %d failures: %s",
+            "Moonraker breaker tripped after %d failures%s [%s]: %s",
             self._moonraker_failures,
+            " (forced)" if force_trip else "",
+            source,
             detail,
         )
         self._moonraker_breaker_tripped = True
@@ -389,7 +396,10 @@ class MoonrakerOwlApp:
             detail="moonraker unavailable",
         )
         await self._publish_moonraker_degraded(detail)
-        await self._deactivate_components("moonraker unavailable")
+        await self._deactivate_components(
+            "moonraker unavailable",
+            keep_telemetry=True,
+        )
 
     async def _register_moonraker_recovery(self) -> None:
         self._moonraker_failures = 0
@@ -435,6 +445,23 @@ class MoonrakerOwlApp:
             )
         except Exception:  # pragma: no cover - defensive logging
             LOGGER.debug("Failed to publish degraded telemetry snapshot", exc_info=True)
+
+    async def _handle_telemetry_status_update(
+        self, payload: Dict[str, Any]
+    ) -> None:
+        assessment = self._analyse_moonraker_snapshot(payload)
+        if not assessment.healthy:
+            await self._register_moonraker_failure(
+                assessment.detail or "moonraker telemetry failure",
+                force_trip=assessment.force_trip,
+                source="status-listener",
+            )
+            return
+
+        if self._moonraker_failures == 0 and not self._moonraker_breaker_tripped:
+            return
+
+        await self._register_moonraker_recovery()
 
     async def _monitor_moonraker(self) -> None:
         resilience = self._config.resilience
@@ -493,18 +520,43 @@ class MoonrakerOwlApp:
         print_stats_state = _normalise_state(status.get("print_stats"), "state")
         print_stats_message = _extract_str(status.get("print_stats"), "message")
 
+        healthy_print_states = {
+            "standby",
+            "ready",
+            "idle",
+            "printing",
+            "paused",
+            "complete",
+            "completed",
+            "cancelled",
+            "canceled",
+        }
+        failure_print_states = {
+            "error",
+            "failed",
+            "aborted",
+            "shutdown",
+        }
+
         failure_detail: Optional[str] = None
         force_trip = False
 
         if printer_shutdown:
             failure_detail = print_stats_message or "moonraker reports printer shutdown"
             force_trip = True
+        elif print_stats_state in failure_print_states:
+            failure_detail = print_stats_message or f"print_stats state {print_stats_state}"
+            force_trip = True
         elif printer_state in {"shutdown", "error"}:
             failure_detail = print_stats_message or f"printer state {printer_state}"
             force_trip = True
         elif webhooks_state in {"shutdown", "error"}:
-            failure_detail = print_stats_message or f"webhooks state {webhooks_state}"
-            force_trip = True
+            if print_stats_state in healthy_print_states:
+                failure_detail = None
+                force_trip = False
+            else:
+                failure_detail = print_stats_message or f"webhooks state {webhooks_state}"
+                force_trip = True
 
         if failure_detail is not None:
             return _MoonrakerAssessment(
@@ -565,6 +617,7 @@ class MoonrakerOwlApp:
                 self._config, self._moonraker_client, self._mqtt_client
             )
             self._telemetry_publisher = telemetry
+            self._status_listener_registered = False
 
         try:
             await telemetry.start()
@@ -586,6 +639,22 @@ class MoonrakerOwlApp:
                 telemetry.topic,
             )
             await self._health.update("telemetry", True, None)
+            if not self._status_listener_registered:
+                try:
+                    telemetry.register_status_listener(
+                        self._telemetry_status_listener
+                    )
+                except AttributeError:  # pragma: no cover - defensive guard
+                    LOGGER.debug(
+                        "Telemetry publisher does not support status listeners"
+                    )
+                except Exception:  # pragma: no cover - defensive logging
+                    LOGGER.debug(
+                        "Failed to register telemetry status listener",
+                        exc_info=True,
+                    )
+                else:
+                    self._status_listener_registered = True
 
         processor = self._command_processor
         if processor is None and self._telemetry_publisher is not None:
@@ -645,7 +714,11 @@ class MoonrakerOwlApp:
         await self._health.update("health-endpoint", False, "shutdown")
 
     async def _deactivate_components(
-        self, reason: str, *, preserve_instances: bool = True
+        self,
+        reason: str,
+        *,
+        preserve_instances: bool = True,
+        keep_telemetry: bool = False,
     ) -> None:
         if self._command_processor is not None:
             try:
@@ -668,14 +741,34 @@ class MoonrakerOwlApp:
         self._commands_ready = False
 
         if self._telemetry_publisher is not None:
-            try:
-                await self._telemetry_publisher.stop()
-            except Exception:  # pragma: no cover - defensive cleanup
-                LOGGER.debug("Error stopping telemetry publisher", exc_info=True)
-            await self._health.update("telemetry", False, reason)
-            if not preserve_instances:
-                self._telemetry_publisher = None
-        self._telemetry_ready = False
+            if keep_telemetry:
+                await self._health.update("telemetry", False, reason)
+            else:
+                if self._status_listener_registered:
+                    try:
+                        self._telemetry_publisher.unregister_status_listener(
+                            self._telemetry_status_listener
+                        )
+                    except AttributeError:
+                        LOGGER.debug(
+                            "Telemetry publisher missing unregister_status_listener"
+                        )
+                    except Exception:  # pragma: no cover - defensive cleanup
+                        LOGGER.debug(
+                            "Failed to unregister telemetry status listener",
+                            exc_info=True,
+                        )
+                    finally:
+                        self._status_listener_registered = False
+                try:
+                    await self._telemetry_publisher.stop()
+                except Exception:  # pragma: no cover - defensive cleanup
+                    LOGGER.debug("Error stopping telemetry publisher", exc_info=True)
+                await self._health.update("telemetry", False, reason)
+                if not preserve_instances:
+                    self._telemetry_publisher = None
+                    self._status_listener_registered = False
+                self._telemetry_ready = False
 
         await self._health.update("moonraker", False, reason)
 

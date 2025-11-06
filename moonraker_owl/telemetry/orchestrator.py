@@ -10,7 +10,7 @@ from ..config import TelemetryCadenceConfig
 from ..version import __version__
 from .events import EventCollector
 from .selectors import EventsSelector, OverviewSelector, TelemetrySelector
-from .state_store import MoonrakerStateStore
+from .state_store import MoonrakerStateStore, MoonrakerStoreState
 from .trackers import HeaterMonitor, PrintSessionTracker
 
 
@@ -65,8 +65,10 @@ class TelemetryOrchestrator:
         self._telemetry_max_hz = 0.033
         self._watch_window_expires: Optional[datetime] = None
 
-    def reset(self) -> None:
+    def reset(self, *, snapshot: Optional[MoonrakerStoreState] = None) -> None:
         self.store = MoonrakerStateStore(clock=self._clock)
+        if snapshot is not None:
+            self.store.restore_state(snapshot)
         self.overview_selector.reset()
         self.telemetry_selector.reset()
         self.events.reset()

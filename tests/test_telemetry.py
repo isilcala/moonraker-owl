@@ -881,6 +881,219 @@ async def test_subscription_handles_attribute_selection() -> None:
     }
 
 
+def test_state_store_marks_klippy_shutdown() -> None:
+    store = MoonrakerStateStore()
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "webhooks": {"state": "ready"},
+                    "print_stats": {"state": "standby", "message": ""},
+                    "printer": {"state": "ready", "is_shutdown": False},
+                }
+            ],
+        }
+    )
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_disconnected",
+            "params": [{"message": "USB cable removed"}],
+        }
+    )
+
+    snapshot = store.as_dict()
+    assert snapshot.get("webhooks", {}).get("state") == "shutdown"
+    assert snapshot.get("webhooks", {}).get("state_message") == "USB cable removed"
+    assert snapshot.get("print_stats", {}).get("state") == "error"
+    assert snapshot.get("print_stats", {}).get("message") == "USB cable removed"
+    assert snapshot.get("printer", {}).get("is_shutdown") is True
+
+
+def test_state_store_marks_klippy_ready_after_shutdown() -> None:
+    store = MoonrakerStateStore()
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_shutdown",
+            "params": [{"message": "Emergency stop"}],
+        }
+    )
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_ready",
+            "params": None,
+        }
+    )
+
+    snapshot = store.as_dict()
+    assert snapshot.get("webhooks", {}).get("state") == "ready"
+    assert snapshot.get("printer", {}).get("state") == "ready"
+    assert snapshot.get("printer", {}).get("is_shutdown") is False
+    assert snapshot.get("print_stats", {}).get("state") == "standby"
+    assert snapshot.get("print_stats", {}).get("message") == ""
+
+
+def test_state_store_retains_shutdown_until_ready_signal() -> None:
+    store = MoonrakerStateStore()
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_shutdown",
+            "params": [{"message": "Firmware restart"}],
+        }
+    )
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_print_stats_update",
+            "params": [{"state": "standby", "message": ""}],
+        }
+    )
+
+    snapshot = store.as_dict()
+    assert snapshot.get("webhooks", {}).get("state") == "shutdown"
+    assert snapshot.get("printer", {}).get("is_shutdown") is True
+    assert snapshot.get("print_stats", {}).get("state") == "error"
+    assert snapshot.get("print_stats", {}).get("message") == "Firmware restart"
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_ready",
+            "params": None,
+        }
+    )
+
+    snapshot = store.as_dict()
+    assert snapshot.get("webhooks", {}).get("state") == "ready"
+    assert snapshot.get("printer", {}).get("is_shutdown") is False
+    assert snapshot.get("print_stats", {}).get("state") == "standby"
+    assert snapshot.get("print_stats", {}).get("message") == ""
+
+
+def test_state_store_handles_notify_klippy_state_ready() -> None:
+    store = MoonrakerStateStore()
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_state",
+            "params": ["ready", {"message": "Firmware restart complete"}],
+        }
+    )
+
+    snapshot = store.as_dict()
+    assert snapshot.get("webhooks", {}).get("state") == "ready"
+    assert (
+        snapshot.get("webhooks", {}).get("state_message")
+        == "Firmware restart complete"
+    )
+    assert snapshot.get("printer", {}).get("state") == "ready"
+    assert snapshot.get("printer", {}).get("is_shutdown") is False
+    assert snapshot.get("print_stats", {}).get("state") == "standby"
+
+
+def test_state_store_handles_notify_klippy_state_error() -> None:
+    store = MoonrakerStateStore()
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_state",
+            "params": {"state": "error", "message": "Emergency stop"},
+        }
+    )
+
+    snapshot = store.as_dict()
+    assert snapshot.get("webhooks", {}).get("state") == "shutdown"
+    assert snapshot.get("printer", {}).get("is_shutdown") is True
+    assert snapshot.get("print_stats", {}).get("state") == "error"
+
+
+def test_state_store_export_restore_preserves_shutdown_state() -> None:
+    store = MoonrakerStateStore()
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_shutdown",
+            "params": [{"message": "Emergency stop"}],
+        }
+    )
+
+    snapshot = store.export_state()
+
+    recovered = MoonrakerStateStore()
+    recovered.restore_state(snapshot)
+
+    recovered.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_print_stats_update",
+            "params": [{"state": "standby", "message": ""}],
+        }
+    )
+
+    state = recovered.as_dict()
+    assert state.get("print_stats", {}).get("state") == "error"
+    assert state.get("print_stats", {}).get("message") == "Emergency stop"
+
+
+def test_state_store_prefers_gcode_shutdown_hint() -> None:
+    store = MoonrakerStateStore()
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_gcode_response",
+            "params": ["!! Emergency stop !!"],
+        }
+    )
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_shutdown",
+            "params": [{}],
+        }
+    )
+
+    snapshot = store.as_dict()
+    assert snapshot.get("print_stats", {}).get("state") == "error"
+    assert snapshot.get("print_stats", {}).get("message") == "Emergency stop"
+
+
+def test_state_store_handles_notify_klippy_state_mapping_sequence() -> None:
+    store = MoonrakerStateStore()
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_klippy_state",
+            "params": [
+                {"state": "ready", "state_message": "Restart complete"},
+                {"message": "Restart complete"},
+            ],
+        }
+    )
+
+    snapshot = store.as_dict()
+    assert snapshot.get("webhooks", {}).get("state") == "ready"
+    assert (
+        snapshot.get("webhooks", {}).get("state_message") == "Restart complete"
+    )
+    assert snapshot.get("printer", {}).get("state") == "ready"
+    assert snapshot.get("printer", {}).get("is_shutdown") is False
 @pytest.mark.asyncio
 async def test_subscription_normalizes_field_names() -> None:
     moonraker = FakeMoonrakerClient({"result": {}})
@@ -1026,6 +1239,59 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
     )
     assert extruder_sensor.get("value") == pytest.approx(72.0, rel=1e-3)
     assert extruder_sensor.get("target") == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_publish_system_status_clears_retained_overview() -> None:
+    initial_state = {
+        "result": {
+            "status": {
+                "print_stats": {
+                    "state": "standby",
+                    "message": "",
+                }
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config()
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+    mqtt.messages.clear()
+
+    await moonraker.emit(initial_state)
+    await asyncio.sleep(0.05)
+    mqtt.messages.clear()
+
+    await publisher.publish_system_status(
+        printer_state="error", message="Emergency stop"
+    )
+
+    await asyncio.sleep(0.05)
+    await publisher.stop()
+
+    overview_messages = [
+        message
+        for message in mqtt.messages
+        if message["topic"].endswith("/overview")
+    ]
+
+    assert overview_messages, "Expected overview publications"
+    clear_message = overview_messages[0]
+    assert clear_message["retain"] is True
+    assert clear_message["payload"] == b""
+
+    error_message = overview_messages[-1]
+    assert error_message["retain"] is False
+    document = _decode(error_message)
+    overview = document.get("overview")
+    assert isinstance(overview, dict)
+    assert overview.get("printerStatus") == "Error"
 
 
 def test_telemetry_configuration_requires_device_id():
@@ -1322,7 +1588,7 @@ async def test_idle_cadence_flushes_latest_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restart_publishes_resume_snapshot() -> None:
+async def test_restart_fetches_fresh_overview_state() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
 
     moonraker = FakeMoonrakerClient(sample)
@@ -1339,14 +1605,19 @@ async def test_restart_publishes_resume_snapshot() -> None:
 
     await publisher.stop()
     mqtt.messages.clear()
-    assert publisher._frame_buffer, "Expected buffered frames to persist after stop"
+
+    moonraker.update_state(_load_sample("moonraker-sample-complete.json"))
 
     await publisher.start()
     await asyncio.sleep(0.05)
 
     resumed_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
     assert resumed_messages, "Expected overview publish after restart"
-    assert resumed_messages[0]["retain"] is True
+    last_message = _decode(resumed_messages[-1])
+    overview_body = last_message.get("overview")
+    assert overview_body is not None
+    assert overview_body.get("printerStatus") == "Completed"
+    assert resumed_messages[-1]["retain"] is True
 
     await publisher.stop()
 
@@ -1379,13 +1650,12 @@ async def test_start_recovers_after_loop_termination() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restart_replays_buffered_frames() -> None:
+async def test_restart_emits_current_telemetry_after_start() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
     config = build_config(rate_hz=1 / 30)
-    config.resilience.buffer_window_seconds = 120.0
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1394,11 +1664,18 @@ async def test_restart_replays_buffered_frames() -> None:
 
     initial_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
     assert initial_messages, "Expected telemetry publish on first start"
+    initial_payload = _decode(initial_messages[-1])
+    initial_telemetry = initial_payload.get("telemetry", {})
+    initial_extruder = next(
+        (sensor for sensor in initial_telemetry.get("sensors", []) if sensor.get("channel") == "extruder"),
+        None,
+    )
+    assert initial_extruder is not None
+    assert initial_extruder.get("target") == pytest.approx(255.0, rel=1e-3)
 
     await publisher.stop()
     mqtt.messages.clear()
-    telemetry_frames = [frame for frame in publisher._frame_buffer if frame.channel == "telemetry"]
-    assert telemetry_frames, "Expected telemetry frames in buffer"
+    moonraker.update_state(_load_sample("moonraker-sample-complete.json"))
 
     await publisher.start()
     await asyncio.sleep(0.05)
@@ -1406,11 +1683,20 @@ async def test_restart_replays_buffered_frames() -> None:
     assert not publisher._worker.done()
 
     topics = mqtt.by_topic()
-    assert topics, f"Expected telemetry replay topics, found: {topics}"
+    assert topics, f"Expected telemetry publish topics, found: {topics}"
 
     replay_messages = topics.get("owl/printers/device-123/telemetry")
-    assert replay_messages, "Expected buffered telemetry replay after restart"
-    assert replay_messages[0]["retain"] is False
+    assert replay_messages, "Expected telemetry publish after restart"
+    latest_payload = _decode(replay_messages[-1])
+    telemetry_body = latest_payload.get("telemetry", {})
+    sensors = telemetry_body.get("sensors", [])
+    extruder_sensor = next(
+        (sensor for sensor in sensors if sensor.get("channel") == "extruder"),
+        None,
+    )
+    assert extruder_sensor is not None
+    assert extruder_sensor.get("target") == pytest.approx(0.0, abs=1e-6)
+    assert extruder_sensor.get("value") == pytest.approx(45.04, rel=1e-3)
 
 
 @pytest.mark.asyncio
@@ -1447,6 +1733,37 @@ async def test_publish_system_status_emits_error_snapshot() -> None:
 
     await publisher.stop()
 
+
+@pytest.mark.asyncio
+async def test_status_listener_invoked_for_system_status() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+
+    captured: list[Dict[str, Any]] = []
+
+    def _listener(payload: Dict[str, Any]) -> None:
+        captured.append(payload)
+
+    publisher.register_status_listener(_listener)
+
+    await publisher.publish_system_status(
+        printer_state="error",
+        message="Moonraker unavailable",
+    )
+
+    assert captured, "Expected listener to receive status payload"
+    snapshot = captured[-1]
+    status = snapshot.get("result", {}).get("status", {})
+    assert status.get("print_stats", {}).get("state") == "error"
+
+    await publisher.stop()
 
 def test_watch_window_expiration_reverts_to_idle_rate() -> None:
     request_at = datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc)
@@ -1555,6 +1872,138 @@ async def test_notify_status_update_does_not_trigger_query():
     assert (
         mqtt.by_topic().get("owl/printers/device-123/telemetry") is None
     ), "Expected no telemetry publish for unchanged contract"
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_listener_handles_future_return() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+
+    loop = asyncio.get_running_loop()
+    observed: list[Dict[str, Any]] = []
+
+    def _listener(payload: Dict[str, Any]) -> asyncio.Future[Dict[str, Any]]:
+        fut: asyncio.Future[Dict[str, Any]] = loop.create_future()
+
+        def _complete() -> None:
+            if not fut.done():
+                fut.set_result(payload)
+
+        fut.add_done_callback(lambda result: observed.append(result.result()))
+        loop.call_soon(_complete)
+        return fut
+
+    publisher.register_status_listener(_listener)
+
+    await publisher.publish_system_status(
+        printer_state="error",
+        message="Moonraker unavailable",
+    )
+
+    await asyncio.sleep(0.05)
+
+    assert observed, "Expected future-based listener to complete"
+
+    def _is_error(entry: Dict[str, Any]) -> bool:
+        status = entry.get("result", {}).get("status", {})
+        return status.get("webhooks", {}).get("state") == "error"
+
+    assert any(_is_error(entry) for entry in observed), "Expected error snapshot"
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_overview_recovery_retained_after_error_snapshot() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    overview_topic = "owl/printers/device-123/overview"
+
+    await publisher.publish_system_status(
+        printer_state="error",
+        message="Moonraker unavailable",
+    )
+
+    overview_messages = mqtt.by_topic().get(overview_topic)
+    assert overview_messages, "Expected overview retain for error snapshot"
+    assert overview_messages[-1]["retain"] is True
+    mqtt.messages.clear()
+
+    await moonraker.emit(sample)
+    await asyncio.sleep(0.05)
+
+    recovery_messages = mqtt.by_topic().get(overview_topic)
+    assert recovery_messages, "Expected overview after recovery"
+    assert recovery_messages[-1]["retain"] is True
+    snapshot = json.loads(recovery_messages[-1]["payload"].decode("utf-8"))
+    assert snapshot.get("overview", {}).get("printerStatus") != "Error"
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_listener_receives_aggregated_status_updates() -> None:
+    initial_state = {
+        "result": {
+            "status": {
+                "printer": {"state": "ready"},
+                "webhooks": {"state": "ready"},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+
+    captured: list[Dict[str, Any]] = []
+
+    def _listener(snapshot: Dict[str, Any]) -> None:
+        captured.append(snapshot)
+
+    publisher.register_status_listener(_listener)
+
+    await moonraker.emit(  # simulate Moonraker notify_status_update payload
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "webhooks": {"state": "shutdown"},
+                    "print_stats": {"state": "error", "message": "Emergency"},
+                }
+            ],
+        }
+    )
+
+    await asyncio.sleep(0.05)
+
+    assert captured, "Expected status listener to receive aggregated snapshot"
+    latest = captured[-1]
+    status = latest.get("result", {}).get("status", {})
+    assert status.get("webhooks", {}).get("state") == "shutdown"
+    assert status.get("print_stats", {}).get("message") == "Emergency"
 
     await publisher.stop()
 

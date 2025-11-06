@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import types
 from configparser import ConfigParser
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pytest
 
@@ -53,6 +54,9 @@ class _StubTelemetryPublisher:
     def __init__(self) -> None:
         self.stop_calls = 0
         self.system_status_calls: list[tuple[str, Optional[str]]] = []
+        self.register_calls = 0
+        self.unregister_calls = 0
+        self.listeners: list[Any] = []
 
     async def stop(self) -> None:
         self.stop_calls += 1
@@ -64,6 +68,15 @@ class _StubTelemetryPublisher:
         message: Optional[str] = None,
     ) -> None:
         self.system_status_calls.append((printer_state, message))
+
+    def register_status_listener(self, listener: Any) -> None:
+        self.register_calls += 1
+        self.listeners.append(listener)
+
+    def unregister_status_listener(self, listener: Any) -> None:
+        self.unregister_calls += 1
+        with contextlib.suppress(ValueError):
+            self.listeners.remove(listener)
 
 
 class _StubCommandProcessor:
@@ -104,9 +117,9 @@ async def test_moonraker_breaker_trips_after_failures() -> None:
     assert app._state == AgentState.DEGRADED
     assert commands.stop_calls == 1
     assert commands.abandon_reasons == ["moonraker unavailable"]
-    assert telemetry.stop_calls == 1
+    assert telemetry.stop_calls == 0
     assert telemetry.system_status_calls == [("error", "rpc timeout")]
-    assert app._telemetry_ready is False
+    assert app._telemetry_ready is True
 
 
 @pytest.mark.asyncio
@@ -200,6 +213,37 @@ def test_moonraker_assessment_detects_shutdown_state() -> None:
     assert assessment.detail == "Emergency stop"
 
 
+@pytest.mark.asyncio
+async def test_push_status_listener_trips_breaker_on_shutdown() -> None:
+    config = _build_config(breaker_threshold=1)
+    app = MoonrakerOwlApp(config)
+
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.ACTIVE
+    app._telemetry_ready = True
+    app._commands_ready = True
+
+    telemetry = _StubTelemetryPublisher()
+    commands = _StubCommandProcessor()
+    app._telemetry_publisher = telemetry
+    app._command_processor = commands
+
+    snapshot = _build_snapshot(
+        webhooks_state="shutdown",
+        print_message="Emergency stop",
+    )
+
+    await app._handle_telemetry_status_update(snapshot)
+
+    assert app._moonraker_breaker_tripped is True
+    assert telemetry.system_status_calls == [("error", "Emergency stop")]
+    assert commands.stop_calls == 1
+    assert commands.abandon_reasons == ["moonraker unavailable"]
+    assert telemetry.stop_calls == 0
+    assert app._telemetry_ready is True
+    assert app._commands_ready is False
+
+
 def test_moonraker_assessment_reports_healthy_state() -> None:
     app = MoonrakerOwlApp(_build_config())
     snapshot = _build_snapshot(
@@ -213,6 +257,34 @@ def test_moonraker_assessment_reports_healthy_state() -> None:
     assert assessment.healthy is True
     assert assessment.force_trip is False
     assert assessment.detail is None
+
+
+def test_moonraker_assessment_ignores_stale_webhooks_error() -> None:
+    app = MoonrakerOwlApp(_build_config())
+    snapshot = _build_snapshot(
+        webhooks_state="error",
+        print_state="standby",
+    )
+
+    assessment = app._analyse_moonraker_snapshot(snapshot)
+
+    assert assessment.healthy is True
+    assert assessment.force_trip is False
+    assert assessment.detail is None
+
+
+def test_moonraker_assessment_detects_print_stats_error() -> None:
+    app = MoonrakerOwlApp(_build_config())
+    snapshot = _build_snapshot(
+        print_state="error",
+        print_message="Emergency stop",
+    )
+
+    assessment = app._analyse_moonraker_snapshot(snapshot)
+
+    assert assessment.healthy is False
+    assert assessment.force_trip is True
+    assert assessment.detail == "Emergency stop"
 
 
 @pytest.mark.asyncio
