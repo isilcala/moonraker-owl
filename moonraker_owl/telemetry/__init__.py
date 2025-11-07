@@ -191,6 +191,7 @@ class TelemetryPublisher:
         self._pending_payload: Optional[Dict[str, Any]] = None
         self._pending_timer_handle: Optional[asyncio.TimerHandle] = None
         self._pending_forced_channels: Set[str] = set()
+        self._pending_cadence_forced: Set[str] = set()
         self._force_full_channels_after_reset: Set[str] = set()
         self._active_rate_request: Optional[_RateRequest] = None
         self._last_printer_state: Optional[str] = None
@@ -268,6 +269,7 @@ class TelemetryPublisher:
             self._retain_next_publish.update({"overview", "telemetry"})
         self._cancel_pending_timer()
         self._pending_forced_channels.clear()
+        self._pending_cadence_forced.clear()
         resubscribe_task = self._resubscribe_task
         if resubscribe_task is not None:
             resubscribe_task.cancel()
@@ -410,25 +412,30 @@ class TelemetryPublisher:
 
         pending: Optional[Dict[str, Any]] = None
         pending_forced: Set[str] = set()
+        pending_cadence_forced: Set[str] = set()
 
         while not self._stop_event.is_set():
             if pending is None:
                 if self._pending_payload is not None:
                     pending = copy.deepcopy(self._pending_payload)
                     pending_forced = set(self._pending_forced_channels)
+                    pending_cadence_forced = set(self._pending_cadence_forced)
                     self._pending_payload = None
                     self._pending_forced_channels.clear()
+                    self._pending_cadence_forced.clear()
                     self._cancel_pending_timer()
                 else:
                     heartbeat_payload = self._prepare_heartbeat_payload()
                     if heartbeat_payload is not None:
                         pending = heartbeat_payload
                         pending_forced = {"overview"}
+                        pending_cadence_forced = set()
                     else:
                         await self._event.wait()
                         self._event.clear()
                         pending = self._gather_payloads()
                         pending_forced = set()
+                        pending_cadence_forced = set()
                         if pending is None:
                             continue
             else:
@@ -436,6 +443,7 @@ class TelemetryPublisher:
                 if heartbeat_payload is not None:
                     pending = heartbeat_payload
                     pending_forced = {"overview"}
+                    pending_cadence_forced = set()
 
             while not self._stop_event.is_set():
                 now = loop.time()
@@ -458,14 +466,25 @@ class TelemetryPublisher:
             if pending is None:
                 continue
 
+            pending = self._gather_payloads(pending)
+            if pending is None:
+                pending_forced = set()
+                pending_cadence_forced = set()
+                continue
+
             try:
-                self._process_payload(pending, forced_channels=pending_forced)
+                self._process_payload(
+                    pending,
+                    forced_channels=pending_forced,
+                    cadence_forced=pending_cadence_forced,
+                )
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception("Telemetry pipeline failed")
 
             last_sent = loop.time()
             pending = self._gather_payloads()
             pending_forced = set()
+            pending_cadence_forced = set()
 
         LOGGER.debug("TelemetryPublisher loop terminated")
 
@@ -492,6 +511,7 @@ class TelemetryPublisher:
         payload: Dict[str, Any],
         *,
         forced_channels: Optional[Iterable[str]] = None,
+        cadence_forced: Optional[Iterable[str]] = None,
     ) -> None:
         self._maybe_expire_watch_window()
         self._orchestrator.ingest(payload)
@@ -523,7 +543,10 @@ class TelemetryPublisher:
         elif not self._bootstrapped:
             self._last_payload_snapshot = None
 
-        frames = self._orchestrator.build_payloads(forced_channels=forced_channels)
+        forced_channels_set = set(forced_channels or ())
+        cadence_forced_set = set(cadence_forced or ())
+
+        frames = self._orchestrator.build_payloads(forced_channels=forced_channels_set)
         if not frames:
             return
 
@@ -557,6 +580,7 @@ class TelemetryPublisher:
                 frame.payload,
                 now_monotonic,
                 forced=frame.forced,
+                force_respects_cadence=channel in cadence_forced_set,
             )
             if not should_publish:
                 if delay is not None:
@@ -564,6 +588,7 @@ class TelemetryPublisher:
                     if min_delay is None or delay < min_delay:
                         min_delay = delay
                     self._pending_forced_channels.add(channel)
+                    self._pending_cadence_forced.add(channel)
                 continue
 
             envelope = self._wrap_envelope(
@@ -607,6 +632,7 @@ class TelemetryPublisher:
                 self._retain_next_publish.discard(channel)
             self._publish(channel, topic, envelope, retain=retain)
             self._pending_forced_channels.discard(channel)
+            self._pending_cadence_forced.discard(channel)
             self._force_full_channels_after_reset.discard(channel)
 
         if deferred:
@@ -787,6 +813,7 @@ class TelemetryPublisher:
         now_monotonic: float,
         *,
         forced: bool,
+        force_respects_cadence: bool,
     ) -> tuple[bool, Optional[float]]:
         state = self._channel_state[channel]
 
@@ -797,9 +824,30 @@ class TelemetryPublisher:
             if state.last_publish == 0.0 or elapsed_since_publish >= self._telemetry_watchdog_seconds:
                 effective_forced = True
 
+        if (
+            channel == "telemetry"
+            and forced
+            and force_respects_cadence
+            and state.last_publish != 0.0
+        ):
+            force_cap_interval = self._watch_interval or 1.0
+            if force_cap_interval <= 0:
+                force_cap_interval = 1.0
+            elapsed = now_monotonic - state.last_publish
+            if elapsed < force_cap_interval:
+                return False, force_cap_interval - elapsed
+
         cadence_interval = self._channel_caps.get(channel)
         if cadence_interval:
             elapsed = now_monotonic - state.last_publish
+            if (
+                channel == "telemetry"
+                and forced
+                and force_respects_cadence
+                and state.last_publish != 0.0
+                and elapsed < cadence_interval
+            ):
+                return False, cadence_interval - elapsed
             if not effective_forced and elapsed < cadence_interval:
                 return False, cadence_interval - elapsed
 
@@ -926,6 +974,7 @@ class TelemetryPublisher:
             state.last_publish = 0.0
         self._pending_payload = None
         self._pending_forced_channels.clear()
+        self._pending_cadence_forced.clear()
         self._last_payload_snapshot = None
         self._last_overview_publish_time = 0.0
         self._last_overview_status = "Idle"
@@ -945,6 +994,7 @@ class TelemetryPublisher:
         if previous_snapshot is not None:
             self._pending_payload = copy.deepcopy(previous_snapshot)
             self._pending_forced_channels.update({"overview", "telemetry"})
+            self._pending_cadence_forced.difference_update({"overview", "telemetry"})
             self._last_payload_snapshot = copy.deepcopy(previous_snapshot)
             self._event.set()
         self._klippy_ready_applied = False
@@ -1022,7 +1072,11 @@ class TelemetryPublisher:
 
         snapshot = self._orchestrator.store.export_state()
         try:
-            self._process_payload(status_payload, forced_channels={"overview"})
+            self._process_payload(
+                status_payload,
+                forced_channels={"overview"},
+                cadence_forced=(),
+            )
         finally:
             self._orchestrator.store.restore_state(snapshot)
             self._force_error_retain = None

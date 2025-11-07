@@ -1701,7 +1701,7 @@ async def test_restart_emits_current_telemetry_after_start() -> None:
     assert not publisher._worker.done()
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + 0.3
+    deadline = loop.time() + 1.5
     extruder_sensor = None
 
     while loop.time() < deadline:
@@ -1967,6 +1967,66 @@ async def test_resubscribe_triggered_after_notify_klippy_state_ready() -> None:
     await publisher.stop()
 
 
+@pytest.mark.asyncio
+async def test_watch_cadence_enforces_max_rate() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.1)
+
+    publisher.apply_telemetry_rate(
+        mode="watch",
+        max_hz=1.0,
+        duration_seconds=None,
+        requested_at=datetime.now(timezone.utc),
+    )
+
+    mqtt.messages.clear()
+
+    await moonraker.emit(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "extruder": {"temperature": 205.0, "target": 210.0},
+                }
+            ],
+        }
+    )
+    await asyncio.sleep(0.05)
+
+    await moonraker.emit(
+        {
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "extruder": {"temperature": 206.0, "target": 210.0},
+                }
+            ],
+        }
+    )
+    await asyncio.sleep(0.2)
+
+    telemetry_topic = "owl/printers/device-123/telemetry"
+    early_messages = mqtt.by_topic().get(telemetry_topic, [])
+    assert (
+        len(early_messages) <= 1
+    ), "Telemetry should respect the 1 Hz cadence and avoid bursts"
+
+    await asyncio.sleep(1.0)
+
+    later_messages = mqtt.by_topic().get(telemetry_topic, [])
+    assert len(later_messages) >= 2, "Telemetry should continue publishing after the cadence interval"
+
+    await publisher.stop()
+
+
 def test_rate_request_reapplied_after_reset() -> None:
     request_at = datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc)
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
@@ -2012,6 +2072,48 @@ def test_rate_request_reapplied_after_reset() -> None:
     assert active_request.duration_seconds == 90
     assert active_request.requested_at == fake_now
     assert active_request.expires_at == remaining_window
+
+
+def test_forced_publish_respects_one_hz_cap() -> None:
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    publisher._current_mode = "watch"
+    force_interval = publisher._watch_interval or 1.0
+    if force_interval <= 0:
+        force_interval = 1.0
+    publisher._telemetry_interval = force_interval
+    publisher._channel_caps["telemetry"] = force_interval
+
+    state = publisher._channel_state["telemetry"]
+    state.last_publish = 100.0
+    payload = {"sensors": []}
+
+    should_publish, delay = publisher._should_publish_channel(
+        "telemetry",
+        payload,
+        100.2,
+        forced=True,
+        force_respects_cadence=True,
+    )
+
+    assert should_publish is False
+    assert delay is not None
+    assert delay == pytest.approx(force_interval - 0.2)
+
+    should_publish, delay = publisher._should_publish_channel(
+        "telemetry",
+        payload,
+        100.2 + force_interval,
+        forced=True,
+        force_respects_cadence=True,
+    )
+
+    assert should_publish is True
+    assert delay is None
 
 
 @pytest.mark.asyncio
