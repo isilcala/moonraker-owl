@@ -12,7 +12,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Protocol, Sequence, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Protocol, Sequence, Set, Tuple
 
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
@@ -195,6 +195,9 @@ class TelemetryPublisher:
         self._active_rate_request: Optional[_RateRequest] = None
         self._last_printer_state: Optional[str] = None
         self._resubscribe_task: Optional[asyncio.Task[None]] = None
+        # Cache the last listener state we logged so debug output only fires on transitions.
+        self._last_listener_state: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = None
+        self._klippy_ready_applied = False
 
         self._last_overview_publish_time = 0.0
         self._last_overview_status = "Idle"
@@ -944,6 +947,7 @@ class TelemetryPublisher:
             self._pending_forced_channels.update({"overview", "telemetry"})
             self._last_payload_snapshot = copy.deepcopy(previous_snapshot)
             self._event.set()
+        self._klippy_ready_applied = False
 
     def _reapply_rate_request(self, *, now: Optional[datetime] = None) -> None:
         request = self._active_rate_request
@@ -1055,12 +1059,18 @@ class TelemetryPublisher:
             webhooks_state = _read_state(status.get("webhooks"))
             printer_state = _read_state(status.get("printer"))
             print_state = _read_state(status.get("print_stats"))
-            LOGGER.debug(
-                "Dispatching status listeners: webhooks=%s printer=%s print_stats=%s",
-                webhooks_state,
-                printer_state,
-                print_state,
-            )
+            listener_state = (webhooks_state, printer_state, print_state)
+            if listener_state != self._last_listener_state:
+                # Only surface changes so steady-state polling does not spam the log stream.
+                LOGGER.debug(
+                    "Dispatching status listeners: webhooks=%s printer=%s print_stats=%s",
+                    webhooks_state,
+                    printer_state,
+                    print_state,
+                )
+                self._last_listener_state = listener_state
+        else:
+            self._last_listener_state = None
 
         listeners = tuple(self._status_listeners)
         for listener in listeners:
@@ -1080,6 +1090,8 @@ class TelemetryPublisher:
     ) -> None:
         previous_state = self._last_printer_state
         new_state = previous_state
+        ready_signal = False
+        reset_ready_flag = False
 
         printer_section = aggregated_status.get("printer")
         if isinstance(printer_section, Mapping):
@@ -1094,18 +1106,40 @@ class TelemetryPublisher:
             normalized_method = method.strip().lower()
             if normalized_method == "notify_klippy_ready":
                 new_state = "ready"
+                ready_signal = True
             elif normalized_method == "notify_klippy_state":
                 candidate = _extract_state_from_params(payload.get("params"))
                 if candidate:
                     new_state = candidate
+                    if candidate == "ready":
+                        ready_signal = True
+                    elif candidate in {"startup", "shutdown", "error"}:
+                        reset_ready_flag = True
+            elif normalized_method in {
+                "notify_klippy_shutdown",
+                "notify_klippy_disconnected",
+            }:
+                reset_ready_flag = True
 
-        if new_state == previous_state:
+        if new_state == previous_state and not ready_signal:
             return
 
         self._last_printer_state = new_state
+        if reset_ready_flag and new_state != "ready":
+            self._klippy_ready_applied = False
+
         if new_state == "ready":
+            if not ready_signal and self._klippy_ready_applied:
+                return
+            if self._klippy_ready_applied and ready_signal:
+                LOGGER.debug("Skipping Moonraker resubscribe; ready already handled")
+                return
+            # On a Klippy reboot the websocket keeps running but loses subscriptions; refresh them lazily.
             LOGGER.info("Detected Klippy ready; refreshing Moonraker subscriptions")
+            self._klippy_ready_applied = True
             self._schedule_resubscribe("klippy-ready")
+        elif ready_signal:
+            self._klippy_ready_applied = False
 
     def _schedule_resubscribe(self, reason: str) -> None:
         if not hasattr(self._moonraker, "resubscribe"):
@@ -1155,6 +1189,7 @@ class TelemetryPublisher:
             finally:
                 self._resubscribe_task = None
 
+        # Resubscribe asynchronously so we do not block the main callback pipeline.
         LOGGER.debug("Scheduling Moonraker resubscribe (%s)", reason)
         try:
             self._resubscribe_task = loop.create_task(_runner())

@@ -1921,6 +1921,52 @@ async def test_resubscribe_triggered_after_klippy_ready() -> None:
     await publisher.stop()
 
 
+@pytest.mark.asyncio
+async def test_resubscribe_triggered_after_notify_klippy_state_ready() -> None:
+    initial_state = {
+        "result": {
+            "status": {
+                "printer": {"state": "startup"},
+                "print_stats": {"state": "startup"},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    await moonraker.emit(
+        {
+            "method": "notify_klippy_state",
+            "params": [{"state": "ready"}],
+        }
+    )
+    await asyncio.sleep(0.1)
+
+    first_calls = moonraker.resubscribe_calls
+    assert first_calls >= 1, "Expected resubscribe after notify_klippy_state ready"
+
+    await moonraker.emit(
+        {
+            "method": "notify_klippy_state",
+            "params": {"state": "ready"},
+        }
+    )
+    await asyncio.sleep(0.05)
+
+    assert (
+        moonraker.resubscribe_calls == first_calls
+    ), "Duplicate ready notifications should not reschedule resubscribe"
+
+    await publisher.stop()
+
+
 def test_rate_request_reapplied_after_reset() -> None:
     request_at = datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc)
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
