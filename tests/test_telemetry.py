@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import time
 from contextlib import suppress
 from configparser import ConfigParser
 from datetime import datetime, timedelta, timezone
@@ -1854,10 +1855,51 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
 
     assert publisher._current_mode == "idle"
     assert publisher._watch_window_expires is None
-    assert publisher._channel_caps["telemetry"] == pytest.approx(
+    schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    assert schedule.interval == pytest.approx(
         publisher._idle_interval,
         rel=1e-6,
     )
+    assert schedule.forced_interval == pytest.approx(
+        publisher._idle_interval,
+        rel=1e-6,
+    )
+
+
+def test_forced_interval_tracks_watch_mode() -> None:
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    idle_interval = publisher._idle_interval
+    schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    assert schedule.interval == pytest.approx(idle_interval, rel=1e-6)
+    assert schedule.forced_interval == pytest.approx(idle_interval, rel=1e-6)
+
+    watch_expires = publisher.apply_telemetry_rate(
+        mode="watch",
+        max_hz=1.0,
+        duration_seconds=120,
+        requested_at=datetime.now(timezone.utc),
+    )
+    assert watch_expires is not None
+
+    watch_schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    assert watch_schedule.interval == pytest.approx(1.0, rel=1e-6)
+    assert watch_schedule.forced_interval == pytest.approx(1.0, rel=1e-6)
+
+    publisher.apply_telemetry_rate(
+        mode="idle",
+        max_hz=1.0 / idle_interval if idle_interval > 0 else 0.0,
+        duration_seconds=None,
+        requested_at=datetime.now(timezone.utc),
+    )
+
+    reverted_schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    assert reverted_schedule.interval == pytest.approx(idle_interval, rel=1e-6)
+    assert reverted_schedule.forced_interval == pytest.approx(idle_interval, rel=1e-6)
 
 
 def test_reset_runtime_state_requeues_previous_snapshot() -> None:
@@ -1882,12 +1924,17 @@ def test_reset_runtime_state_requeues_previous_snapshot() -> None:
     publisher._last_payload_snapshot = copy.deepcopy(snapshot)
     publisher._current_mode = "watch"
     publisher._pending_payload = None
-    publisher._pending_forced_channels.clear()
+    publisher._pending_channels.clear()  # type: ignore[attr-defined]
 
     publisher._reset_runtime_state()
 
     assert publisher._pending_payload == snapshot
-    assert {"overview", "telemetry"}.issubset(publisher._pending_forced_channels)
+    pending_channels = publisher._pending_channels  # type: ignore[attr-defined]
+    assert {"overview", "telemetry"}.issubset(pending_channels.keys())
+    for channel in ("overview", "telemetry"):
+        entry = pending_channels[channel]
+        assert entry.forced is True
+        assert entry.respect_cadence is False
     assert publisher._last_payload_snapshot == snapshot
 
 
@@ -2050,8 +2097,8 @@ def test_rate_request_reapplied_after_reset() -> None:
     # Reset cadence back to idle to mirror _reset_runtime_state side effects.
     publisher._current_mode = "idle"
     publisher._telemetry_interval = publisher._idle_interval
-    publisher._channel_caps["telemetry"] = publisher._telemetry_interval
     publisher._watch_window_expires = None
+    publisher._refresh_channel_schedules()
 
     publisher._reapply_rate_request(now=fake_now)
 
@@ -2059,7 +2106,8 @@ def test_rate_request_reapplied_after_reset() -> None:
     remaining_window = fake_now + timedelta(seconds=90)
 
     assert publisher._current_mode == "watch"
-    assert publisher._channel_caps["telemetry"] == pytest.approx(
+    schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    assert schedule.interval == pytest.approx(
         expected_interval,
         rel=1e-6,
     )
@@ -2086,34 +2134,40 @@ def test_forced_publish_respects_one_hz_cap() -> None:
     if force_interval <= 0:
         force_interval = 1.0
     publisher._telemetry_interval = force_interval
-    publisher._channel_caps["telemetry"] = force_interval
+    publisher._telemetry_watchdog_seconds = max(300.0, force_interval * 5)
+    publisher._refresh_channel_schedules()
 
-    state = publisher._channel_state["telemetry"]
+    controller = publisher._cadence_controller  # type: ignore[attr-defined]
+    state = controller._state["telemetry"]  # type: ignore[attr-defined]
     state.last_publish = 100.0
     payload = {"sensors": []}
 
-    should_publish, delay = publisher._should_publish_channel(
+    controller._monotonic = lambda: 100.2  # type: ignore[attr-defined]
+    decision = controller.evaluate(
         "telemetry",
         payload,
-        100.2,
-        forced=True,
-        force_respects_cadence=True,
+        explicit_force=True,
+        respect_cadence=True,
+        allow_watchdog=True,
     )
 
-    assert should_publish is False
-    assert delay is not None
-    assert delay == pytest.approx(force_interval - 0.2)
+    assert decision.should_publish is False
+    assert decision.delay_seconds is not None
+    assert decision.delay_seconds == pytest.approx(force_interval - 0.2)
 
-    should_publish, delay = publisher._should_publish_channel(
+    controller._monotonic = lambda: 100.2 + force_interval  # type: ignore[attr-defined]
+    decision = controller.evaluate(
         "telemetry",
         payload,
-        100.2 + force_interval,
-        forced=True,
-        force_respects_cadence=True,
+        explicit_force=True,
+        respect_cadence=True,
+        allow_watchdog=True,
     )
 
-    assert should_publish is True
-    assert delay is None
+    assert decision.should_publish is True
+    assert decision.delay_seconds is None
+
+    controller._monotonic = time.monotonic  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

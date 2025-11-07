@@ -43,8 +43,6 @@ class TelemetryConfigurationError(RuntimeError):
 @dataclass
 class _ChannelPublishState:
     sequence: int = 0
-    hash: Optional[str] = None
-    last_publish: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -72,6 +70,157 @@ class _RateRequest:
     requested_at: datetime
     duration_seconds: Optional[int]
     expires_at: Optional[datetime]
+
+
+@dataclass
+class ChannelSchedule:
+    interval: Optional[float]
+    forced_interval: Optional[float]
+    watchdog_seconds: Optional[float]
+
+
+@dataclass
+class ChannelRuntimeState:
+    hash: Optional[str] = None
+    last_publish: float = 0.0
+
+
+@dataclass
+class ChannelDecision:
+    should_publish: bool
+    delay_seconds: Optional[float]
+    reason: Optional[str] = None
+
+
+@dataclass
+class _PendingChannel:
+    forced: bool = False
+    respect_cadence: bool = False
+
+    def merge(self, *, forced: bool, respect_cadence: bool) -> None:
+        self.forced = self.forced or forced
+        self.respect_cadence = self.respect_cadence or respect_cadence
+
+    def clone(self) -> "_PendingChannel":
+        return _PendingChannel(
+            forced=self.forced,
+            respect_cadence=self.respect_cadence,
+        )
+
+
+class ChannelCadenceController:
+    """Centralised cadence evaluation for telemetry channels."""
+
+    def __init__(
+        self,
+        *,
+        monotonic: Callable[[], float],
+        hasher: TelemetryHasher,
+    ) -> None:
+        self._monotonic = monotonic
+        self._hasher = hasher
+        self._schedules: Dict[str, ChannelSchedule] = {}
+        self._state: Dict[str, ChannelRuntimeState] = {}
+
+    def configure(
+        self,
+        channel: str,
+        *,
+        interval: Optional[float],
+        forced_interval: Optional[float],
+        watchdog_seconds: Optional[float],
+    ) -> None:
+        self._schedules[channel] = ChannelSchedule(
+            interval=interval if interval and interval > 0 else None,
+            forced_interval=forced_interval if forced_interval and forced_interval > 0 else None,
+            watchdog_seconds=watchdog_seconds if watchdog_seconds and watchdog_seconds > 0 else None,
+        )
+        self._state.setdefault(channel, ChannelRuntimeState())
+
+    def reset_channel(self, channel: str) -> None:
+        if channel in self._state:
+            self._state[channel] = ChannelRuntimeState()
+
+    def reset_all(self) -> None:
+        for channel in list(self._state.keys()):
+            self._state[channel] = ChannelRuntimeState()
+
+    def get_schedule(self, channel: str) -> ChannelSchedule:
+        schedule = self._schedules.get(channel)
+        if schedule is None:
+            raise TelemetryConfigurationError(
+                f"Cadence schedule missing for channel '{channel}'"
+            )
+        return schedule
+
+    def evaluate(
+        self,
+        channel: str,
+        payload: Dict[str, Any],
+        *,
+        explicit_force: bool,
+        respect_cadence: bool,
+        allow_watchdog: bool,
+    ) -> ChannelDecision:
+        schedule = self._schedules.get(channel)
+        if schedule is None:
+            raise TelemetryConfigurationError(
+                f"Cadence schedule missing for channel '{channel}'"
+            )
+
+        state = self._state.setdefault(channel, ChannelRuntimeState())
+        now = self._monotonic()
+
+        forced_for_dedup = explicit_force
+
+        if allow_watchdog and schedule.watchdog_seconds:
+            if state.last_publish == 0.0:
+                forced_for_dedup = True
+            else:
+                elapsed = now - state.last_publish
+                if elapsed >= schedule.watchdog_seconds:
+                    forced_for_dedup = True
+
+        if explicit_force and respect_cadence:
+            constrained_interval = (
+                schedule.forced_interval
+                if schedule.forced_interval is not None
+                else schedule.interval
+            )
+            if constrained_interval and state.last_publish != 0.0:
+                elapsed = now - state.last_publish
+                if elapsed < constrained_interval:
+                    return ChannelDecision(
+                        should_publish=False,
+                        delay_seconds=constrained_interval - elapsed,
+                        reason="forced-rate",
+                    )
+
+        if schedule.interval and state.last_publish != 0.0 and not forced_for_dedup:
+            elapsed = now - state.last_publish
+            if elapsed < schedule.interval:
+                return ChannelDecision(
+                    should_publish=False,
+                    delay_seconds=schedule.interval - elapsed,
+                    reason="cadence",
+                )
+
+        payload_hash = self._hasher.hash_payload(payload)
+        if not forced_for_dedup and payload_hash == state.hash:
+            return ChannelDecision(
+                should_publish=False,
+                delay_seconds=None,
+                reason="dedup",
+            )
+
+        state.hash = payload_hash
+        state.last_publish = now
+
+        return ChannelDecision(
+            should_publish=True,
+            delay_seconds=None,
+            reason="ready",
+        )
 
 
 DEFAULT_POLL_SPECS: tuple[PollSpec, ...] = (
@@ -152,6 +301,10 @@ class TelemetryPublisher:
             name: _ChannelPublishState() for name in self._channel_topics
         }
         self._hasher = TelemetryHasher()
+        self._cadence_controller = ChannelCadenceController(
+            monotonic=time.monotonic,
+            hasher=self._hasher,
+        )
         self._retain_next_publish: Set[str] = {"overview", "telemetry"}
         self._force_error_retain: Optional[bool] = None
         self._overview_error_snapshot_active = False
@@ -166,11 +319,7 @@ class TelemetryPublisher:
         events_interval = None
         if self._cadence.events_max_per_second > 0:
             events_interval = 1.0 / float(self._cadence.events_max_per_second)
-        self._channel_caps = {
-            "overview": None,
-            "telemetry": self._telemetry_interval,
-            "events": events_interval,
-        }
+        self._events_interval = events_interval
         self._include_fields = _normalise_fields(config.include_fields)
         self._exclude_fields = _normalise_fields(config.exclude_fields)
         self._subscription_objects: dict[str, Optional[list[str]]] = (
@@ -190,8 +339,7 @@ class TelemetryPublisher:
         self._callback_registered = False
         self._pending_payload: Optional[Dict[str, Any]] = None
         self._pending_timer_handle: Optional[asyncio.TimerHandle] = None
-        self._pending_forced_channels: Set[str] = set()
-        self._pending_cadence_forced: Set[str] = set()
+        self._pending_channels: Dict[str, _PendingChannel] = {}
         self._force_full_channels_after_reset: Set[str] = set()
         self._active_rate_request: Optional[_RateRequest] = None
         self._last_printer_state: Optional[str] = None
@@ -268,8 +416,7 @@ class TelemetryPublisher:
         if self._last_payload_snapshot is not None:
             self._retain_next_publish.update({"overview", "telemetry"})
         self._cancel_pending_timer()
-        self._pending_forced_channels.clear()
-        self._pending_cadence_forced.clear()
+        self._pending_channels.clear()
         resubscribe_task = self._resubscribe_task
         if resubscribe_task is not None:
             resubscribe_task.cancel()
@@ -411,39 +558,40 @@ class TelemetryPublisher:
         last_sent = 0.0
 
         pending: Optional[Dict[str, Any]] = None
-        pending_forced: Set[str] = set()
-        pending_cadence_forced: Set[str] = set()
+        pending_overrides: Dict[str, _PendingChannel] = {}
 
         while not self._stop_event.is_set():
             if pending is None:
                 if self._pending_payload is not None:
                     pending = copy.deepcopy(self._pending_payload)
-                    pending_forced = set(self._pending_forced_channels)
-                    pending_cadence_forced = set(self._pending_cadence_forced)
+                    pending_overrides = {
+                        channel: entry.clone()
+                        for channel, entry in self._pending_channels.items()
+                    }
                     self._pending_payload = None
-                    self._pending_forced_channels.clear()
-                    self._pending_cadence_forced.clear()
+                    self._pending_channels.clear()
                     self._cancel_pending_timer()
                 else:
                     heartbeat_payload = self._prepare_heartbeat_payload()
                     if heartbeat_payload is not None:
                         pending = heartbeat_payload
-                        pending_forced = {"overview"}
-                        pending_cadence_forced = set()
+                        pending_overrides = {
+                            "overview": _PendingChannel(forced=True)
+                        }
                     else:
                         await self._event.wait()
                         self._event.clear()
                         pending = self._gather_payloads()
-                        pending_forced = set()
-                        pending_cadence_forced = set()
+                        pending_overrides = {}
                         if pending is None:
                             continue
             else:
                 heartbeat_payload = self._prepare_heartbeat_payload()
                 if heartbeat_payload is not None:
                     pending = heartbeat_payload
-                    pending_forced = {"overview"}
-                    pending_cadence_forced = set()
+                    pending_overrides = {
+                        "overview": _PendingChannel(forced=True)
+                    }
 
             while not self._stop_event.is_set():
                 now = loop.time()
@@ -460,7 +608,7 @@ class TelemetryPublisher:
                 self._event.clear()
                 pending = self._gather_payloads(pending)
                 if pending is None:
-                    pending_forced = set()
+                    pending_overrides = {}
                     break
 
             if pending is None:
@@ -468,23 +616,20 @@ class TelemetryPublisher:
 
             pending = self._gather_payloads(pending)
             if pending is None:
-                pending_forced = set()
-                pending_cadence_forced = set()
+                pending_overrides = {}
                 continue
 
             try:
                 self._process_payload(
                     pending,
-                    forced_channels=pending_forced,
-                    cadence_forced=pending_cadence_forced,
+                    overrides=pending_overrides,
                 )
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception("Telemetry pipeline failed")
 
             last_sent = loop.time()
             pending = self._gather_payloads()
-            pending_forced = set()
-            pending_cadence_forced = set()
+            pending_overrides = {}
 
         LOGGER.debug("TelemetryPublisher loop terminated")
 
@@ -510,8 +655,7 @@ class TelemetryPublisher:
         self,
         payload: Dict[str, Any],
         *,
-        forced_channels: Optional[Iterable[str]] = None,
-        cadence_forced: Optional[Iterable[str]] = None,
+        overrides: Optional[Dict[str, _PendingChannel]] = None,
     ) -> None:
         self._maybe_expire_watch_window()
         self._orchestrator.ingest(payload)
@@ -543,8 +687,13 @@ class TelemetryPublisher:
         elif not self._bootstrapped:
             self._last_payload_snapshot = None
 
-        forced_channels_set = set(forced_channels or ())
-        cadence_forced_set = set(cadence_forced or ())
+        overrides = overrides or {}
+        forced_channels_set = {
+            channel
+            for channel, entry in overrides.items()
+            if entry.forced
+        }
+        forced_channels_set.update(self._force_full_channels_after_reset)
 
         frames = self._orchestrator.build_payloads(forced_channels=forced_channels_set)
         if not frames:
@@ -575,21 +724,38 @@ class TelemetryPublisher:
             if channel in self._force_full_channels_after_reset:
                 frame.forced = True
 
-            should_publish, delay = self._should_publish_channel(
+            override = overrides.get(channel)
+            override_forced = override.forced if override else False
+            override_respect_cadence = override.respect_cadence if override else False
+            force_due_to_reset = channel in self._force_full_channels_after_reset
+
+            decision = self._cadence_controller.evaluate(
                 channel,
                 frame.payload,
-                now_monotonic,
-                forced=frame.forced,
-                force_respects_cadence=channel in cadence_forced_set,
+                explicit_force=frame.forced or override_forced or force_due_to_reset,
+                respect_cadence=override_respect_cadence,
+                allow_watchdog=(channel == "telemetry"),
             )
-            if not should_publish:
-                if delay is not None:
+
+            if not decision.should_publish:
+                if decision.delay_seconds is not None:
                     deferred = True
-                    if min_delay is None or delay < min_delay:
-                        min_delay = delay
-                    self._pending_forced_channels.add(channel)
-                    self._pending_cadence_forced.add(channel)
+                    if min_delay is None or decision.delay_seconds < min_delay:
+                        min_delay = decision.delay_seconds
+                    pending_entry = self._pending_channels.get(channel)
+                    if pending_entry is None:
+                        pending_entry = _PendingChannel()
+                        self._pending_channels[channel] = pending_entry
+                    enforce_cadence = decision.reason in {"cadence", "forced-rate"}
+                    pending_entry.merge(
+                        forced=enforce_cadence,
+                        respect_cadence=enforce_cadence,
+                    )
+                else:
+                    self._pending_channels.pop(channel, None)
                 continue
+
+            self._pending_channels.pop(channel, None)
 
             envelope = self._wrap_envelope(
                 channel,
@@ -631,8 +797,6 @@ class TelemetryPublisher:
             if retain:
                 self._retain_next_publish.discard(channel)
             self._publish(channel, topic, envelope, retain=retain)
-            self._pending_forced_channels.discard(channel)
-            self._pending_cadence_forced.discard(channel)
             self._force_full_channels_after_reset.discard(channel)
 
         if deferred:
@@ -719,16 +883,16 @@ class TelemetryPublisher:
         previous_interval = self._telemetry_interval
 
         self._telemetry_interval = interval
-        self._channel_caps["telemetry"] = interval
         self._watch_window_expires = expires_at
         if interval > 0:
             self._telemetry_watchdog_seconds = max(300.0, interval * 5)
+        self._current_mode = mode
+        self._refresh_channel_schedules()
         self._orchestrator.set_telemetry_mode(
             mode=mode,
             max_hz=effective_hz,
             watch_window_expires=expires_at,
         )
-        self._current_mode = mode
 
         if LOGGER.isEnabledFor(logging.INFO):
             LOGGER.info(
@@ -742,10 +906,7 @@ class TelemetryPublisher:
             )
 
         for channel in ("telemetry", "overview"):
-            state = self._channel_state.get(channel)
-            if state:
-                state.hash = None
-                state.last_publish = 0.0
+            self._cadence_controller.reset_channel(channel)
 
         self._event.set()
         self._active_rate_request = _RateRequest(
@@ -756,6 +917,54 @@ class TelemetryPublisher:
             expires_at=expires_at,
         )
         return expires_at
+
+    def _refresh_channel_schedules(self) -> None:
+        overview_interval: Optional[float] = None
+        telemetry_interval = (
+            self._telemetry_interval if self._telemetry_interval and self._telemetry_interval > 0 else None
+        )
+        # Force cadence only tails the watch profile; once we drop back to idle we allow
+        # forced publishes to follow the broader idle cadence rather than remaining at 1 Hz.
+        if self._current_mode == "watch":
+            telemetry_forced_interval = (
+                self._watch_interval if self._watch_interval and self._watch_interval > 0 else None
+            )
+        else:
+            telemetry_forced_interval = (
+                telemetry_interval if telemetry_interval and telemetry_interval > 0 else None
+            )
+        telemetry_watchdog = (
+            self._telemetry_watchdog_seconds
+            if self._telemetry_watchdog_seconds and self._telemetry_watchdog_seconds > 0
+            else None
+        )
+        events_interval = (
+            self._events_interval if self._events_interval and self._events_interval > 0 else None
+        )
+
+        if "overview" in self._channel_topics:
+            self._cadence_controller.configure(
+                "overview",
+                interval=overview_interval,
+                forced_interval=None,
+                watchdog_seconds=None,
+            )
+
+        if "telemetry" in self._channel_topics:
+            self._cadence_controller.configure(
+                "telemetry",
+                interval=telemetry_interval,
+                forced_interval=telemetry_forced_interval,
+                watchdog_seconds=telemetry_watchdog,
+            )
+
+        if "events" in self._channel_topics:
+            self._cadence_controller.configure(
+                "events",
+                interval=events_interval,
+                forced_interval=None,
+                watchdog_seconds=None,
+            )
 
     def record_command_state(
         self,
@@ -805,59 +1014,6 @@ class TelemetryPublisher:
             document["raw"] = raw_json
 
         return document
-
-    def _should_publish_channel(
-        self,
-        channel: str,
-        payload: Dict[str, Any],
-        now_monotonic: float,
-        *,
-        forced: bool,
-        force_respects_cadence: bool,
-    ) -> tuple[bool, Optional[float]]:
-        state = self._channel_state[channel]
-
-        effective_forced = forced
-
-        if channel == "telemetry":
-            elapsed_since_publish = now_monotonic - state.last_publish
-            if state.last_publish == 0.0 or elapsed_since_publish >= self._telemetry_watchdog_seconds:
-                effective_forced = True
-
-        if (
-            channel == "telemetry"
-            and forced
-            and force_respects_cadence
-            and state.last_publish != 0.0
-        ):
-            force_cap_interval = self._watch_interval or 1.0
-            if force_cap_interval <= 0:
-                force_cap_interval = 1.0
-            elapsed = now_monotonic - state.last_publish
-            if elapsed < force_cap_interval:
-                return False, force_cap_interval - elapsed
-
-        cadence_interval = self._channel_caps.get(channel)
-        if cadence_interval:
-            elapsed = now_monotonic - state.last_publish
-            if (
-                channel == "telemetry"
-                and forced
-                and force_respects_cadence
-                and state.last_publish != 0.0
-                and elapsed < cadence_interval
-            ):
-                return False, cadence_interval - elapsed
-            if not effective_forced and elapsed < cadence_interval:
-                return False, cadence_interval - elapsed
-
-        payload_hash = self._hasher.hash_payload(payload)
-        if not effective_forced and payload_hash == state.hash:
-            return False, None
-
-        state.hash = payload_hash
-        state.last_publish = now_monotonic
-        return True, None
 
     def _publish(
         self,
@@ -965,16 +1121,13 @@ class TelemetryPublisher:
         )
         self._current_mode = "idle"
         self._telemetry_interval = self._idle_interval
-        self._channel_caps["telemetry"] = self._telemetry_interval
         self._telemetry_watchdog_seconds = self._cadence.telemetry_watchdog_seconds
         self._watch_window_expires = None
         self._bootstrapped = False
-        for state in self._channel_state.values():
-            state.hash = None
-            state.last_publish = 0.0
+        self._cadence_controller.reset_all()
+        self._refresh_channel_schedules()
         self._pending_payload = None
-        self._pending_forced_channels.clear()
-        self._pending_cadence_forced.clear()
+        self._pending_channels.clear()
         self._last_payload_snapshot = None
         self._last_overview_publish_time = 0.0
         self._last_overview_status = "Idle"
@@ -993,8 +1146,14 @@ class TelemetryPublisher:
 
         if previous_snapshot is not None:
             self._pending_payload = copy.deepcopy(previous_snapshot)
-            self._pending_forced_channels.update({"overview", "telemetry"})
-            self._pending_cadence_forced.difference_update({"overview", "telemetry"})
+            self._pending_channels["overview"] = _PendingChannel(
+                forced=True,
+                respect_cadence=False,
+            )
+            self._pending_channels["telemetry"] = _PendingChannel(
+                forced=True,
+                respect_cadence=False,
+            )
             self._last_payload_snapshot = copy.deepcopy(previous_snapshot)
             self._event.set()
         self._klippy_ready_applied = False
@@ -1074,8 +1233,12 @@ class TelemetryPublisher:
         try:
             self._process_payload(
                 status_payload,
-                forced_channels={"overview"},
-                cadence_forced=(),
+                overrides={
+                    "overview": _PendingChannel(
+                        forced=True,
+                        respect_cadence=False,
+                    )
+                },
             )
         finally:
             self._orchestrator.store.restore_state(snapshot)
