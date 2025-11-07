@@ -153,7 +153,7 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
 
     orchestrator = TelemetryOrchestrator(clock=clock)
     orchestrator.ingest(baseline_snapshot)
-    orchestrator.set_telemetry_mode(
+    orchestrator.set_metrics_mode(
         mode="watch",
         max_hz=1.0,
         watch_window_expires=datetime(2025, 10, 10, 16, 44, 3, tzinfo=timezone.utc),
@@ -161,14 +161,14 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
 
     orchestrator.events.record_command_state(
         command_id="cmd-123",
-        command_type="telemetry:set-rate",
+        command_type="metrics:set-rate",
         state="completed",
         session_id="history-4062",
     )
 
     frames = orchestrator.build_payloads()
 
-    assert set(frames.keys()) == {"overview", "telemetry", "events"}
+    assert set(frames.keys()) == {"overview", "metrics", "events"}
 
     overview_frame = frames["overview"]
     assert overview_frame.channel == "overview"
@@ -178,11 +178,11 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
     assert overview_body["flags"]["watchWindowActive"] is True
     assert overview_body["job"]["progressPercent"] == pytest.approx(12.0, rel=1e-3)
 
-    telemetry_frame = frames["telemetry"]
-    telemetry = telemetry_frame.payload
-    assert telemetry["cadence"]["mode"] == "watch"
-    assert telemetry["cadence"]["maxHz"] == 1.0
-    assert len(telemetry["sensors"]) == 3
+    metrics_frame = frames["metrics"]
+    metrics = metrics_frame.payload
+    assert metrics["cadence"]["mode"] == "watch"
+    assert metrics["cadence"]["maxHz"] == 1.0
+    assert len(metrics["sensors"]) == 3
 
     events_frame = frames["events"]
     events = events_frame.payload
@@ -234,7 +234,7 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
     orchestrator.ingest(baseline_snapshot)
 
     first_frames = orchestrator.build_payloads()
-    sensors_first = first_frames["telemetry"].payload["sensors"]
+    sensors_first = first_frames["metrics"].payload["sensors"]
     extruder_first = next(sensor for sensor in sensors_first if sensor["channel"] == "extruder")
     first_last_updated = extruder_first["lastUpdatedUtc"]
 
@@ -244,8 +244,8 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
     }
 
     orchestrator.ingest(noise_update)
-    second_frames = orchestrator.build_payloads(forced_channels=["telemetry"])
-    sensors_second = second_frames["telemetry"].payload["sensors"]
+    second_frames = orchestrator.build_payloads(forced_channels=["metrics"])
+    sensors_second = second_frames["metrics"].payload["sensors"]
     extruder_second = next(sensor for sensor in sensors_second if sensor["channel"] == "extruder")
     assert extruder_second["lastUpdatedUtc"] == first_last_updated
 
@@ -256,7 +256,7 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
 
     orchestrator.ingest(change_update)
     third_frames = orchestrator.build_payloads()
-    sensors_third = third_frames["telemetry"].payload["sensors"]
+    sensors_third = third_frames["metrics"].payload["sensors"]
     extruder_third = next(sensor for sensor in sensors_third if sensor["channel"] == "extruder")
     assert extruder_third["lastUpdatedUtc"] != first_last_updated
 
@@ -266,7 +266,7 @@ def test_watch_window_flag_reflects_idle_mode(baseline_snapshot: dict) -> None:
     clock = FakeClock(now, now, now, now)
     orchestrator = TelemetryOrchestrator(clock=clock)
     orchestrator.ingest(baseline_snapshot)
-    orchestrator.set_telemetry_mode(
+    orchestrator.set_metrics_mode(
         mode="idle", max_hz=0.033, watch_window_expires=None
     )
 
@@ -291,5 +291,5 @@ def test_replay_stream_produces_progress() -> None:
     assert job_info.get("name")
     assert job_info.get("progress", {}).get("elapsedSeconds", 0) > 0
 
-    telemetry_payload = frames["telemetry"].payload
-    assert telemetry_payload["cadence"]["mode"] == "idle"
+    metrics_payload = frames["metrics"].payload
+    assert metrics_payload["cadence"]["mode"] == "idle"

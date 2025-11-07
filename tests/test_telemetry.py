@@ -510,8 +510,8 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, "token")
     ]
 
-    expected_qos = {"overview": 1, "telemetry": 0}
-    for channel in ("overview", "telemetry"):
+    expected_qos = {"overview": 1, "metrics": 0}
+    for channel in ("overview", "metrics"):
         topic = f"owl/printers/device-123/{channel}"
         assert topic in messages, f"Missing channel {channel}"
         first_message = messages[topic][0]
@@ -527,11 +527,11 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         assert document.get("_seq") is not None
         assert "raw" not in document, "Raw field should be excluded by default"
 
-    telemetry_doc = _decode(messages["owl/printers/device-123/telemetry"][0])
-    telemetry_body = telemetry_doc.get("telemetry")
-    assert isinstance(telemetry_body, dict)
-    sensors = telemetry_body.get("sensors")
-    assert isinstance(sensors, list) and sensors, "Expected telemetry sensor payload"
+    metrics_doc = _decode(messages["owl/printers/device-123/metrics"][0])
+    metrics_body = metrics_doc.get("metrics")
+    assert isinstance(metrics_body, dict)
+    sensors = metrics_body.get("sensors")
+    assert isinstance(sensors, list) and sensors, "Expected metrics sensor payload"
     extruder_sensor = next(
         (sensor for sensor in sensors if sensor.get("channel") == "extruder"),
         None,
@@ -574,23 +574,23 @@ async def test_pipeline_emits_schema_envelopes() -> None:
     await publisher.stop()
 
     messages = mqtt.by_topic()
-    telemetry_topic = "owl/printers/device-123/telemetry"
+    metrics_topic = "owl/printers/device-123/metrics"
     overview_topic = "owl/printers/device-123/overview"
 
-    assert telemetry_topic in messages, "Expected telemetry channel"
+    assert metrics_topic in messages, "Expected metrics channel"
     assert overview_topic in messages, "Expected overview channel"
     assert "owl/printers/device-123/sensors" not in messages
 
-    telemetry_envelope = _decode(messages[telemetry_topic][0])
-    assert telemetry_envelope["_schema"] == 1
-    assert telemetry_envelope["kind"] == "full"
-    assert telemetry_envelope["_origin"] == EXPECTED_ORIGIN
-    assert telemetry_envelope.get("telemetry")
-    cadence = telemetry_envelope["telemetry"].get("cadence")
+    metrics_envelope = _decode(messages[metrics_topic][0])
+    assert metrics_envelope["_schema"] == 1
+    assert metrics_envelope["kind"] == "full"
+    assert metrics_envelope["_origin"] == EXPECTED_ORIGIN
+    assert metrics_envelope.get("metrics")
+    cadence = metrics_envelope["metrics"].get("cadence")
     assert isinstance(cadence, dict)
     assert cadence.get("mode") == "idle"
 
-    sensors = telemetry_envelope["telemetry"].get("sensors")
+    sensors = metrics_envelope["metrics"].get("sensors")
     assert isinstance(sensors, list) and sensors
 
     overview_envelope = _decode(messages[overview_topic][0])
@@ -815,7 +815,7 @@ async def test_publisher_emits_events_channel() -> None:
     # Manually queue an event to ensure the publisher forwards orchestrator events.
     publisher._orchestrator.events.record_command_state(
         command_id="cmd-123",
-        command_type="telemetry:set-rate",
+    command_type="metrics:set-rate",
         state="completed",
         session_id="history-1",
     )
@@ -1162,9 +1162,9 @@ async def test_polling_fetches_unsubscribed_objects() -> None:
     await asyncio.sleep(0.1)
 
     topics = mqtt.by_topic()
-    assert topics, f"Expected telemetry replay topics, found: {topics}"
+    assert topics, f"Expected metrics replay topics, found: {topics}"
 
-    replay_messages = topics.get("owl/printers/device-123/telemetry")
+    replay_messages = topics.get("owl/printers/device-123/metrics")
     polled_objects = next(
         (
             entry
@@ -1229,16 +1229,16 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
     await asyncio.sleep(0.1)
     await publisher.stop()
 
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
-    assert telemetry_messages, "Expected telemetry publish after heater ramp"
-    assert len(telemetry_messages) == 1
+    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
+    assert metrics_messages, "Expected metrics publish after heater ramp"
+    assert len(metrics_messages) == 1
 
-    document = _decode(telemetry_messages[0])
+    document = _decode(metrics_messages[0])
     assert document.get("_seq", 0) > 1
 
-    telemetry_body = document.get("telemetry")
-    assert isinstance(telemetry_body, dict)
-    sensors = telemetry_body.get("sensors")
+    metrics_body = document.get("metrics")
+    assert isinstance(metrics_body, dict)
+    sensors = metrics_body.get("sensors")
     assert isinstance(sensors, list)
     extruder_sensor = next(
         sensor for sensor in sensors if sensor.get("channel") == "extruder"
@@ -1428,13 +1428,13 @@ async def test_temperature_target_preserved_across_updates() -> None:
     await publisher.stop()
 
     # Verify the target was preserved
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
-    assert telemetry_messages, "Expected telemetry updates"
+    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
+    assert metrics_messages, "Expected metrics updates"
 
-    document = _decode(telemetry_messages[-1])
-    telemetry_body = document.get("telemetry")
-    assert isinstance(telemetry_body, dict)
-    sensors = telemetry_body.get("sensors")
+    document = _decode(metrics_messages[-1])
+    metrics_body = document.get("metrics")
+    assert isinstance(metrics_body, dict)
+    sensors = metrics_body.get("sensors")
     assert isinstance(sensors, list)
 
     def _find(channel: str) -> Dict[str, Any]:
@@ -1491,7 +1491,7 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
 
     await asyncio.sleep(0.1)
 
-    first_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
+    first_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
     assert not first_messages, "Expected fractional change to be suppressed by rounding"
 
     await moonraker.emit(
@@ -1510,13 +1510,13 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
     await asyncio.sleep(0.1)
     await publisher.stop()
 
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
-    assert telemetry_messages, "Expected integer-scale change to publish telemetry"
+    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
+    assert metrics_messages, "Expected integer-scale change to publish metrics"
 
-    document = _decode(telemetry_messages[-1])
-    telemetry_body = document.get("telemetry")
-    assert isinstance(telemetry_body, dict)
-    sensors = telemetry_body.get("sensors")
+    document = _decode(metrics_messages[-1])
+    metrics_body = document.get("metrics")
+    assert isinstance(metrics_body, dict)
+    sensors = metrics_body.get("sensors")
     assert isinstance(sensors, list)
     extruder_sensor = next(
         sensor for sensor in sensors if sensor.get("channel") == "extruder"
@@ -1578,13 +1578,13 @@ async def test_idle_cadence_flushes_latest_payload() -> None:
     await asyncio.sleep(2.5)
     await publisher.stop()
 
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
-    assert telemetry_messages, "Expected deferred payload to flush"
+    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
+    assert metrics_messages, "Expected deferred payload to flush"
 
-    document = _decode(telemetry_messages[-1])
-    telemetry_body = document.get("telemetry")
-    assert isinstance(telemetry_body, dict)
-    sensors = telemetry_body.get("sensors")
+    document = _decode(metrics_messages[-1])
+    metrics_body = document.get("metrics")
+    assert isinstance(metrics_body, dict)
+    sensors = metrics_body.get("sensors")
     assert isinstance(sensors, list)
 
     extruder_sensor = next(
@@ -1669,7 +1669,7 @@ async def test_start_recovers_after_loop_termination() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restart_emits_current_telemetry_after_start() -> None:
+async def test_restart_emits_current_metrics_after_start() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
 
     moonraker = FakeMoonrakerClient(sample)
@@ -1681,12 +1681,12 @@ async def test_restart_emits_current_telemetry_after_start() -> None:
     await publisher.start()
     await asyncio.sleep(0.05)
 
-    initial_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
-    assert initial_messages, "Expected telemetry publish on first start"
+    initial_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
+    assert initial_messages, "Expected metrics publish on first start"
     initial_payload = _decode(initial_messages[-1])
-    initial_telemetry = initial_payload.get("telemetry", {})
+    initial_metrics = initial_payload.get("metrics", {})
     initial_extruder = next(
-        (sensor for sensor in initial_telemetry.get("sensors", []) if sensor.get("channel") == "extruder"),
+        (sensor for sensor in initial_metrics.get("sensors", []) if sensor.get("channel") == "extruder"),
         None,
     )
     assert initial_extruder is not None
@@ -1706,11 +1706,11 @@ async def test_restart_emits_current_telemetry_after_start() -> None:
     extruder_sensor = None
 
     while loop.time() < deadline:
-        replay_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry") or []
+        replay_messages = mqtt.by_topic().get("owl/printers/device-123/metrics") or []
         if replay_messages:
             latest_payload = _decode(replay_messages[-1])
-            telemetry_body = latest_payload.get("telemetry", {})
-            sensors = telemetry_body.get("sensors", [])
+            metrics_body = latest_payload.get("metrics", {})
+            sensors = metrics_body.get("sensors", [])
             candidate = next(
                 (sensor for sensor in sensors if sensor.get("channel") == "extruder"),
                 None,
@@ -1722,7 +1722,7 @@ async def test_restart_emits_current_telemetry_after_start() -> None:
                     break
         await asyncio.sleep(0.01)
 
-    assert extruder_sensor is not None, "Expected extruder sensor telemetry after restart"
+    assert extruder_sensor is not None, "Expected extruder sensor metrics after restart"
     assert extruder_sensor.get("target") == pytest.approx(0.0, abs=1e-6)
     assert extruder_sensor.get("value") == pytest.approx(45.04, rel=1e-3)
 
@@ -1748,18 +1748,18 @@ async def test_restart_replays_full_overview_when_state_unchanged() -> None:
 
     topics = mqtt.by_topic()
     overview_messages = topics.get("owl/printers/device-123/overview")
-    telemetry_messages = topics.get("owl/printers/device-123/telemetry")
+    metrics_messages = topics.get("owl/printers/device-123/metrics")
 
     assert overview_messages, "Expected overview publish after restart"
-    assert telemetry_messages, "Expected telemetry publish after restart"
+    assert metrics_messages, "Expected metrics publish after restart"
 
     overview_document = _decode(overview_messages[-1])
-    telemetry_document = _decode(telemetry_messages[-1])
+    metrics_document = _decode(metrics_messages[-1])
 
     assert overview_document.get("kind") == "full"
-    assert telemetry_document.get("kind") == "full"
+    assert metrics_document.get("kind") == "full"
     assert isinstance(overview_document.get("overview"), dict)
-    assert isinstance(telemetry_document.get("telemetry"), dict)
+    assert isinstance(metrics_document.get("metrics"), dict)
 
     assert not publisher._force_full_channels_after_reset  # type: ignore[attr-defined]
 
@@ -1841,7 +1841,7 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
-    expires_at = publisher.apply_telemetry_rate(
+    expires_at = publisher.apply_metrics_rate(
         mode="watch",
         max_hz=2.0,
         duration_seconds=90,
@@ -1855,7 +1855,7 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
 
     assert publisher._current_mode == "idle"
     assert publisher._watch_window_expires is None
-    schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
     assert schedule.interval == pytest.approx(
         publisher._idle_interval,
         rel=1e-6,
@@ -1874,11 +1874,11 @@ def test_forced_interval_tracks_watch_mode() -> None:
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     idle_interval = publisher._idle_interval
-    schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
     assert schedule.interval == pytest.approx(idle_interval, rel=1e-6)
     assert schedule.forced_interval == pytest.approx(idle_interval, rel=1e-6)
 
-    watch_expires = publisher.apply_telemetry_rate(
+    watch_expires = publisher.apply_metrics_rate(
         mode="watch",
         max_hz=1.0,
         duration_seconds=120,
@@ -1886,18 +1886,18 @@ def test_forced_interval_tracks_watch_mode() -> None:
     )
     assert watch_expires is not None
 
-    watch_schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    watch_schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
     assert watch_schedule.interval == pytest.approx(1.0, rel=1e-6)
     assert watch_schedule.forced_interval == pytest.approx(1.0, rel=1e-6)
 
-    publisher.apply_telemetry_rate(
+    publisher.apply_metrics_rate(
         mode="idle",
         max_hz=1.0 / idle_interval if idle_interval > 0 else 0.0,
         duration_seconds=None,
         requested_at=datetime.now(timezone.utc),
     )
 
-    reverted_schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    reverted_schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
     assert reverted_schedule.interval == pytest.approx(idle_interval, rel=1e-6)
     assert reverted_schedule.forced_interval == pytest.approx(idle_interval, rel=1e-6)
 
@@ -1930,8 +1930,8 @@ def test_reset_runtime_state_requeues_previous_snapshot() -> None:
 
     assert publisher._pending_payload == snapshot
     pending_channels = publisher._pending_channels  # type: ignore[attr-defined]
-    assert {"overview", "telemetry"}.issubset(pending_channels.keys())
-    for channel in ("overview", "telemetry"):
+    assert {"overview", "metrics"}.issubset(pending_channels.keys())
+    for channel in ("overview", "metrics"):
         entry = pending_channels[channel]
         assert entry.forced is True
         assert entry.respect_cadence is False
@@ -2027,7 +2027,7 @@ async def test_watch_cadence_enforces_max_rate() -> None:
     await publisher.start()
     await asyncio.sleep(0.1)
 
-    publisher.apply_telemetry_rate(
+    publisher.apply_metrics_rate(
         mode="watch",
         max_hz=1.0,
         duration_seconds=None,
@@ -2060,16 +2060,16 @@ async def test_watch_cadence_enforces_max_rate() -> None:
     )
     await asyncio.sleep(0.2)
 
-    telemetry_topic = "owl/printers/device-123/telemetry"
-    early_messages = mqtt.by_topic().get(telemetry_topic, [])
+    metrics_topic = "owl/printers/device-123/metrics"
+    early_messages = mqtt.by_topic().get(metrics_topic, [])
     assert (
         len(early_messages) <= 1
-    ), "Telemetry should respect the 1 Hz cadence and avoid bursts"
+    ), "Metrics should respect the 1 Hz cadence and avoid bursts"
 
     await asyncio.sleep(1.0)
 
-    later_messages = mqtt.by_topic().get(telemetry_topic, [])
-    assert len(later_messages) >= 2, "Telemetry should continue publishing after the cadence interval"
+    later_messages = mqtt.by_topic().get(metrics_topic, [])
+    assert len(later_messages) >= 2, "Metrics should continue publishing after the cadence interval"
 
     await publisher.stop()
 
@@ -2082,7 +2082,7 @@ def test_rate_request_reapplied_after_reset() -> None:
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
-    expires_at = publisher.apply_telemetry_rate(
+    expires_at = publisher.apply_metrics_rate(
         mode="watch",
         max_hz=2.0,
         duration_seconds=120,
@@ -2096,7 +2096,7 @@ def test_rate_request_reapplied_after_reset() -> None:
 
     # Reset cadence back to idle to mirror _reset_runtime_state side effects.
     publisher._current_mode = "idle"
-    publisher._telemetry_interval = publisher._idle_interval
+    publisher._metrics_interval = publisher._idle_interval
     publisher._watch_window_expires = None
     publisher._refresh_channel_schedules()
 
@@ -2106,7 +2106,7 @@ def test_rate_request_reapplied_after_reset() -> None:
     remaining_window = fake_now + timedelta(seconds=90)
 
     assert publisher._current_mode == "watch"
-    schedule = publisher._cadence_controller.get_schedule("telemetry")  # type: ignore[attr-defined]
+    schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
     assert schedule.interval == pytest.approx(
         expected_interval,
         rel=1e-6,
@@ -2133,18 +2133,18 @@ def test_forced_publish_respects_one_hz_cap() -> None:
     force_interval = publisher._watch_interval or 1.0
     if force_interval <= 0:
         force_interval = 1.0
-    publisher._telemetry_interval = force_interval
-    publisher._telemetry_watchdog_seconds = max(300.0, force_interval * 5)
+    publisher._metrics_interval = force_interval
+    publisher._metrics_watchdog_seconds = max(300.0, force_interval * 5)
     publisher._refresh_channel_schedules()
 
     controller = publisher._cadence_controller  # type: ignore[attr-defined]
-    state = controller._state["telemetry"]  # type: ignore[attr-defined]
+    state = controller._state["metrics"]  # type: ignore[attr-defined]
     state.last_publish = 100.0
     payload = {"sensors": []}
 
     controller._monotonic = lambda: 100.2  # type: ignore[attr-defined]
     decision = controller.evaluate(
-        "telemetry",
+    "metrics",
         payload,
         explicit_force=True,
         respect_cadence=True,
@@ -2157,7 +2157,7 @@ def test_forced_publish_respects_one_hz_cap() -> None:
 
     controller._monotonic = lambda: 100.2 + force_interval  # type: ignore[attr-defined]
     decision = controller.evaluate(
-        "telemetry",
+    "metrics",
         payload,
         explicit_force=True,
         respect_cadence=True,
@@ -2244,10 +2244,10 @@ async def test_notify_status_update_does_not_trigger_query():
     )
     assert moonraker.last_query_objects == initial_query_objects
 
-    # No new telemetry publish is expected when the contract does not change
+    # No new metrics publish is expected when the contract does not change
     assert (
-        mqtt.by_topic().get("owl/printers/device-123/telemetry") is None
-    ), "Expected no telemetry publish for unchanged contract"
+        mqtt.by_topic().get("owl/printers/device-123/metrics") is None
+    ), "Expected no metrics publish for unchanged contract"
 
     await publisher.stop()
 
@@ -2404,11 +2404,11 @@ async def test_raw_payload_excluded_by_default():
     await asyncio.sleep(0.2)
 
     # Verify messages were published
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
-    assert telemetry_messages, "Expected telemetry messages"
+    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
+    assert metrics_messages, "Expected metrics messages"
 
     # Check that raw field is NOT present
-    document = _decode(telemetry_messages[-1])
+    document = _decode(metrics_messages[-1])
     assert "raw" not in document, (
         "Raw field should be excluded by default to save bandwidth (~450 bytes)"
     )
@@ -2416,9 +2416,9 @@ async def test_raw_payload_excluded_by_default():
     # Verify normalized data is still present
     assert "deviceId" in document, "Expected device metadata"
     assert document.get("_origin") == EXPECTED_ORIGIN
-    telemetry_body = document.get("telemetry")
-    assert isinstance(telemetry_body, dict)
-    sensors = telemetry_body.get("sensors")
+    metrics_body = document.get("metrics")
+    assert isinstance(metrics_body, dict)
+    sensors = metrics_body.get("sensors")
     assert isinstance(sensors, list)
     assert any(sensor.get("channel") == "extruder" for sensor in sensors)
 
@@ -2445,19 +2445,19 @@ async def test_raw_payload_included_when_configured():
     await asyncio.sleep(0.2)
 
     # Verify messages were published
-    telemetry_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry")
-    assert telemetry_messages, "Expected telemetry messages"
+    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
+    assert metrics_messages, "Expected metrics messages"
 
     # Check that raw field IS present
-    document = _decode(telemetry_messages[-1])
+    document = _decode(metrics_messages[-1])
     assert "raw" in document, "Raw field should be included when configured"
     assert isinstance(document["raw"], str), "Raw field should be a JSON string"
 
     # Verify normalized data is also present
     assert document.get("_origin") == EXPECTED_ORIGIN
-    telemetry_body = document.get("telemetry")
-    assert isinstance(telemetry_body, dict)
-    sensors = telemetry_body.get("sensors")
+    metrics_body = document.get("metrics")
+    assert isinstance(metrics_body, dict)
+    sensors = metrics_body.get("sensors")
     assert isinstance(sensors, list) and sensors
     assert any(sensor.get("channel") == "extruder" for sensor in sensors)
 

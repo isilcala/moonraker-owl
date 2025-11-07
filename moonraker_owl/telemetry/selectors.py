@@ -224,7 +224,7 @@ class _SensorState:
     last_updated: datetime
 
 
-class TelemetrySelector:
+class MetricsSelector:
     def __init__(self) -> None:
         self._sensor_state: Dict[str, _SensorState] = {}
         self._last_contract_hash: Optional[str] = None

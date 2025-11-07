@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, Optional, Set
 from ..config import TelemetryCadenceConfig
 from ..version import __version__
 from .events import EventCollector
-from .selectors import EventsSelector, OverviewSelector, TelemetrySelector
+from .selectors import EventsSelector, MetricsSelector, OverviewSelector
 from .state_store import MoonrakerStateStore, MoonrakerStoreState
 from .trackers import HeaterMonitor, PrintSessionTracker
 
@@ -55,14 +55,14 @@ class TelemetryOrchestrator:
         self.events = EventCollector()
 
         self.overview_selector = OverviewSelector(heartbeat_seconds=heartbeat)
-        self.telemetry_selector = TelemetrySelector()
+        self.metrics_selector = MetricsSelector()
         self.events_selector = EventsSelector(
             max_per_second=self._cadence.events_max_per_second,
             max_per_minute=self._cadence.events_max_per_minute,
         )
 
-        self._telemetry_mode = "idle"
-        self._telemetry_max_hz = 0.033
+        self._metrics_mode = "idle"
+        self._metrics_max_hz = 0.033
         self._watch_window_expires: Optional[datetime] = None
 
     def reset(self, *, snapshot: Optional[MoonrakerStoreState] = None) -> None:
@@ -70,24 +70,31 @@ class TelemetryOrchestrator:
         if snapshot is not None:
             self.store.restore_state(snapshot)
         self.overview_selector.reset()
-        self.telemetry_selector.reset()
+        self.metrics_selector.reset()
         self.events.reset()
         self.session_tracker = PrintSessionTracker()
         self.heater_monitor = HeaterMonitor()
-        self._telemetry_mode = "idle"
-        self._telemetry_max_hz = 0.033
+        self._metrics_mode = "idle"
+        self._metrics_max_hz = 0.033
         self._watch_window_expires = None
 
     def ingest(self, payload: Dict[str, Any]) -> None:
         self.store.ingest(payload)
         self.heater_monitor.refresh(self.store)
 
+    def set_metrics_mode(
+        self, *, mode: str, max_hz: float, watch_window_expires: Optional[datetime]
+    ) -> None:
+        self._metrics_mode = mode
+        self._metrics_max_hz = max_hz
+        self._watch_window_expires = watch_window_expires
+
     def set_telemetry_mode(
         self, *, mode: str, max_hz: float, watch_window_expires: Optional[datetime]
     ) -> None:
-        self._telemetry_mode = mode
-        self._telemetry_max_hz = max_hz
-        self._watch_window_expires = watch_window_expires
+        """Backward-compatible wrapper for the legacy telemetry channel name."""
+
+        self.set_metrics_mode(mode=mode, max_hz=max_hz, watch_window_expires=watch_window_expires)
 
     @property
     def origin(self) -> str:
@@ -100,6 +107,9 @@ class TelemetryOrchestrator:
     ) -> Dict[str, ChannelPayload]:
         observed_at = self._clock()
         forced: Set[str] = set(forced_channels or ())
+        if "telemetry" in forced:
+            forced.discard("telemetry")
+            forced.add("metrics")
         session = self.session_tracker.compute(self.store)
 
         overview_payload = self.overview_selector.build(
@@ -108,13 +118,13 @@ class TelemetryOrchestrator:
             self.heater_monitor,
             observed_at,
         )
-        telemetry_payload = self.telemetry_selector.build(
+        metrics_payload = self.metrics_selector.build(
             self.store,
-            mode=self._telemetry_mode,
-            max_hz=self._telemetry_max_hz,
+            mode=self._metrics_mode,
+            max_hz=self._metrics_max_hz,
             watch_window_expires=self._watch_window_expires,
             observed_at=observed_at,
-            force_emit="telemetry" in forced,
+            force_emit="metrics" in forced,
         )
         events_payload = self.events_selector.build(
             events=self.events.drain(),
@@ -124,9 +134,9 @@ class TelemetryOrchestrator:
         frames: Dict[str, ChannelPayload] = {}
         if overview_payload:
             cadence = overview_payload.setdefault("cadence", {})
-            cadence["watchWindowActive"] = self._telemetry_mode != "idle"
+            cadence["watchWindowActive"] = self._metrics_mode != "idle"
             overview_payload.setdefault("flags", {})["watchWindowActive"] = (
-                self._telemetry_mode != "idle"
+                self._metrics_mode != "idle"
             )
             frames["overview"] = ChannelPayload(
                 channel="overview",
@@ -136,13 +146,13 @@ class TelemetryOrchestrator:
                 forced="overview" in forced,
             )
 
-        if telemetry_payload:
-            frames["telemetry"] = ChannelPayload(
-                channel="telemetry",
-                payload=telemetry_payload,
+        if metrics_payload:
+            frames["metrics"] = ChannelPayload(
+                channel="metrics",
+                payload=metrics_payload,
                 session_id=session.session_id,
                 observed_at=observed_at,
-                forced="telemetry" in forced,
+                forced="metrics" in forced,
             )
 
         if events_payload:

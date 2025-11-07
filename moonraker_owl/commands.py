@@ -304,8 +304,8 @@ class CommandProcessor:
             )
 
     async def _execute(self, message: CommandMessage) -> Optional[Dict[str, Any]]:
-        if message.command == "telemetry:set-rate":
-            return self._execute_telemetry_set_rate(message)
+        if message.command == "metrics:set-rate":
+            return self._execute_metrics_set_rate(message)
 
         try:
             await self._moonraker.execute_print_action(message.command)
@@ -322,11 +322,11 @@ class CommandProcessor:
 
         return {"command": message.command}
 
-    def _execute_telemetry_set_rate(self, message: CommandMessage) -> Dict[str, Any]:
+    def _execute_metrics_set_rate(self, message: CommandMessage) -> Dict[str, Any]:
         if self._telemetry is None:
             raise CommandProcessingError(
                 "Telemetry publisher unavailable",
-                code="telemetry_unavailable",
+                code="metrics_unavailable",
                 command_id=message.command_id,
             )
 
@@ -369,7 +369,7 @@ class CommandProcessor:
             computed_duration = int((expires_override - baseline).total_seconds())
             duration_seconds = max(0, computed_duration)
 
-        expires_at = self._telemetry.apply_telemetry_rate(
+            expires_at = self._telemetry.apply_metrics_rate(
             mode=mode,
             max_hz=max_hz,
             duration_seconds=duration_seconds,
