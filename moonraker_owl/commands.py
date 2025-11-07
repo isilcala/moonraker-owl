@@ -364,12 +364,13 @@ class CommandProcessor:
                 duration_seconds = None
 
         expires_override = _parse_iso8601(params.get("expiresAt"))
+        expires_at: Optional[datetime] = None
         if expires_override is not None:
             baseline = requested_at or datetime.now(timezone.utc)
             computed_duration = int((expires_override - baseline).total_seconds())
             duration_seconds = max(0, computed_duration)
 
-            expires_at = self._telemetry.apply_metrics_rate(
+        expires_at = self._telemetry.apply_metrics_rate(
             mode=mode,
             max_hz=max_hz,
             duration_seconds=duration_seconds,

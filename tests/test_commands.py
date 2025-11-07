@@ -2,6 +2,7 @@
 
 import json
 from configparser import ConfigParser
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -73,6 +74,8 @@ class FakeMQTT:
 class FakeTelemetry:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
+        self.applied: list[dict[str, Any]] = []
+        self.next_expires_at: Optional[datetime] = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
     def record_command_state(
         self,
@@ -92,6 +95,24 @@ class FakeTelemetry:
                 "session_id": session_id,
             }
         )
+
+    def apply_metrics_rate(
+        self,
+        *,
+        mode: str,
+        max_hz: float,
+        duration_seconds: Optional[int],
+        requested_at: Optional[datetime],
+    ) -> Optional[datetime]:
+        self.applied.append(
+            {
+                "mode": mode,
+                "max_hz": max_hz,
+                "duration_seconds": duration_seconds,
+                "requested_at": requested_at,
+            }
+        )
+        return self.next_expires_at
 
 
 @pytest.fixture
@@ -316,6 +337,70 @@ async def test_command_processor_replays_cached_ack_for_duplicate(config):
     assert qos == 1
     assert retain is False
     assert moonraker.actions == ["pause"]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_command_processor_handles_metrics_set_rate(config):
+    mqtt = FakeMQTT()
+    telemetry = FakeTelemetry()
+    telemetry.next_expires_at = datetime(2025, 1, 1, 13, 0, tzinfo=timezone.utc)
+    processor = CommandProcessor(
+        config,
+        FakeMoonraker(),
+        mqtt,
+        telemetry=telemetry,
+    )
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-metrics",
+        "command": "metrics:set-rate",
+        "parameters": {
+            "mode": "watch",
+            "maxHz": 5.0,
+            "durationSeconds": 120,
+            "issuedAt": "2025-01-01T12:00:00Z",
+        },
+    }
+
+    await mqtt.emit(
+        "owl/printers/device-123/commands/metrics:set-rate",
+        message,
+    )
+
+    assert len(telemetry.applied) == 1
+    apply_args = telemetry.applied[0]
+    assert apply_args["mode"] == "watch"
+    assert apply_args["max_hz"] == pytest.approx(5.0)
+    assert apply_args["duration_seconds"] == 120
+    assert apply_args["requested_at"] == datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    completed_records = [r for r in telemetry.records if r["state"] == "completed"]
+    assert completed_records
+    completed = completed_records[-1]
+    assert completed["command_type"] == "metrics:set-rate"
+    details = completed["details"]
+    assert details is not None
+    assert details["mode"] == "watch"
+    assert details["maxHz"] == 5.0
+    assert details["durationSeconds"] == 120
+    assert details["watchWindowExpiresUtc"] == "2025-01-01T13:00:00+00:00"
+
+    assert len(mqtt.published) == 2
+    first_topic, first_payload, _, _ = mqtt.published[0]
+    assert first_topic == "owl/printers/device-123/acks/metrics%3Aset-rate"
+    first_ack = json.loads(first_payload.decode("utf-8"))
+    assert first_ack["status"] == "accepted"
+    assert first_ack["stage"] == "dispatch"
+
+    second_topic, second_payload, _, _ = mqtt.published[1]
+    assert second_topic == "owl/printers/device-123/acks/metrics%3Aset-rate"
+    second_ack = json.loads(second_payload.decode("utf-8"))
+    assert second_ack["status"] == "completed"
+    assert second_ack["stage"] == "execution"
 
     await processor.stop()
 
