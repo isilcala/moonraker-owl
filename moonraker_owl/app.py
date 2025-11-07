@@ -83,6 +83,7 @@ class MoonrakerOwlApp:
             self._handle_telemetry_status_update
         )
         self._status_listener_registered = False
+        self._moonraker_recovery_lock: Optional[asyncio.Lock] = None
 
     async def run(self) -> None:
         """Run the main supervisor loop.
@@ -92,6 +93,7 @@ class MoonrakerOwlApp:
 
         self._loop = asyncio.get_running_loop()
         self._shutdown_event = asyncio.Event()
+        self._moonraker_recovery_lock = asyncio.Lock()
 
         LOGGER.info("moonraker-owl starting with config: %s", self._config.path)
         started = await self._start_services()
@@ -405,33 +407,39 @@ class MoonrakerOwlApp:
         self._moonraker_failures = 0
         await self._health.update("moonraker", True, None)
 
-        if not self._moonraker_breaker_tripped and self._telemetry_ready:
-            return
+        lock = self._moonraker_recovery_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._moonraker_recovery_lock = lock
 
-        try:
-            runtime_ready = await self._restart_components()
-        except Exception:  # pragma: no cover - defensive logging
-            LOGGER.exception("Failed to restart runtime after Moonraker recovery")
-            await self._transition_state(
-                AgentState.DEGRADED,
-                detail="moonraker recovered but restart failed",
-            )
-            return
+        async with lock:
+            if not self._moonraker_breaker_tripped and self._telemetry_ready:
+                return
 
-        if runtime_ready:
-            self._moonraker_breaker_tripped = False
-            await self._transition_state(
-                AgentState.ACTIVE,
-                detail="moonraker recovered",
-            )
-            self._queue_presence_publish(
-                "online", retain=True, detail="agent active"
-            )
-        else:
-            await self._transition_state(
-                AgentState.DEGRADED,
-                detail="moonraker recovered; runtime still initialising",
-            )
+            try:
+                runtime_ready = await self._restart_components()
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.exception("Failed to restart runtime after Moonraker recovery")
+                await self._transition_state(
+                    AgentState.DEGRADED,
+                    detail="moonraker recovered but restart failed",
+                )
+                return
+
+            if runtime_ready:
+                self._moonraker_breaker_tripped = False
+                await self._transition_state(
+                    AgentState.ACTIVE,
+                    detail="moonraker recovered",
+                )
+                self._queue_presence_publish(
+                    "online", retain=True, detail="agent active"
+                )
+            else:
+                await self._transition_state(
+                    AgentState.DEGRADED,
+                    detail="moonraker recovered; runtime still initialising",
+                )
 
     async def _publish_moonraker_degraded(self, reason: str) -> None:
         if self._telemetry_publisher is None:

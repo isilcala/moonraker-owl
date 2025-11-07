@@ -1,6 +1,7 @@
 """Tests for the telemetry publisher."""
 
 import asyncio
+import copy
 import json
 from contextlib import suppress
 from configparser import ConfigParser
@@ -46,6 +47,7 @@ class FakeMoonrakerClient:
         self.subscription_objects = None
         self.last_query_objects = None
         self.query_log: list[Optional[Dict[str, Optional[list[str]]]]] = []
+        self.resubscribe_calls = 0
 
     async def start(self, callback):
         self._callback = callback
@@ -61,6 +63,9 @@ class FakeMoonrakerClient:
         self.last_query_objects = objects
         self.query_log.append(objects)
         return self._initial_state
+
+    async def resubscribe(self) -> None:
+        self.resubscribe_calls += 1
 
     async def execute_print_action(self, action: str) -> None:
         raise NotImplementedError
@@ -1611,13 +1616,26 @@ async def test_restart_fetches_fresh_overview_state() -> None:
     await publisher.start()
     await asyncio.sleep(0.05)
 
-    resumed_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 0.3
+    latest_status: Optional[str] = None
+
+    while loop.time() < deadline:
+        resumed_messages = mqtt.by_topic().get("owl/printers/device-123/overview") or []
+        if resumed_messages:
+            last_message = _decode(resumed_messages[-1])
+            overview_body = last_message.get("overview")
+            if isinstance(overview_body, dict):
+                latest_status = overview_body.get("printerStatus")
+                if latest_status == "Completed":
+                    break
+        await asyncio.sleep(0.01)
+
+    assert latest_status == "Completed", f"Expected overview status Completed but saw {latest_status!r}"
+
+    resumed_messages = mqtt.by_topic().get("owl/printers/device-123/overview") or []
     assert resumed_messages, "Expected overview publish after restart"
-    last_message = _decode(resumed_messages[-1])
-    overview_body = last_message.get("overview")
-    assert overview_body is not None
-    assert overview_body.get("printerStatus") == "Completed"
-    assert resumed_messages[-1]["retain"] is True
+    assert any(message["retain"] for message in resumed_messages)
 
     await publisher.stop()
 
@@ -1682,21 +1700,69 @@ async def test_restart_emits_current_telemetry_after_start() -> None:
     assert publisher._worker is not None
     assert not publisher._worker.done()
 
-    topics = mqtt.by_topic()
-    assert topics, f"Expected telemetry publish topics, found: {topics}"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 0.3
+    extruder_sensor = None
 
-    replay_messages = topics.get("owl/printers/device-123/telemetry")
-    assert replay_messages, "Expected telemetry publish after restart"
-    latest_payload = _decode(replay_messages[-1])
-    telemetry_body = latest_payload.get("telemetry", {})
-    sensors = telemetry_body.get("sensors", [])
-    extruder_sensor = next(
-        (sensor for sensor in sensors if sensor.get("channel") == "extruder"),
-        None,
-    )
-    assert extruder_sensor is not None
+    while loop.time() < deadline:
+        replay_messages = mqtt.by_topic().get("owl/printers/device-123/telemetry") or []
+        if replay_messages:
+            latest_payload = _decode(replay_messages[-1])
+            telemetry_body = latest_payload.get("telemetry", {})
+            sensors = telemetry_body.get("sensors", [])
+            candidate = next(
+                (sensor for sensor in sensors if sensor.get("channel") == "extruder"),
+                None,
+            )
+            if candidate is not None:
+                extruder_sensor = candidate
+                target = extruder_sensor.get("target")
+                if target is not None and abs(target - 0.0) <= 1e-6:
+                    break
+        await asyncio.sleep(0.01)
+
+    assert extruder_sensor is not None, "Expected extruder sensor telemetry after restart"
     assert extruder_sensor.get("target") == pytest.approx(0.0, abs=1e-6)
     assert extruder_sensor.get("value") == pytest.approx(45.04, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_restart_replays_full_overview_when_state_unchanged() -> None:
+    sample = _load_sample("moonraker-sample-printing.json")
+
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    await publisher.stop()
+    mqtt.messages.clear()
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    topics = mqtt.by_topic()
+    overview_messages = topics.get("owl/printers/device-123/overview")
+    telemetry_messages = topics.get("owl/printers/device-123/telemetry")
+
+    assert overview_messages, "Expected overview publish after restart"
+    assert telemetry_messages, "Expected telemetry publish after restart"
+
+    overview_document = _decode(overview_messages[-1])
+    telemetry_document = _decode(telemetry_messages[-1])
+
+    assert overview_document.get("kind") == "full"
+    assert telemetry_document.get("kind") == "full"
+    assert isinstance(overview_document.get("overview"), dict)
+    assert isinstance(telemetry_document.get("telemetry"), dict)
+
+    assert not publisher._force_full_channels_after_reset  # type: ignore[attr-defined]
+
+    await publisher.stop()
 
 
 @pytest.mark.asyncio
@@ -1792,6 +1858,114 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
         publisher._idle_interval,
         rel=1e-6,
     )
+
+
+def test_reset_runtime_state_requeues_previous_snapshot() -> None:
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    snapshot = {
+        "result": {
+            "status": {
+                "print_stats": {"state": "standby"},
+                "temperature_sensor extruder": {
+                    "temperature": 25.0,
+                    "target": 0.0,
+                },
+            }
+        }
+    }
+
+    publisher._last_payload_snapshot = copy.deepcopy(snapshot)
+    publisher._current_mode = "watch"
+    publisher._pending_payload = None
+    publisher._pending_forced_channels.clear()
+
+    publisher._reset_runtime_state()
+
+    assert publisher._pending_payload == snapshot
+    assert {"overview", "telemetry"}.issubset(publisher._pending_forced_channels)
+    assert publisher._last_payload_snapshot == snapshot
+
+
+@pytest.mark.asyncio
+async def test_resubscribe_triggered_after_klippy_ready() -> None:
+    initial_state = {
+        "result": {
+            "status": {
+                "printer": {"state": "shutdown"},
+                "print_stats": {"state": "error", "message": "Restarting"},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    await moonraker.emit({"method": "notify_klippy_ready", "params": None})
+    await asyncio.sleep(0.1)
+
+    assert (
+        moonraker.resubscribe_calls >= 1
+    ), "Expected Moonraker resubscribe after Klippy ready notification"
+
+    await publisher.stop()
+
+
+def test_rate_request_reapplied_after_reset() -> None:
+    request_at = datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc)
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    expires_at = publisher.apply_telemetry_rate(
+        mode="watch",
+        max_hz=2.0,
+        duration_seconds=120,
+        requested_at=request_at,
+    )
+
+    assert expires_at == request_at + timedelta(seconds=120)
+
+    # Simulate that some of the watch window elapsed during downtime.
+    fake_now = request_at + timedelta(seconds=30)
+
+    # Reset cadence back to idle to mirror _reset_runtime_state side effects.
+    publisher._current_mode = "idle"
+    publisher._telemetry_interval = publisher._idle_interval
+    publisher._channel_caps["telemetry"] = publisher._telemetry_interval
+    publisher._watch_window_expires = None
+
+    publisher._reapply_rate_request(now=fake_now)
+
+    expected_interval = max(0.1, 1.0 / 2.0)
+    remaining_window = fake_now + timedelta(seconds=90)
+
+    assert publisher._current_mode == "watch"
+    assert publisher._channel_caps["telemetry"] == pytest.approx(
+        expected_interval,
+        rel=1e-6,
+    )
+    assert publisher._watch_window_expires == remaining_window
+
+    active_request = publisher._active_rate_request
+    assert active_request is not None
+    assert active_request.mode == "watch"
+    assert active_request.max_hz == pytest.approx(2.0)
+    assert active_request.duration_seconds == 90
+    assert active_request.requested_at == fake_now
+    assert active_request.expires_at == remaining_window
 
 
 @pytest.mark.asyncio

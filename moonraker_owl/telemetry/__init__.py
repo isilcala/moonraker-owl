@@ -8,6 +8,7 @@ import copy
 import inspect
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -62,6 +63,15 @@ class _PollGroup:
     objects: dict[str, Optional[list[str]]]
     interval: float
     initial_delay: float
+
+
+@dataclass
+class _RateRequest:
+    mode: str
+    max_hz: float
+    requested_at: datetime
+    duration_seconds: Optional[int]
+    expires_at: Optional[datetime]
 
 
 DEFAULT_POLL_SPECS: tuple[PollSpec, ...] = (
@@ -143,6 +153,7 @@ class TelemetryPublisher:
         }
         self._hasher = TelemetryHasher()
         self._retain_next_publish: Set[str] = {"overview", "telemetry"}
+        self._force_error_retain: Optional[bool] = None
         self._overview_error_snapshot_active = False
         self._status_listeners: list[Callable[[Dict[str, Any]], Any]] = []
 
@@ -180,6 +191,10 @@ class TelemetryPublisher:
         self._pending_payload: Optional[Dict[str, Any]] = None
         self._pending_timer_handle: Optional[asyncio.TimerHandle] = None
         self._pending_forced_channels: Set[str] = set()
+        self._force_full_channels_after_reset: Set[str] = set()
+        self._active_rate_request: Optional[_RateRequest] = None
+        self._last_printer_state: Optional[str] = None
+        self._resubscribe_task: Optional[asyncio.Task[None]] = None
 
         self._last_overview_publish_time = 0.0
         self._last_overview_status = "Idle"
@@ -220,8 +235,21 @@ class TelemetryPublisher:
 
         await self._prime_initial_state()
 
-        await self._moonraker.start(self._handle_moonraker_update)
-        self._callback_registered = True
+        callback_registered = False
+        try:
+            await self._moonraker.start(self._handle_moonraker_update)
+        except ValueError as exc:
+            message = str(exc)
+            if "callback already registered" not in message.lower():
+                raise
+            LOGGER.debug(
+                "Moonraker callback already registered; reusing existing listener"
+            )
+            callback_registered = True
+        else:
+            callback_registered = True
+
+        self._callback_registered = callback_registered
 
         self._worker = asyncio.create_task(self._run())
         self._start_pollers()
@@ -237,6 +265,10 @@ class TelemetryPublisher:
             self._retain_next_publish.update({"overview", "telemetry"})
         self._cancel_pending_timer()
         self._pending_forced_channels.clear()
+        resubscribe_task = self._resubscribe_task
+        if resubscribe_task is not None:
+            resubscribe_task.cancel()
+            self._resubscribe_task = None
 
     @property
     def topic(self) -> str:
@@ -468,6 +500,8 @@ class TelemetryPublisher:
             )
         self._notify_status_listeners(listener_snapshot)
 
+        self._handle_klippy_state(payload, aggregated_status)
+
         has_status = bool(aggregated_status)
         if not self._bootstrapped:
             if has_status:
@@ -512,6 +546,9 @@ class TelemetryPublisher:
                 skipped_pre_bootstrap = True
                 continue
 
+            if channel in self._force_full_channels_after_reset:
+                frame.forced = True
+
             should_publish, delay = self._should_publish_channel(
                 channel,
                 frame.payload,
@@ -540,14 +577,24 @@ class TelemetryPublisher:
                     if isinstance(status_value, str):
                         normalized_status = status_value.strip()
                         if normalized_status:
+                            previous_status_value = self._last_overview_status
                             self._last_overview_status = status_value
                             self._last_overview_publish_time = now_monotonic
                             status_lower = normalized_status.lower()
                             if status_lower == "error":
                                 if not self._overview_error_snapshot_active:
-                                    self._retain_next_publish.discard("overview")
                                     self._clear_retained_channels(("overview", "telemetry"))
                                     self._overview_error_snapshot_active = True
+                                retain_error = self._force_error_retain
+                                if retain_error is None:
+                                    previous_lower = (
+                                        (previous_status_value or "").strip().lower()
+                                    )
+                                    retain_error = previous_lower in {"printing", "paused"}
+                                if retain_error:
+                                    self._retain_next_publish.add("overview")
+                                else:
+                                    self._retain_next_publish.discard("overview")
                             elif self._overview_error_snapshot_active:
                                 self._retain_next_publish.add("overview")
                                 self._overview_error_snapshot_active = False
@@ -557,6 +604,7 @@ class TelemetryPublisher:
                 self._retain_next_publish.discard(channel)
             self._publish(channel, topic, envelope, retain=retain)
             self._pending_forced_channels.discard(channel)
+            self._force_full_channels_after_reset.discard(channel)
 
         if deferred:
             self._store_pending_payload(payload)
@@ -622,9 +670,12 @@ class TelemetryPublisher:
         mode = (mode or "idle").strip().lower() or "idle"
         max_hz = max(0.0, max_hz)
         requested_at = requested_at or datetime.now(timezone.utc)
+        normalized_duration = (
+            duration_seconds if duration_seconds and duration_seconds > 0 else None
+        )
         expires_at: Optional[datetime] = None
-        if duration_seconds and duration_seconds > 0:
-            expires_at = requested_at + timedelta(seconds=duration_seconds)
+        if normalized_duration is not None:
+            expires_at = requested_at + timedelta(seconds=normalized_duration)
 
         interval = _hz_to_interval(max_hz)
         if mode == "watch":
@@ -668,6 +719,13 @@ class TelemetryPublisher:
                 state.last_publish = 0.0
 
         self._event.set()
+        self._active_rate_request = _RateRequest(
+            mode=mode,
+            max_hz=max_hz,
+            requested_at=requested_at,
+            duration_seconds=normalized_duration,
+            expires_at=expires_at,
+        )
         return expires_at
 
     def record_command_state(
@@ -840,15 +898,25 @@ class TelemetryPublisher:
             self._pending_timer_handle.cancel()
             self._pending_timer_handle = None
 
-
     def _reset_runtime_state(self) -> None:
-        snapshot = self._orchestrator.store.export_state()
-        self._orchestrator.reset(snapshot=snapshot)
+        previous_snapshot = copy.deepcopy(self._last_payload_snapshot)
+
+        resubscribe_task = self._resubscribe_task
+        if resubscribe_task is not None:
+            resubscribe_task.cancel()
+            self._resubscribe_task = None
+
+        self._orchestrator.reset()
         self._orchestrator.set_telemetry_mode(
             mode="idle",
             max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
             watch_window_expires=None,
         )
+        self._current_mode = "idle"
+        self._telemetry_interval = self._idle_interval
+        self._channel_caps["telemetry"] = self._telemetry_interval
+        self._telemetry_watchdog_seconds = self._cadence.telemetry_watchdog_seconds
+        self._watch_window_expires = None
         self._bootstrapped = False
         for state in self._channel_state.values():
             state.hash = None
@@ -859,6 +927,7 @@ class TelemetryPublisher:
         self._last_overview_publish_time = 0.0
         self._last_overview_status = "Idle"
         self._overview_error_snapshot_active = False
+        self._last_printer_state = None
         self._retain_next_publish.update({"overview", "telemetry"})
         if self._queue is not None:
             while True:
@@ -866,6 +935,46 @@ class TelemetryPublisher:
                     self._queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+        self._reapply_rate_request()
+        self._force_full_channels_after_reset.clear()
+        self._force_full_channels_after_reset.update({"overview", "telemetry"})
+
+        if previous_snapshot is not None:
+            self._pending_payload = copy.deepcopy(previous_snapshot)
+            self._pending_forced_channels.update({"overview", "telemetry"})
+            self._last_payload_snapshot = copy.deepcopy(previous_snapshot)
+            self._event.set()
+
+    def _reapply_rate_request(self, *, now: Optional[datetime] = None) -> None:
+        request = self._active_rate_request
+        if request is None:
+            return
+
+        current_time = now or datetime.now(timezone.utc)
+
+        remaining_seconds: Optional[int]
+        if request.expires_at is None:
+            remaining_seconds = None
+        else:
+            remaining = (request.expires_at - current_time).total_seconds()
+            if remaining <= 0:
+                self._active_rate_request = None
+                return
+            remaining_seconds = math.ceil(remaining)
+
+        LOGGER.debug(
+            "Reapplying telemetry cadence request after restart: mode=%s max_hz=%.3f remaining=%s",
+            request.mode,
+            request.max_hz,
+            f"{remaining_seconds}s" if remaining_seconds is not None else "indefinite",
+        )
+
+        self.apply_telemetry_rate(
+            mode=request.mode,
+            max_hz=request.max_hz,
+            duration_seconds=remaining_seconds,
+            requested_at=current_time,
+        )
 
     async def publish_system_status(
         self,
@@ -895,8 +1004,24 @@ class TelemetryPublisher:
                 }
             }
         }
-        self._retain_next_publish.discard("overview")
-        self._process_payload(status_payload, forced_channels={"overview"})
+        previous_status = (self._last_overview_status or "").strip().lower()
+        session = self._orchestrator.session_tracker.compute(self._orchestrator.store)
+        retain_error = previous_status in {"printing", "paused"}
+        if not retain_error:
+            retain_error = session.has_active_job or (
+                session.progress_percent is not None and session.progress_percent > 0
+            )
+
+        self._force_error_retain = retain_error
+        if not retain_error:
+            self._retain_next_publish.discard("overview")
+
+        snapshot = self._orchestrator.store.export_state()
+        try:
+            self._process_payload(status_payload, forced_channels={"overview"})
+        finally:
+            self._orchestrator.store.restore_state(snapshot)
+            self._force_error_retain = None
 
     def register_status_listener(
         self,
@@ -948,6 +1073,98 @@ class TelemetryPublisher:
             if inspect.isawaitable(outcome):
                 self._schedule_listener_awaitable(outcome)
 
+    def _handle_klippy_state(
+        self,
+        payload: Dict[str, Any],
+        aggregated_status: Dict[str, Any],
+    ) -> None:
+        previous_state = self._last_printer_state
+        new_state = previous_state
+
+        printer_section = aggregated_status.get("printer")
+        if isinstance(printer_section, Mapping):
+            state_value = printer_section.get("state")
+            if isinstance(state_value, str):
+                normalized = state_value.strip().lower()
+                if normalized:
+                    new_state = normalized
+
+        method = payload.get("method")
+        if isinstance(method, str):
+            normalized_method = method.strip().lower()
+            if normalized_method == "notify_klippy_ready":
+                new_state = "ready"
+            elif normalized_method == "notify_klippy_state":
+                candidate = _extract_state_from_params(payload.get("params"))
+                if candidate:
+                    new_state = candidate
+
+        if new_state == previous_state:
+            return
+
+        self._last_printer_state = new_state
+        if new_state == "ready":
+            LOGGER.info("Detected Klippy ready; refreshing Moonraker subscriptions")
+            self._schedule_resubscribe("klippy-ready")
+
+    def _schedule_resubscribe(self, reason: str) -> None:
+        if not hasattr(self._moonraker, "resubscribe"):
+            LOGGER.debug(
+                "Printer adapter does not support resubscribe; skipping (%s)",
+                reason,
+            )
+            return
+
+        loop = self._loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                LOGGER.debug(
+                    "Unable to schedule Moonraker resubscribe (%s); no active loop",
+                    reason,
+                )
+                return
+
+        existing_task = self._resubscribe_task
+        if existing_task is not None and not existing_task.done():
+            LOGGER.debug(
+                "Moonraker resubscribe already pending; skipping (%s)", reason
+            )
+            return
+
+        async def _runner() -> None:
+            try:
+                await self._moonraker.resubscribe()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.exception(
+                    "Failed to resend Moonraker subscription after %s", reason
+                )
+            try:
+                await self._prime_initial_state()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.debug(
+                    "Failed to refresh Moonraker snapshot after %s: %s",
+                    reason,
+                    exc,
+                )
+            finally:
+                self._resubscribe_task = None
+
+        LOGGER.debug("Scheduling Moonraker resubscribe (%s)", reason)
+        try:
+            self._resubscribe_task = loop.create_task(_runner())
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.debug(
+                "Unable to schedule Moonraker resubscribe task (%s)", reason,
+                exc_info=True,
+            )
+            self._resubscribe_task = None
+
     def _schedule_listener_awaitable(self, awaitable: Awaitable[Any]) -> None:
         loop = self._loop
         if loop is None:
@@ -971,6 +1188,32 @@ class TelemetryPublisher:
             loop.create_task(_runner())
         except Exception:  # pragma: no cover - defensive logging
             LOGGER.debug("Failed to schedule status listener", exc_info=True)
+
+
+def _extract_state_from_params(params: Any) -> Optional[str]:
+    if isinstance(params, str):
+        normalized = params.strip().lower()
+        return normalized or None
+
+    if isinstance(params, Mapping):
+        value = params.get("state")
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized:
+                return normalized
+        candidates = params.values()
+    elif isinstance(params, Sequence):
+        candidates = params
+    else:
+        return None
+
+    for entry in candidates:
+        result = _extract_state_from_params(entry)
+        if result:
+            return result
+    return None
+
+
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
     raw = config.raw
 

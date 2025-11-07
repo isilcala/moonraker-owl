@@ -57,6 +57,17 @@ class OverviewSelector:
         )
 
         phase = self._state_engine.resolve(state, context)
+        if (
+            phase == "Printing"
+            and isinstance(state, str)
+            and state.lower() in {"complete", "completed"}
+            and not session.has_active_job
+        ):
+            LOGGER.debug(
+                "Overriding phase to Completed for finished job (raw_state=%s)",
+                state,
+            )
+            phase = "Completed"
 
         lifecycle: Dict[str, Any] = {
             "phase": phase,

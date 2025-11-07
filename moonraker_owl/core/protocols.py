@@ -38,6 +38,10 @@ class PrinterAdapter(Protocol):
         """
         ...
 
+    async def resubscribe(self) -> None:
+        """Reapply any underlying status subscriptions."""
+        ...
+
     async def execute_print_action(self, action: str) -> None:
         """Execute a high-level print control action (pause, resume, cancel)."""
         ...

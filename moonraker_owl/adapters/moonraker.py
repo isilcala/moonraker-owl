@@ -45,6 +45,7 @@ class MoonrakerClient(PrinterAdapter):
         self._stop_event = asyncio.Event()
         self._subscription_objects: Optional[dict[str, Optional[list[str]]]] = None
         self._rpc_id = 0
+        self._active_ws: Optional[aiohttp.ClientWebSocketResponse] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -187,16 +188,20 @@ class MoonrakerClient(PrinterAdapter):
                     LOGGER.info("Connected to Moonraker websocket at %s", ws_url)
                     backoff = self.reconnect_initial
 
-                    await self._send_subscription(ws)
-                    async for message in ws:
-                        if self._stop_event.is_set():
-                            break
-                        if message.type == aiohttp.WSMsgType.TEXT:
-                            await self._dispatch(message.data)
-                        elif message.type == aiohttp.WSMsgType.BINARY:
-                            LOGGER.debug("Ignoring binary message from Moonraker")
-                        elif message.type == aiohttp.WSMsgType.ERROR:
-                            raise ws.exception() or RuntimeError("Websocket error")
+                    self._active_ws = ws
+                    try:
+                        await self._send_subscription(ws)
+                        async for message in ws:
+                            if self._stop_event.is_set():
+                                break
+                            if message.type == aiohttp.WSMsgType.TEXT:
+                                await self._dispatch(message.data)
+                            elif message.type == aiohttp.WSMsgType.BINARY:
+                                LOGGER.debug("Ignoring binary message from Moonraker")
+                            elif message.type == aiohttp.WSMsgType.ERROR:
+                                raise ws.exception() or RuntimeError("Websocket error")
+                    finally:
+                        self._active_ws = None
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - defensive net handling
@@ -215,6 +220,27 @@ class MoonrakerClient(PrinterAdapter):
                 )
                 await asyncio.sleep(jittered)
                 backoff = min(backoff * 2, self.reconnect_max)
+
+    async def resubscribe(self) -> None:
+        """Re-send printer.objects.subscribe for the active websocket."""
+
+        if self._subscription_objects is None:
+            LOGGER.debug(
+                "Skipping Moonraker resubscribe; no subscription manifest configured"
+            )
+            return
+
+        ws = self._active_ws
+        if ws is None or ws.closed:
+            LOGGER.debug("Skipping Moonraker resubscribe; websocket not connected")
+            return
+
+        try:
+            await self._send_subscription(ws)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.exception("Failed to resend Moonraker subscription request")
 
     async def _dispatch(self, raw_data: str) -> None:
         try:
