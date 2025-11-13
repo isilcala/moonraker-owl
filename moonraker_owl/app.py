@@ -278,24 +278,34 @@ class MoonrakerOwlApp:
         await self._health.update("telemetry", False, "awaiting mqtt connectivity")
         await self._health.update("commands", False, "awaiting mqtt connectivity")
 
-        # Initialize TokenManager if device_private_key is available (JWT authentication)
-        if self._config.cloud.device_private_key and device_id:
-            try:
-                LOGGER.info("Initializing TokenManager for JWT authentication")
-                self._token_manager = TokenManager(
-                    device_id=device_id,
-                    private_key_b64=self._config.cloud.device_private_key,
-                    base_url=self._config.cloud.base_url,
-                )
-                await self._token_manager.start()
-                LOGGER.info("TokenManager initialized successfully")
-            except Exception as exc:
-                LOGGER.error("Failed to initialize TokenManager: %s", exc, exc_info=True)
-                # Clean up resources on failure
-                if self._token_manager:
-                    await self._token_manager.stop()
-                    self._token_manager = None
-                # Fall back to legacy password authentication
+        # Initialize TokenManager (JWT authentication - required)
+        if not self._config.cloud.device_private_key:
+            LOGGER.error(
+                "Device private key not found. JWT authentication is required. "
+                "Please link your device: moonraker-owl link"
+            )
+            return False
+
+        if not device_id:
+            LOGGER.error("Device ID not found in configuration")
+            return False
+
+        try:
+            LOGGER.info("Initializing TokenManager for JWT authentication")
+            self._token_manager = TokenManager(
+                device_id=device_id,
+                private_key_b64=self._config.cloud.device_private_key,
+                base_url=self._config.cloud.base_url,
+            )
+            await self._token_manager.start()
+            LOGGER.info("TokenManager initialized successfully")
+        except Exception as exc:
+            LOGGER.error("Failed to initialize TokenManager: %s", exc, exc_info=True)
+            # Clean up resources on failure
+            if self._token_manager:
+                await self._token_manager.stop()
+                self._token_manager = None
+            return False
 
         self._moonraker_client = MoonrakerClient(self._config.moonraker)
         self._mqtt_client = MQTTClient(

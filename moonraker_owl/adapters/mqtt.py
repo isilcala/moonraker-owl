@@ -109,23 +109,18 @@ class MQTTClient:
         self._disconnect_event = asyncio.Event()
         self._last_connect_rc = None
 
-        # Determine client_id and credentials based on authentication mode
-        actual_client_id = self.client_id
-        username: Optional[str] = None
-        password: Optional[str] = None
+        # JWT authentication: clientId MUST match JWT sub claim (device_id)
+        if not self.token_manager:
+            raise MQTTConnectionError(
+                "TokenManager is required for JWT authentication. "
+                "Ensure device_private_key is configured (run: moonraker-owl link)"
+            )
 
-        if self.token_manager:
-            # JWT authentication: clientId MUST match JWT sub claim (device_id)
-            device_id, jwt_token = self.token_manager.get_mqtt_credentials()
-            actual_client_id = device_id
-            username = device_id
-            password = jwt_token
-            LOGGER.debug("Using JWT authentication with clientId=%s (attempt %d)", device_id, attempt)
-        elif self.config.username:
-            # Legacy password authentication
-            username = self.config.username
-            password = self.config.password
-            LOGGER.debug("Using legacy password authentication (attempt %d)", attempt)
+        device_id, jwt_token = self.token_manager.get_mqtt_credentials()
+        actual_client_id = device_id
+        username = device_id
+        password = jwt_token
+        LOGGER.debug("Using JWT authentication with clientId=%s (attempt %d)", device_id, attempt)
 
         client_kwargs: dict[str, Any] = {
             "client_id": actual_client_id,
@@ -142,8 +137,7 @@ class MQTTClient:
         if self._last_will is not None:
             client.will_set(**self._last_will)
 
-        if username:
-            client.username_pw_set(username, password)
+        client.username_pw_set(username, password)
 
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect

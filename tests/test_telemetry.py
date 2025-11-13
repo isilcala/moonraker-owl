@@ -506,9 +506,8 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
 
     props = mqtt.messages[0]["properties"]
     assert props is not None
-    assert getattr(props, "UserProperty", None) == [
-        (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, "token")
-    ]
+    # Device authentication now handled via JWT (MQTT password) - no UserProperty needed
+    assert getattr(props, "UserProperty", None) is None
 
     expected_qos = {"overview": 1, "metrics": 0}
     for channel in ("overview", "metrics"):
@@ -1322,10 +1321,11 @@ def test_telemetry_configuration_requires_device_id():
         )
 
 
-def test_telemetry_configuration_requires_device_token():
+def test_telemetry_configuration_requires_device_id():
+    """Test that TelemetryPublisher raises error when device_id is missing."""
     parser = ConfigParser()
     parser.add_section("cloud")
-    parser.set("cloud", "device_id", "device-123")
+    # No device_id set
 
     config = OwlConfig(
         cloud=CloudConfig(),
@@ -1339,7 +1339,7 @@ def test_telemetry_configuration_requires_device_token():
         path=Path("moonraker-owl.cfg"),
     )
 
-    with pytest.raises(TelemetryConfigurationError):
+    with pytest.raises(TelemetryConfigurationError, match="Device ID is required"):
         TelemetryPublisher(
             config, FakeMoonrakerClient({}), FakeMQTTClient(), poll_specs=()
         )

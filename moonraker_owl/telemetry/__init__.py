@@ -281,7 +281,6 @@ class TelemetryPublisher:
             self._tenant_id,
             self._device_id,
             self._printer_id,
-            self._device_token,
         ) = _resolve_printer_identity(config)
 
         self._cadence = config.telemetry_cadence
@@ -1025,9 +1024,8 @@ class TelemetryPublisher:
     ) -> None:
         payload_bytes = json.dumps(document, default=_json_default).encode("utf-8")
         properties = Properties(PacketTypes.PUBLISH)
-        properties.UserProperty = [
-            (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, self._device_token)
-        ]
+        # Note: Device authentication now handled via JWT (MQTT password)
+        # No need to attach device_token as MQTT user property
 
         try:
             self._mqtt.publish(
@@ -1049,9 +1047,8 @@ class TelemetryPublisher:
             return
 
         properties = Properties(PacketTypes.PUBLISH)
-        properties.UserProperty = [
-            (constants.DEVICE_TOKEN_MQTT_PROPERTY_NAME, self._device_token)
-        ]
+        # Note: Device authentication now handled via JWT (MQTT password)
+        # No need to attach device_token as MQTT user property
 
         for channel in channels:
             topic = self._channel_topics.get(channel)
@@ -1466,15 +1463,12 @@ def _extract_state_from_params(params: Any) -> Optional[str]:
     return None
 
 
-def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
+def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str]:
     raw = config.raw
 
     tenant_id = raw.get("cloud", "tenant_id", fallback="")
     device_id = raw.get("cloud", "device_id", fallback="")
     printer_id = raw.get("cloud", "printer_id", fallback="")
-    device_token = (config.cloud.password or "").strip()
-    if not device_token:
-        device_token = raw.get("cloud", "password", fallback="").strip()
 
     username = config.cloud.username or ""
 
@@ -1490,7 +1484,8 @@ def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
 
     if not device_id:
         raise TelemetryConfigurationError(
-            "Device ID is required for telemetry publishing"
+            "Device ID is required for telemetry publishing. "
+            "Please link your device: moonraker-owl link"
         )
 
     if not printer_id:
@@ -1498,12 +1493,7 @@ def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str, str]:
             "Printer ID missing from configuration; telemetry payload will omit it"
         )
 
-    if not device_token:
-        raise TelemetryConfigurationError(
-            "Device token is required for telemetry publishing"
-        )
-
-    return tenant_id, device_id, printer_id, device_token
+    return tenant_id, device_id, printer_id
 
 
 def _hz_to_interval(rate_hz: float) -> Optional[float]:

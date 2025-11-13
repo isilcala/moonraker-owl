@@ -107,6 +107,8 @@ class FakeMqttClient:
 
 @pytest_asyncio.fixture
 async def mqtt_client(monkeypatch):
+    from unittest.mock import Mock
+    
     loop = asyncio.get_running_loop()
     events: dict = {}
 
@@ -123,7 +125,11 @@ async def mqtt_client(monkeypatch):
         password="token",
     )
 
-    client = MQTTClient(config, client_id="printer-42")
+    # Create mock TokenManager for JWT authentication
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt-token")
+
+    client = MQTTClient(config, client_id="printer-42", token_manager=token_manager)
     await client.connect()
 
     yield client, events
@@ -136,13 +142,16 @@ async def test_connect_configures_client(mqtt_client):
     client, events = mqtt_client
 
     assert events["connect_args"] == ("broker.owl.dev", 1883, 60)
-    assert events["auth"] == ("tenant:device", "token")
+    # JWT authentication: username=device_id, password=jwt_token
+    assert events["auth"] == ("device-test", "mock-jwt-token")
     assert events.get("connect_kwargs", {}) == {}
     assert events["loop_start"] == 1
 
 
 @pytest.mark.asyncio
 async def test_last_will_applied_before_connect(monkeypatch):
+    from unittest.mock import Mock
+    
     loop = asyncio.get_running_loop()
     events: dict = {}
 
@@ -157,7 +166,10 @@ async def test_last_will_applied_before_connect(monkeypatch):
         broker_port=1883,
     )
 
-    client = MQTTClient(config, client_id="printer-will")
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+
+    client = MQTTClient(config, client_id="printer-will", token_manager=token_manager)
     properties = object()
     client.set_last_will(
         "owl/printers/device/offline",
@@ -181,6 +193,8 @@ async def test_last_will_applied_before_connect(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_connect_with_session_expiry(monkeypatch):
+    from unittest.mock import Mock
+    
     loop = asyncio.get_running_loop()
     events: dict = {}
 
@@ -195,7 +209,10 @@ async def test_connect_with_session_expiry(monkeypatch):
         broker_port=1883,
     )
 
-    client = MQTTClient(config, client_id="persistent-1")
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+
+    client = MQTTClient(config, client_id="printer-session", token_manager=token_manager)
     await client.connect(clean_start=False, session_expiry=120)
 
     try:
@@ -228,6 +245,8 @@ async def test_subscribe_records_topics(mqtt_client):
 
 @pytest.mark.asyncio
 async def test_message_handler_dispatches_async(monkeypatch):
+    from unittest.mock import Mock
+    
     loop = asyncio.get_running_loop()
     events: dict = {}
 
@@ -242,7 +261,10 @@ async def test_message_handler_dispatches_async(monkeypatch):
         broker_port=1883,
     )
 
-    client = MQTTClient(config, client_id="printer-99")
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+
+    client = MQTTClient(config, client_id="printer-handler", token_manager=token_manager)
 
     message_event = asyncio.Event()
 
@@ -264,12 +286,14 @@ async def test_message_handler_dispatches_async(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_publish_failure_raises(monkeypatch):
+    from unittest.mock import Mock
+    
     loop = asyncio.get_running_loop()
     events: dict = {}
 
     def factory(*args, **kwargs):
         return FakeMqttClient(
-            loop, events, publish_rc=mqtt.MQTT_ERR_NO_CONN, *args, **kwargs
+            loop, events, *args, publish_rc=mqtt.MQTT_ERR_NO_CONN, **kwargs
         )
 
     monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
@@ -280,7 +304,10 @@ async def test_publish_failure_raises(monkeypatch):
         broker_port=1883,
     )
 
-    client = MQTTClient(config, client_id="printer-7")
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+
+    client = MQTTClient(config, client_id="printer-pub", token_manager=token_manager)
     await client.connect()
 
     with pytest.raises(MQTTConnectionError):
@@ -300,6 +327,8 @@ async def test_reconnect_triggers_paho(mqtt_client):
 
 @pytest.mark.asyncio
 async def test_disconnect_handler_invoked(monkeypatch):
+    from unittest.mock import Mock
+    
     loop = asyncio.get_running_loop()
     events: dict = {}
 
@@ -309,7 +338,9 @@ async def test_disconnect_handler_invoked(monkeypatch):
     monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
 
     config = CloudConfig(broker_host="broker.owl.dev", broker_port=1883)
-    client = MQTTClient(config, client_id="printer-123")
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+    client = MQTTClient(config, client_id="printer-123", token_manager=token_manager)
 
     disconnect_event = asyncio.Event()
 

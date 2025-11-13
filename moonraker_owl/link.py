@@ -29,8 +29,7 @@ class DeviceCredentials:
     tenant_id: str
     printer_id: str
     device_id: str
-    device_token: str
-    device_private_key: str  # NEW: Base64-encoded Ed25519 private key (44 chars)
+    device_private_key: str  # Base64-encoded Ed25519 private key (32 bytes)
     linked_at: str
 
 
@@ -65,7 +64,6 @@ async def link_device(
                     try:
                         printer_id = str(payload["printerId"])
                         device_id = str(payload["deviceId"])
-                        device_token = str(payload["deviceToken"])
                         device_private_key = str(payload["devicePrivateKey"])
                     except KeyError as exc:
                         raise DeviceLinkingError(
@@ -78,7 +76,6 @@ async def link_device(
                         tenant_id=tenant_id,
                         printer_id=printer_id,
                         device_id=device_id,
-                        device_token=device_token,
                         device_private_key=device_private_key,
                         linked_at=str(payload.get("linkedAt", "")),
                     )
@@ -164,7 +161,6 @@ def _persist_credentials(path: Path, credentials: DeviceCredentials) -> None:
     payload = {
         "printerId": credentials.printer_id,
         "deviceId": credentials.device_id,
-        "deviceToken": credentials.device_token,
         "devicePrivateKey": credentials.device_private_key,
         "linkedAt": credentials.linked_at,
     }
@@ -191,13 +187,12 @@ def _update_config_with_credentials(
         broker_username = credentials.device_id
 
     config.cloud.username = broker_username
-    config.cloud.password = credentials.device_token
+    # Note: password field no longer used - JWT authentication only
 
     if not config.raw.has_section("cloud"):
         config.raw.add_section("cloud")
 
     config.raw.set("cloud", "username", broker_username)
-    config.raw.set("cloud", "password", credentials.device_token)
     config.raw.set("cloud", "device_id", credentials.device_id)
     config.raw.set("cloud", "printer_id", credentials.printer_id)
     config.raw.set("cloud", "device_private_key", credentials.device_private_key)

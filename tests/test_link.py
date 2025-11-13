@@ -29,7 +29,6 @@ async def test_link_device_polls_until_success():
         payload = {
             "printerId": "printer-1",
             "deviceId": "device-1",
-            "deviceToken": "secret-token",
             "devicePrivateKey": "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",  # Base64 test key
             "linkedAt": "2025-10-06T00:00:00Z",
         }
@@ -50,7 +49,6 @@ async def test_link_device_polls_until_success():
 
     assert attempts == 2
     assert credentials.device_id == "device-1"
-    assert credentials.device_token == "secret-token"
     assert credentials.device_private_key == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
     assert credentials.tenant_id == "tenant-1"
 
@@ -64,7 +62,6 @@ async def test_link_device_allows_missing_tenant_id():
             {
                 "printerId": "printer-1",
                 "deviceId": "device-1",
-                "deviceToken": "secret-token",
                 "devicePrivateKey": "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",
             }
         )
@@ -91,7 +88,6 @@ def test_perform_linking_updates_config_and_credentials(monkeypatch, tmp_path: P
         tenant_id="tenant-42",
         printer_id="printer-42",
         device_id="device-42",
-        device_token="token-42",
         device_private_key="dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",
         linked_at="2025-10-06T00:00:00Z",
     )
@@ -123,7 +119,6 @@ def test_perform_linking_updates_config_and_credentials(monkeypatch, tmp_path: P
     parser.read(config_path)
 
     assert parser.get("cloud", "username") == "tenant-42:device-42"
-    assert parser.get("cloud", "password") == "token-42"
     assert parser.get("cloud", "device_private_key") == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
     assert parser.get("cloud", "tenant_id") == "tenant-42"
     assert parser.get("cloud", "device_id") == "device-42"
@@ -154,7 +149,6 @@ def test_update_config_with_credentials_without_tenant(tmp_path: Path):
         tenant_id="",
         printer_id="printer-1",
         device_id="device-1",
-        device_token="token-1",
         device_private_key="dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",
         linked_at="",
     )
@@ -169,7 +163,6 @@ def test_update_config_with_credentials_without_tenant(tmp_path: Path):
 
     assert parser.has_section("cloud")
     assert parser.get("cloud", "username") == "device-1"
-    assert parser.get("cloud", "password") == "token-1"
     assert not parser.has_option("cloud", "tenant_id")
 
 
@@ -189,7 +182,6 @@ def test_credentials_file_has_secure_permissions(monkeypatch, tmp_path: Path):
         tenant_id="tenant-42",
         printer_id="printer-42",
         device_id="device-42",
-        device_token="token-42",
         device_private_key="dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",
         linked_at="2025-10-06T00:00:00Z",
     )
@@ -228,7 +220,6 @@ def test_device_private_key_stored_in_config(tmp_path: Path):
         tenant_id="tenant-test",
         printer_id="printer-test",
         device_id="device-test",
-        device_token="token-test",
         device_private_key="dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",
         linked_at="2025-10-06T00:00:00Z",
     )
