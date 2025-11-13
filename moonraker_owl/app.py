@@ -23,6 +23,7 @@ from .telemetry import (
     TelemetryConfigurationError,
     TelemetryPublisher,
 )
+from .token_manager import TokenManager
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ class MoonrakerOwlApp:
         self._context = AppContext(config=self._config)
         self._moonraker_client: Optional[MoonrakerClient] = None
         self._mqtt_client: Optional[MQTTClient] = None
+        self._token_manager: Optional[TokenManager] = None
         self._telemetry_publisher: Optional[TelemetryPublisher] = None
         self._command_processor: Optional[CommandProcessor] = None
         self._supervisor_task: Optional[asyncio.Task[None]] = None
@@ -276,8 +278,31 @@ class MoonrakerOwlApp:
         await self._health.update("telemetry", False, "awaiting mqtt connectivity")
         await self._health.update("commands", False, "awaiting mqtt connectivity")
 
+        # Initialize TokenManager if device_private_key is available (JWT authentication)
+        if self._config.cloud.device_private_key and device_id:
+            try:
+                LOGGER.info("Initializing TokenManager for JWT authentication")
+                self._token_manager = TokenManager(
+                    device_id=device_id,
+                    private_key_b64=self._config.cloud.device_private_key,
+                    base_url=self._config.cloud.base_url,
+                )
+                await self._token_manager.start()
+                LOGGER.info("TokenManager initialized successfully")
+            except Exception as exc:
+                LOGGER.error("Failed to initialize TokenManager: %s", exc, exc_info=True)
+                # Clean up resources on failure
+                if self._token_manager:
+                    await self._token_manager.stop()
+                    self._token_manager = None
+                # Fall back to legacy password authentication
+
         self._moonraker_client = MoonrakerClient(self._config.moonraker)
-        self._mqtt_client = MQTTClient(self._config.cloud, client_id=client_id)
+        self._mqtt_client = MQTTClient(
+            self._config.cloud, 
+            client_id=client_id, 
+            token_manager=self._token_manager
+        )
         self._mqtt_client.register_disconnect_handler(self._on_mqtt_disconnect)
         self._mqtt_client.register_connect_handler(self._on_mqtt_connect)
 
@@ -599,6 +624,12 @@ class MoonrakerOwlApp:
 
         self._mqtt_ready = True
         await self._health.update("mqtt", True, None)
+        
+        # Start JWT token renewal loop after MQTT connection succeeds
+        if self._token_manager:
+            LOGGER.info("Starting TokenManager renewal loop")
+            self._token_manager.start_renewal_loop(on_renewed=self._on_token_renewed)
+        
         return True
 
     async def _start_runtime_components(self) -> bool:
@@ -889,6 +920,20 @@ class MoonrakerOwlApp:
         self._mqtt_ready = True
         self._schedule_health_update("mqtt", True, None)
 
+    async def _on_token_renewed(self) -> None:
+        """Callback invoked when TokenManager renews JWT token.
+        
+        Reconnects MQTT client with the new token.
+        """
+        if self._mqtt_client and self._mqtt_ready:
+            try:
+                LOGGER.info("JWT token renewed, reconnecting MQTT")
+                await self._mqtt_client.reconnect_with_new_token()
+                LOGGER.info("MQTT reconnected with new JWT token")
+            except Exception as exc:
+                LOGGER.error("Failed to reconnect MQTT after token renewal: %s", exc, exc_info=True)
+                # Connection error will trigger recovery via _on_mqtt_disconnect
+
     async def _stop_services(self) -> None:
         await self._transition_state(AgentState.STOPPING, detail="shutdown requested")
         self._stopping = True
@@ -919,6 +964,11 @@ class MoonrakerOwlApp:
             await self._mqtt_client.disconnect()
             self._mqtt_client = None
             await self._health.update("mqtt", False, "shutdown")
+
+        if self._token_manager is not None:
+            LOGGER.info("Stopping TokenManager")
+            await self._token_manager.stop()
+            self._token_manager = None
 
         if self._shutdown_event is not None:
             self._shutdown_event.set()

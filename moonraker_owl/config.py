@@ -54,6 +54,7 @@ class CloudConfig:
     broker_port: int = 8883
     username: Optional[str] = None
     password: Optional[str] = None
+    device_private_key: Optional[str] = None  # Base64-encoded Ed25519 private key for JWT authentication
 
 
 @dataclass(slots=True)
@@ -206,6 +207,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         broker_port=broker_port_value,
         username=parser.get("cloud", "username", fallback=None),
         password=parser.get("cloud", "password", fallback=None),
+        device_private_key=parser.get("cloud", "device_private_key", fallback=None),
     )
 
     moonraker = MoonrakerConfig(

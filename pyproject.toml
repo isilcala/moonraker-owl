@@ -17,6 +17,7 @@ dependencies = [
   "paho-mqtt>=1.6",
   "backoff>=2.2",
   "pydantic>=2.7",
+  "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
 from ..config import CloudConfig
+
+if TYPE_CHECKING:
+    from ..token_manager import TokenManager
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,10 +33,12 @@ class MQTTClient:
         *,
         client_id: str,
         keepalive: int = 60,
+        token_manager: Optional[TokenManager] = None,
     ) -> None:
         self.config = config
         self.client_id = client_id
         self.keepalive = keepalive
+        self.token_manager = token_manager
 
         self._client: Optional[mqtt.Client] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -53,15 +58,77 @@ class MQTTClient:
         clean_start: bool = True,
         session_expiry: Optional[int] = None,
     ) -> None:
-        """Connect to the MQTT broker and wait for acknowledgement."""
+        """Connect to the MQTT broker and wait for acknowledgement.
+        
+        If JWT authentication fails (CONNACK code 5) and TokenManager is available,
+        automatically refreshes the token and retries connection (max 2 attempts).
+        """
+        max_attempts = 2 if self.token_manager else 1
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await self._attempt_connect(
+                    timeout=timeout,
+                    clean_start=clean_start,
+                    session_expiry=session_expiry,
+                    attempt=attempt,
+                )
+                return  # Connection successful
+            except MQTTConnectionError as exc:
+                # Check if this is an authentication failure (CONNACK code 5)
+                if self._last_connect_rc == 5 and self.token_manager and attempt < max_attempts:
+                    LOGGER.warning(
+                        "MQTT authentication failed (CONNACK 5), refreshing JWT token and retrying (attempt %d/%d)",
+                        attempt,
+                        max_attempts,
+                    )
+                    try:
+                        await self.token_manager.refresh_token_now()
+                        LOGGER.info("JWT token refreshed successfully")
+                        # Continue to next attempt
+                        continue
+                    except Exception as refresh_exc:
+                        LOGGER.error("Failed to refresh JWT token: %s", refresh_exc, exc_info=True)
+                        # Fall through to raise original connection error
+                
+                # Not an auth failure, or no more retries, or token refresh failed
+                raise
+
+    async def _attempt_connect(
+        self,
+        timeout: float,
+        *,
+        clean_start: bool,
+        session_expiry: Optional[int],
+        attempt: int,
+    ) -> None:
+        """Internal method to attempt a single MQTT connection."""
 
         self._loop = asyncio.get_running_loop()
         self._connected_event = asyncio.Event()
         self._disconnect_event = asyncio.Event()
         self._last_connect_rc = None
 
+        # Determine client_id and credentials based on authentication mode
+        actual_client_id = self.client_id
+        username: Optional[str] = None
+        password: Optional[str] = None
+
+        if self.token_manager:
+            # JWT authentication: clientId MUST match JWT sub claim (device_id)
+            device_id, jwt_token = self.token_manager.get_mqtt_credentials()
+            actual_client_id = device_id
+            username = device_id
+            password = jwt_token
+            LOGGER.debug("Using JWT authentication with clientId=%s (attempt %d)", device_id, attempt)
+        elif self.config.username:
+            # Legacy password authentication
+            username = self.config.username
+            password = self.config.password
+            LOGGER.debug("Using legacy password authentication (attempt %d)", attempt)
+
         client_kwargs: dict[str, Any] = {
-            "client_id": self.client_id,
+            "client_id": actual_client_id,
             "protocol": mqtt.MQTTv5,
         }
 
@@ -75,8 +142,8 @@ class MQTTClient:
         if self._last_will is not None:
             client.will_set(**self._last_will)
 
-        if self.config.username:
-            client.username_pw_set(self.config.username, self.config.password)
+        if username:
+            client.username_pw_set(username, password)
 
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
@@ -85,9 +152,10 @@ class MQTTClient:
         self._client = client
 
         LOGGER.info(
-            "Connecting to MQTT broker %s:%s",
+            "Connecting to MQTT broker %s:%s (attempt %d)",
             self.config.broker_host,
             self.config.broker_port,
+            attempt,
         )
 
         connect_kwargs: Dict[str, Any] = {}
@@ -139,6 +207,23 @@ class MQTTClient:
             self._client.loop_stop()
             self._client = None
         self._connected = False
+
+    async def reconnect_with_new_token(self, timeout: float = 30.0) -> None:
+        """Disconnect and reconnect with refreshed JWT token.
+        
+        Called by token renewal loop when JWT is refreshed.
+        """
+        if not self.token_manager:
+            LOGGER.warning("reconnect_with_new_token called but no TokenManager configured")
+            return
+
+        LOGGER.info("Reconnecting MQTT with refreshed JWT token")
+        
+        # Gracefully disconnect
+        await self.disconnect(timeout=5.0)
+        
+        # Reconnect with new token (connect() will call get_mqtt_credentials())
+        await self.connect(timeout=timeout)
 
     def publish(
         self,

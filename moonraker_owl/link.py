@@ -30,6 +30,7 @@ class DeviceCredentials:
     printer_id: str
     device_id: str
     device_token: str
+    device_private_key: str  # NEW: Base64-encoded Ed25519 private key (44 chars)
     linked_at: str
 
 
@@ -65,6 +66,7 @@ async def link_device(
                         printer_id = str(payload["printerId"])
                         device_id = str(payload["deviceId"])
                         device_token = str(payload["deviceToken"])
+                        device_private_key = str(payload["devicePrivateKey"])
                     except KeyError as exc:
                         raise DeviceLinkingError(
                             f"Response missing expected field: {exc.args[0]}"
@@ -77,6 +79,7 @@ async def link_device(
                         printer_id=printer_id,
                         device_id=device_id,
                         device_token=device_token,
+                        device_private_key=device_private_key,
                         linked_at=str(payload.get("linkedAt", "")),
                     )
 
@@ -156,10 +159,13 @@ def _resolve_credentials_path(path: Optional[Path]) -> Path:
 
 
 def _persist_credentials(path: Path, credentials: DeviceCredentials) -> None:
+    import os
+    
     payload = {
         "printerId": credentials.printer_id,
         "deviceId": credentials.device_id,
         "deviceToken": credentials.device_token,
+        "devicePrivateKey": credentials.device_private_key,
         "linkedAt": credentials.linked_at,
     }
 
@@ -168,6 +174,11 @@ def _persist_credentials(path: Path, credentials: DeviceCredentials) -> None:
 
     with path.open("w", encoding="utf-8") as stream:
         json.dump(payload, stream, indent=2)
+    
+    # Secure file permissions (Unix only)
+    if hasattr(os, "chmod"):
+        os.chmod(path, 0o600)  # rw-------
+        LOGGER.info("Set credentials file permissions to 0600")
 
 
 def _update_config_with_credentials(
@@ -189,6 +200,7 @@ def _update_config_with_credentials(
     config.raw.set("cloud", "password", credentials.device_token)
     config.raw.set("cloud", "device_id", credentials.device_id)
     config.raw.set("cloud", "printer_id", credentials.printer_id)
+    config.raw.set("cloud", "device_private_key", credentials.device_private_key)
 
     if tenant_id:
         config.raw.set("cloud", "tenant_id", tenant_id)
