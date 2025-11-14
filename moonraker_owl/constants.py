@@ -18,4 +18,4 @@ DEFAULT_MOONRAKER_PORT = 7125
 DEFAULT_BROKER_HOST = "localhost:51979"
 DEFAULT_LINK_BASE_URL = "http://localhost:5024"
 
-DEVICE_TOKEN_MQTT_PROPERTY_NAME = "x-device-token"
+# Legacy: DEVICE_TOKEN_MQTT_PROPERTY_NAME = "x-device-token" - No longer used with JWT auth
