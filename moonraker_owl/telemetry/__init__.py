@@ -304,7 +304,7 @@ class TelemetryPublisher:
             monotonic=time.monotonic,
             hasher=self._hasher,
         )
-        self._retain_next_publish: Set[str] = {"overview", "metrics"}
+        self._retain_next_publish: Set[str] = set()  # Agent no longer uses retained, Nexus snapshot provides authority
         self._force_error_retain: Optional[bool] = None
         self._overview_error_snapshot_active = False
         self._status_listeners: list[Callable[[Dict[str, Any]], Any]] = []
@@ -412,8 +412,7 @@ class TelemetryPublisher:
         await self._cancel_pollers()
 
         await self._dispose_worker(remove_callback=True)
-        if self._last_payload_snapshot is not None:
-            self._retain_next_publish.update({"overview", "metrics"})
+        # Removed: Agent no longer sets retained flag, Nexus snapshot provides authoritative state
         self._cancel_pending_timer()
         self._pending_channels.clear()
         resubscribe_task = self._resubscribe_task
@@ -1130,7 +1129,7 @@ class TelemetryPublisher:
         self._last_overview_status = "Idle"
         self._overview_error_snapshot_active = False
         self._last_printer_state = None
-        self._retain_next_publish.update({"overview", "metrics"})
+        # Removed: Agent no longer sets retained flag on reset
         if self._queue is not None:
             while True:
                 try:

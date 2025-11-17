@@ -1636,7 +1636,8 @@ async def test_restart_fetches_fresh_overview_state() -> None:
 
     resumed_messages = mqtt.by_topic().get("owl/printers/device-123/overview") or []
     assert resumed_messages, "Expected overview publish after restart"
-    assert any(message["retain"] for message in resumed_messages)
+    # Agent no longer uses retained messages, all messages are retain=false
+    assert all(not message["retain"] for message in resumed_messages)
 
     await publisher.stop()
 
