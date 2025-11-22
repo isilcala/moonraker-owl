@@ -153,7 +153,7 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
 
     orchestrator = TelemetryOrchestrator(clock=clock)
     orchestrator.ingest(baseline_snapshot)
-    orchestrator.set_metrics_mode(
+    orchestrator.set_sensors_mode(
         mode="watch",
         max_hz=1.0,
         watch_window_expires=datetime(2025, 10, 10, 16, 44, 3, tzinfo=timezone.utc),
@@ -161,28 +161,28 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
 
     orchestrator.events.record_command_state(
         command_id="cmd-123",
-        command_type="metrics:set-rate",
+        command_type="sensors:set-rate",
         state="completed",
         session_id="history-4062",
     )
 
     frames = orchestrator.build_payloads()
 
-    assert set(frames.keys()) == {"overview", "metrics", "events"}
+    assert set(frames.keys()) == {"status", "sensors", "events"}
 
-    overview_frame = frames["overview"]
-    assert overview_frame.channel == "overview"
-    assert overview_frame.session_id.startswith("history-")
-    overview_body = overview_frame.payload
-    assert overview_body["printerStatus"] == "Printing"
-    assert overview_body["flags"]["watchWindowActive"] is True
-    assert overview_body["job"]["progressPercent"] == pytest.approx(12.0, rel=1e-3)
+    status_frame = frames["status"]
+    assert status_frame.channel == "status"
+    assert status_frame.session_id.startswith("history-")
+    status_body = status_frame.payload
+    assert status_body["printerStatus"] == "Printing"
+    assert status_body["flags"]["watchWindowActive"] is True
+    assert status_body["job"]["progressPercent"] == pytest.approx(12.0, rel=1e-3)
 
-    metrics_frame = frames["metrics"]
-    metrics = metrics_frame.payload
-    assert metrics["cadence"]["mode"] == "watch"
-    assert metrics["cadence"]["maxHz"] == 1.0
-    assert len(metrics["sensors"]) == 3
+    sensors_frame = frames["sensors"]
+    sensors = sensors_frame.payload
+    assert sensors["cadence"]["mode"] == "watch"
+    assert sensors["cadence"]["maxHz"] == 1.0
+    assert len(sensors["sensors"]) == 3
 
     events_frame = frames["events"]
     events = events_frame.payload
@@ -195,7 +195,7 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
     assert frames_second == {}
 
 
-def test_overview_last_updated_remains_stable_without_state_changes(
+def test_status_last_updated_remains_stable_without_state_changes(
     baseline_snapshot: dict,
 ) -> None:
     clock = FakeClock(
@@ -209,14 +209,14 @@ def test_overview_last_updated_remains_stable_without_state_changes(
     orchestrator.ingest(baseline_snapshot)
 
     first_frames = orchestrator.build_payloads()
-    first_overview = first_frames["overview"].payload
-    first_last_updated = first_overview["lastUpdatedUtc"]
+    first_status = first_frames["status"].payload
+    first_last_updated = first_status["lastUpdatedUtc"]
 
     orchestrator.ingest(baseline_snapshot)
 
     second_frames = orchestrator.build_payloads()
-    second_overview = second_frames["overview"].payload
-    assert second_overview["lastUpdatedUtc"] == first_last_updated
+    second_status = second_frames["status"].payload
+    assert second_status["lastUpdatedUtc"] == first_last_updated
 
 
 def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> None:
@@ -234,7 +234,7 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
     orchestrator.ingest(baseline_snapshot)
 
     first_frames = orchestrator.build_payloads()
-    sensors_first = first_frames["metrics"].payload["sensors"]
+    sensors_first = first_frames["sensors"].payload["sensors"]
     extruder_first = next(sensor for sensor in sensors_first if sensor["channel"] == "extruder")
     first_last_updated = extruder_first["lastUpdatedUtc"]
 
@@ -244,8 +244,8 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
     }
 
     orchestrator.ingest(noise_update)
-    second_frames = orchestrator.build_payloads(forced_channels=["metrics"])
-    sensors_second = second_frames["metrics"].payload["sensors"]
+    second_frames = orchestrator.build_payloads(forced_channels=["sensors"])
+    sensors_second = second_frames["sensors"].payload["sensors"]
     extruder_second = next(sensor for sensor in sensors_second if sensor["channel"] == "extruder")
     assert extruder_second["lastUpdatedUtc"] == first_last_updated
 
@@ -256,7 +256,7 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
 
     orchestrator.ingest(change_update)
     third_frames = orchestrator.build_payloads()
-    sensors_third = third_frames["metrics"].payload["sensors"]
+    sensors_third = third_frames["sensors"].payload["sensors"]
     extruder_third = next(sensor for sensor in sensors_third if sensor["channel"] == "extruder")
     assert extruder_third["lastUpdatedUtc"] != first_last_updated
 
@@ -266,14 +266,14 @@ def test_watch_window_flag_reflects_idle_mode(baseline_snapshot: dict) -> None:
     clock = FakeClock(now, now, now, now)
     orchestrator = TelemetryOrchestrator(clock=clock)
     orchestrator.ingest(baseline_snapshot)
-    orchestrator.set_metrics_mode(
+    orchestrator.set_sensors_mode(
         mode="idle", max_hz=0.033, watch_window_expires=None
     )
 
     frames = orchestrator.build_payloads()
 
-    overview_flags = frames["overview"].payload["flags"]
-    assert overview_flags["watchWindowActive"] is False
+    status_flags = frames["status"].payload["flags"]
+    assert status_flags["watchWindowActive"] is False
 
 
 def test_replay_stream_produces_progress() -> None:
@@ -284,12 +284,12 @@ def test_replay_stream_produces_progress() -> None:
         orchestrator.ingest(payload)
 
     frames = orchestrator.build_payloads()
-    assert "overview" in frames
-    overview_payload = frames["overview"].payload
+    assert "status" in frames
+    status_payload = frames["status"].payload
 
-    job_info = overview_payload.get("job", {})
+    job_info = status_payload.get("job", {})
     assert job_info.get("name")
     assert job_info.get("progress", {}).get("elapsedSeconds", 0) > 0
 
-    metrics_payload = frames["metrics"].payload
-    assert metrics_payload["cadence"]["mode"] == "idle"
+    sensors_payload = frames["sensors"].payload
+    assert sensors_payload["cadence"]["mode"] == "idle"

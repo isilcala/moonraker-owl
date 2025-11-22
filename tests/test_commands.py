@@ -96,7 +96,7 @@ class FakeTelemetry:
             }
         )
 
-    def apply_metrics_rate(
+    def apply_sensors_rate(
         self,
         *,
         mode: str,
@@ -342,7 +342,7 @@ async def test_command_processor_replays_cached_ack_for_duplicate(config):
 
 
 @pytest.mark.asyncio
-async def test_command_processor_handles_metrics_set_rate(config):
+async def test_command_processor_handles_sensors_set_rate(config):
     mqtt = FakeMQTT()
     telemetry = FakeTelemetry()
     telemetry.next_expires_at = datetime(2025, 1, 1, 13, 0, tzinfo=timezone.utc)
@@ -356,8 +356,8 @@ async def test_command_processor_handles_metrics_set_rate(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-metrics",
-        "command": "metrics:set-rate",
+        "commandId": "cmd-sensors",
+        "command": "sensors:set-rate",
         "parameters": {
             "mode": "watch",
             "maxHz": 5.0,
@@ -367,7 +367,7 @@ async def test_command_processor_handles_metrics_set_rate(config):
     }
 
     await mqtt.emit(
-        "owl/printers/device-123/commands/metrics:set-rate",
+        "owl/printers/device-123/commands/sensors:set-rate",
         message,
     )
 
@@ -381,7 +381,7 @@ async def test_command_processor_handles_metrics_set_rate(config):
     completed_records = [r for r in telemetry.records if r["state"] == "completed"]
     assert completed_records
     completed = completed_records[-1]
-    assert completed["command_type"] == "metrics:set-rate"
+    assert completed["command_type"] == "sensors:set-rate"
     details = completed["details"]
     assert details is not None
     assert details["mode"] == "watch"
@@ -391,13 +391,13 @@ async def test_command_processor_handles_metrics_set_rate(config):
 
     assert len(mqtt.published) == 2
     first_topic, first_payload, _, _ = mqtt.published[0]
-    assert first_topic == "owl/printers/device-123/acks/metrics%3Aset-rate"
+    assert first_topic == "owl/printers/device-123/acks/sensors%3Aset-rate"
     first_ack = json.loads(first_payload.decode("utf-8"))
     assert first_ack["status"] == "accepted"
     assert first_ack["stage"] == "dispatch"
 
     second_topic, second_payload, _, _ = mqtt.published[1]
-    assert second_topic == "owl/printers/device-123/acks/metrics%3Aset-rate"
+    assert second_topic == "owl/printers/device-123/acks/sensors%3Aset-rate"
     second_ack = json.loads(second_payload.decode("utf-8"))
     assert second_ack["status"] == "completed"
     assert second_ack["stage"] == "execution"

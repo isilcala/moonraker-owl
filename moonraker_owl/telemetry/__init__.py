@@ -287,13 +287,13 @@ class TelemetryPublisher:
 
         self._base_topic = f"owl/printers/{self._device_id}"
         self._channel_topics: Dict[str, str] = {
-            "overview": f"{self._base_topic}/overview",
-            "metrics": f"{self._base_topic}/metrics",
+            "status": f"{self._base_topic}/status",
+            "sensors": f"{self._base_topic}/sensors",
             "events": f"{self._base_topic}/events",
         }
         self._channel_qos = {
-            "overview": 1,
-            "metrics": 0,
+            "status": 1,
+            "sensors": 0,
             "events": 2,
         }
         self._channel_state: Dict[str, _ChannelPublishState] = {
@@ -306,7 +306,7 @@ class TelemetryPublisher:
         )
         self._retain_next_publish: Set[str] = set()  # Agent no longer uses retained, Nexus snapshot provides authority
         self._force_error_retain: Optional[bool] = None
-        self._overview_error_snapshot_active = False
+        self._status_error_snapshot_active = False
         self._status_listeners: list[Callable[[Dict[str, Any]], Any]] = []
 
         self._min_interval = 0.05
@@ -314,7 +314,7 @@ class TelemetryPublisher:
         self._idle_hz = idle_hz
         self._idle_interval = _hz_to_interval(idle_hz) or 30.0
         self._watch_interval = _hz_to_interval(1.0) or 1.0
-        self._metrics_interval = self._idle_interval
+        self._sensors_interval = self._idle_interval
         events_interval = None
         if self._cadence.events_max_per_second > 0:
             events_interval = 1.0 / float(self._cadence.events_max_per_second)
@@ -347,14 +347,14 @@ class TelemetryPublisher:
         self._last_listener_state: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = None
         self._klippy_ready_applied = False
 
-        self._last_overview_publish_time = 0.0
-        self._last_overview_status = "Idle"
+        self._last_status_publish_time = 0.0
+        self._last_status_status = "Idle"
         self._last_payload_snapshot: Optional[Dict[str, Any]] = None
-        self._overview_idle_interval = self._cadence.overview_idle_interval_seconds
-        self._overview_active_interval = (
-            self._cadence.overview_active_interval_seconds
+        self._status_idle_interval = self._cadence.status_idle_interval_seconds
+        self._status_active_interval = (
+            self._cadence.status_active_interval_seconds
         )
-        self._metrics_watchdog_seconds = self._cadence.telemetry_watchdog_seconds
+        self._sensors_watchdog_seconds = self._cadence.sensors_watchdog_seconds
         self._watch_window_expires: Optional[datetime] = None
         self._current_mode = "idle"
         self._bootstrapped = False
@@ -363,14 +363,14 @@ class TelemetryPublisher:
             clock=lambda: datetime.now(timezone.utc),
             cadence=self._cadence,
         )
-        self._orchestrator.set_metrics_mode(
+        self._orchestrator.set_sensors_mode(
             mode="idle",
             max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
             watch_window_expires=None,
         )
 
         # Emit an initial cadence log to capture baseline configuration.
-        self.apply_metrics_rate(
+        self.apply_sensors_rate(
             mode="idle",
             max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
             duration_seconds=None,
@@ -422,7 +422,7 @@ class TelemetryPublisher:
 
     @property
     def topic(self) -> str:
-        return self._channel_topics["metrics"]
+        return self._channel_topics["sensors"]
 
     async def _dispose_worker(self, *, remove_callback: bool = False) -> None:
         worker = self._worker
@@ -574,7 +574,7 @@ class TelemetryPublisher:
                     if heartbeat_payload is not None:
                         pending = heartbeat_payload
                         pending_overrides = {
-                            "overview": _PendingChannel(forced=True)
+                            "status": _PendingChannel(forced=True)
                         }
                     else:
                         await self._event.wait()
@@ -588,7 +588,7 @@ class TelemetryPublisher:
                 if heartbeat_payload is not None:
                     pending = heartbeat_payload
                     pending_overrides = {
-                        "overview": _PendingChannel(forced=True)
+                        "status": _PendingChannel(forced=True)
                     }
 
             while not self._stop_event.is_set():
@@ -732,7 +732,7 @@ class TelemetryPublisher:
                 frame.payload,
                 explicit_force=frame.forced or override_forced or force_due_to_reset,
                 respect_cadence=override_respect_cadence,
-                allow_watchdog=(channel == "metrics"),
+                allow_watchdog=(channel == "sensors"),
             )
 
             if not decision.should_publish:
@@ -762,34 +762,34 @@ class TelemetryPublisher:
                 raw_json=raw_json,
             )
 
-            if channel == "overview":
-                overview_body = envelope.get("overview")
-                if isinstance(overview_body, dict):
-                    status_value = overview_body.get("printerStatus")
-                    if isinstance(status_value, str):
-                        normalized_status = status_value.strip()
-                        if normalized_status:
-                            previous_status_value = self._last_overview_status
-                            self._last_overview_status = status_value
-                            self._last_overview_publish_time = now_monotonic
-                            status_lower = normalized_status.lower()
-                            if status_lower == "error":
-                                if not self._overview_error_snapshot_active:
-                                    self._clear_retained_channels(("overview", "metrics"))
-                                    self._overview_error_snapshot_active = True
+            if channel == "status":
+                status_body = envelope.get("status")
+                if isinstance(status_body, dict):
+                    state_value = status_body.get("printerStatus")
+                    if isinstance(state_value, str):
+                        normalized_state = state_value.strip()
+                        if normalized_state:
+                            previous_state_value = self._last_status_status
+                            self._last_status_status = state_value
+                            self._last_status_publish_time = now_monotonic
+                            state_lower = normalized_state.lower()
+                            if state_lower == "error":
+                                if not self._status_error_snapshot_active:
+                                    self._clear_retained_channels(("status", "sensors"))
+                                    self._status_error_snapshot_active = True
                                 retain_error = self._force_error_retain
                                 if retain_error is None:
                                     previous_lower = (
-                                        (previous_status_value or "").strip().lower()
+                                        (previous_state_value or "").strip().lower()
                                     )
                                     retain_error = previous_lower in {"printing", "paused"}
                                 if retain_error:
-                                    self._retain_next_publish.add("overview")
+                                    self._retain_next_publish.add("status")
                                 else:
-                                    self._retain_next_publish.discard("overview")
-                            elif self._overview_error_snapshot_active:
-                                self._retain_next_publish.add("overview")
-                                self._overview_error_snapshot_active = False
+                                    self._retain_next_publish.discard("status")
+                            elif self._status_error_snapshot_active:
+                                self._retain_next_publish.add("status")
+                                self._status_error_snapshot_active = False
 
             retain = channel in self._retain_next_publish
             if retain:
@@ -803,11 +803,11 @@ class TelemetryPublisher:
                 self._schedule_cadence_check(min_delay)
 
         if not self._bootstrapped and skipped_pre_bootstrap:
-            self._orchestrator.overview_selector.reset()
-            self._orchestrator.metrics_selector.reset()
+            self._orchestrator.status_selector.reset()
+            self._orchestrator.sensors_selector.reset()
 
     def _prepare_heartbeat_payload(self) -> Optional[Dict[str, Any]]:
-        if not self._should_emit_overview_heartbeat():
+        if not self._should_emit_status_heartbeat():
             return None
 
         if self._last_payload_snapshot is None:
@@ -815,17 +815,17 @@ class TelemetryPublisher:
 
         return copy.deepcopy(self._last_payload_snapshot)
 
-    def _should_emit_overview_heartbeat(self) -> bool:
-        if self._last_overview_publish_time == 0.0:
+    def _should_emit_status_heartbeat(self) -> bool:
+        if self._last_status_publish_time == 0.0:
             return False
 
         interval = (
-            self._overview_active_interval
-            if self._last_overview_status in {"Printing", "Paused"}
-            else self._overview_idle_interval
+            self._status_active_interval
+            if self._last_status_status in {"Printing", "Paused"}
+            else self._status_idle_interval
         )
 
-        return time.monotonic() - self._last_overview_publish_time >= interval
+        return time.monotonic() - self._last_status_publish_time >= interval
 
     def _maybe_expire_watch_window(self, *, now: Optional[datetime] = None) -> None:
         if self._current_mode == "idle":
@@ -843,14 +843,14 @@ class TelemetryPublisher:
             "Telemetry watch window expired at %s; reverting to idle cadence",
             expires_at.isoformat(),
         )
-        self.apply_metrics_rate(
+        self.apply_sensors_rate(
             mode="idle",
             max_hz=self._idle_hz,
             duration_seconds=None,
             requested_at=current_time,
         )
 
-    def apply_metrics_rate(
+    def apply_sensors_rate(
         self,
         *,
         mode: str,
@@ -878,15 +878,15 @@ class TelemetryPublisher:
         effective_hz = 0.0 if interval <= 0 else 1.0 / interval
 
         previous_mode = self._current_mode
-        previous_interval = self._metrics_interval
+        previous_interval = self._sensors_interval
 
-        self._metrics_interval = interval
+        self._sensors_interval = interval
         self._watch_window_expires = expires_at
         if interval > 0:
-            self._metrics_watchdog_seconds = max(300.0, interval * 5)
+            self._sensors_watchdog_seconds = max(300.0, interval * 5)
         self._current_mode = mode
         self._refresh_channel_schedules()
-        self._orchestrator.set_metrics_mode(
+        self._orchestrator.set_sensors_mode(
             mode=mode,
             max_hz=effective_hz,
             watch_window_expires=expires_at,
@@ -903,7 +903,7 @@ class TelemetryPublisher:
                 expires_at.isoformat() if expires_at else "<none>",
             )
 
-        for channel in ("metrics", "overview"):
+        for channel in ("sensors", "status"):
             self._cadence_controller.reset_channel(channel)
 
         self._event.set()
@@ -917,43 +917,43 @@ class TelemetryPublisher:
         return expires_at
 
     def _refresh_channel_schedules(self) -> None:
-        overview_interval: Optional[float] = None
-        metrics_interval = (
-            self._metrics_interval if self._metrics_interval and self._metrics_interval > 0 else None
+        status_interval: Optional[float] = None
+        sensors_interval = (
+            self._sensors_interval if self._sensors_interval and self._sensors_interval > 0 else None
         )
         # Force cadence only tails the watch profile; once we drop back to idle we allow
         # forced publishes to follow the broader idle cadence rather than remaining at 1 Hz.
         if self._current_mode == "watch":
-            metrics_forced_interval = (
+            sensors_forced_interval = (
                 self._watch_interval if self._watch_interval and self._watch_interval > 0 else None
             )
         else:
-            metrics_forced_interval = (
-                metrics_interval if metrics_interval and metrics_interval > 0 else None
+            sensors_forced_interval = (
+                sensors_interval if sensors_interval and sensors_interval > 0 else None
             )
-        metrics_watchdog = (
-            self._metrics_watchdog_seconds
-            if self._metrics_watchdog_seconds and self._metrics_watchdog_seconds > 0
+        sensors_watchdog = (
+            self._sensors_watchdog_seconds
+            if self._sensors_watchdog_seconds and self._sensors_watchdog_seconds > 0
             else None
         )
         events_interval = (
             self._events_interval if self._events_interval and self._events_interval > 0 else None
         )
 
-        if "overview" in self._channel_topics:
+        if "status" in self._channel_topics:
             self._cadence_controller.configure(
-                "overview",
-                interval=overview_interval,
+                "status",
+                interval=status_interval,
                 forced_interval=None,
                 watchdog_seconds=None,
             )
 
-        if "metrics" in self._channel_topics:
+        if "sensors" in self._channel_topics:
             self._cadence_controller.configure(
-                "metrics",
-                interval=metrics_interval,
-                forced_interval=metrics_forced_interval,
-                watchdog_seconds=metrics_watchdog,
+                "sensors",
+                interval=sensors_interval,
+                forced_interval=sensors_forced_interval,
+                watchdog_seconds=sensors_watchdog,
             )
 
         if "events" in self._channel_topics:
@@ -1110,14 +1110,14 @@ class TelemetryPublisher:
             self._resubscribe_task = None
 
         self._orchestrator.reset()
-        self._orchestrator.set_metrics_mode(
+        self._orchestrator.set_sensors_mode(
             mode="idle",
             max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
             watch_window_expires=None,
         )
         self._current_mode = "idle"
-        self._metrics_interval = self._idle_interval
-        self._metrics_watchdog_seconds = self._cadence.telemetry_watchdog_seconds
+        self._sensors_interval = self._idle_interval
+        self._sensors_watchdog_seconds = self._cadence.sensors_watchdog_seconds
         self._watch_window_expires = None
         self._bootstrapped = False
         self._cadence_controller.reset_all()
@@ -1125,9 +1125,9 @@ class TelemetryPublisher:
         self._pending_payload = None
         self._pending_channels.clear()
         self._last_payload_snapshot = None
-        self._last_overview_publish_time = 0.0
-        self._last_overview_status = "Idle"
-        self._overview_error_snapshot_active = False
+        self._last_status_publish_time = 0.0
+        self._last_status_status = "Idle"
+        self._status_error_snapshot_active = False
         self._last_printer_state = None
         # Removed: Agent no longer sets retained flag on reset
         if self._queue is not None:
@@ -1138,15 +1138,15 @@ class TelemetryPublisher:
                     break
         self._reapply_rate_request()
         self._force_full_channels_after_reset.clear()
-        self._force_full_channels_after_reset.update({"overview", "metrics"})
+        self._force_full_channels_after_reset.update({"status", "sensors"})
 
         if previous_snapshot is not None:
             self._pending_payload = copy.deepcopy(previous_snapshot)
-            self._pending_channels["overview"] = _PendingChannel(
+            self._pending_channels["status"] = _PendingChannel(
                 forced=True,
                 respect_cadence=False,
             )
-            self._pending_channels["metrics"] = _PendingChannel(
+            self._pending_channels["sensors"] = _PendingChannel(
                 forced=True,
                 respect_cadence=False,
             )
@@ -1178,7 +1178,7 @@ class TelemetryPublisher:
             f"{remaining_seconds}s" if remaining_seconds is not None else "indefinite",
         )
 
-        self.apply_metrics_rate(
+        self.apply_sensors_rate(
             mode=request.mode,
             max_hz=request.max_hz,
             duration_seconds=remaining_seconds,
@@ -1213,7 +1213,7 @@ class TelemetryPublisher:
                 }
             }
         }
-        previous_status = (self._last_overview_status or "").strip().lower()
+        previous_status = (self._last_status_status or "").strip().lower()
         session = self._orchestrator.session_tracker.compute(self._orchestrator.store)
         retain_error = previous_status in {"printing", "paused"}
         if not retain_error:
@@ -1223,14 +1223,14 @@ class TelemetryPublisher:
 
         self._force_error_retain = retain_error
         if not retain_error:
-            self._retain_next_publish.discard("overview")
+            self._retain_next_publish.discard("status")
 
         snapshot = self._orchestrator.store.export_state()
         try:
             self._process_payload(
                 status_payload,
                 overrides={
-                    "overview": _PendingChannel(
+                    "status": _PendingChannel(
                         forced=True,
                         respect_cadence=False,
                     )

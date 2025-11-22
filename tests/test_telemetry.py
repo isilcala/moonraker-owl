@@ -31,7 +31,7 @@ from moonraker_owl.telemetry import (
     PollSpec,
     build_subscription_manifest,
 )
-from moonraker_owl.telemetry.selectors import OverviewSelector
+from moonraker_owl.telemetry.selectors import StatusSelector
 from moonraker_owl.telemetry.state_store import MoonrakerStateStore
 from moonraker_owl.telemetry.trackers import HeaterMonitor, PrintSessionTracker
 from moonraker_owl.telemetry_normalizer import TelemetryNormalizer
@@ -185,10 +185,10 @@ def test_normalizer_maps_printer_states(raw_state: str, expected_status: str) ->
         }
     )
 
-    overview = payload.overview
-    assert overview is not None, "Expected overview payload"
-    assert overview.get("printerStatus") == expected_status
-    assert "rawStatus" not in overview
+    status = payload.status
+    assert status is not None, "Expected status payload"
+    assert status.get("printerStatus") == expected_status
+    assert "rawStatus" not in status
 
 
 @pytest.mark.parametrize(
@@ -215,9 +215,9 @@ def test_normalizer_maps_print_stats_update_states(
         }
     )
 
-    overview = payload.overview
-    assert overview is not None, "Expected overview payload"
-    assert overview.get("printerStatus") == expected_status
+    status = payload.status
+    assert status is not None, "Expected status payload"
+    assert status.get("printerStatus") == expected_status
 
 
 def test_normalizer_handles_tuple_style_print_stats_payload() -> None:
@@ -230,9 +230,9 @@ def test_normalizer_handles_tuple_style_print_stats_payload() -> None:
         }
     )
 
-    overview = payload.overview
-    assert overview is not None
-    assert overview.get("printerStatus") == "Printing"
+    status = payload.status
+    assert status is not None
+    assert status.get("printerStatus") == "Printing"
     print_stats_state = normalizer._status_state.get("print_stats", {}).get("state")  # type: ignore[attr-defined]
     assert print_stats_state == "printing"
 
@@ -247,9 +247,9 @@ def test_normalizer_handles_print_stats_dict_params() -> None:
         }
     )
 
-    overview = payload.overview
-    assert overview is not None
-    assert overview.get("printerStatus") == "Printing"
+    status = payload.status
+    assert status is not None
+    assert status.get("printerStatus") == "Printing"
     print_stats_state = normalizer._status_state.get("print_stats", {}).get("state")  # type: ignore[attr-defined]
     assert print_stats_state == "printing"
 
@@ -274,9 +274,9 @@ def test_cancelled_overrides_prior_paused_state() -> None:
         }
     )
 
-    overview = cancelled.overview
-    assert overview is not None
-    assert overview.get("printerStatus") == "Cancelled"
+    status = cancelled.status
+    assert status is not None
+    assert status.get("printerStatus") == "Cancelled"
 
 
 def test_status_update_reports_cancelled() -> None:
@@ -296,9 +296,9 @@ def test_status_update_reports_cancelled() -> None:
         }
     )
 
-    overview = payload.overview
-    assert overview is not None
-    assert overview.get("printerStatus") == "Cancelled"
+    status = payload.status
+    assert status is not None
+    assert status.get("printerStatus") == "Cancelled"
 
 
 def test_cancelled_state_persists_briefly(monkeypatch) -> None:
@@ -332,8 +332,8 @@ def test_cancelled_state_persists_briefly(monkeypatch) -> None:
             "params": [{"state": "cancelled"}],
         }
     )
-    assert cancelled.overview is not None
-    assert cancelled.overview.get("printerStatus") == "Cancelled"
+    assert cancelled.status is not None
+    assert cancelled.status.get("printerStatus") == "Cancelled"
 
     standby_recent = normalizer.ingest(
         {
@@ -341,8 +341,8 @@ def test_cancelled_state_persists_briefly(monkeypatch) -> None:
             "params": [{"state": "standby"}],
         }
     )
-    assert standby_recent.overview is not None
-    assert standby_recent.overview.get("printerStatus") == "Cancelled"
+    assert standby_recent.status is not None
+    assert standby_recent.status.get("printerStatus") == "Cancelled"
 
     standby_late = normalizer.ingest(
         {
@@ -350,8 +350,8 @@ def test_cancelled_state_persists_briefly(monkeypatch) -> None:
             "params": [{"state": "standby"}],
         }
     )
-    assert standby_late.overview is not None
-    assert standby_late.overview.get("printerStatus") == "Idle"
+    assert standby_late.status is not None
+    assert standby_late.status.get("printerStatus") == "Idle"
 
 
 def test_terminal_state_clears_on_printing(monkeypatch) -> None:
@@ -392,8 +392,8 @@ def test_terminal_state_clears_on_printing(monkeypatch) -> None:
         }
     )
 
-    assert printing.overview is not None
-    assert printing.overview.get("printerStatus") == "Printing"
+    assert printing.status is not None
+    assert printing.status.get("printerStatus") == "Printing"
 
 
 def test_active_job_overrides_cancelled_latch(monkeypatch) -> None:
@@ -440,11 +440,11 @@ def test_active_job_overrides_cancelled_latch(monkeypatch) -> None:
         }
     )
 
-    assert job_loaded.overview is not None
-    assert job_loaded.overview.get("printerStatus") == "Printing"
+    assert job_loaded.status is not None
+    assert job_loaded.status.get("printerStatus") == "Printing"
 
 
-def test_overview_last_updated_refreshes_without_changes(monkeypatch) -> None:
+def test_status_last_updated_refreshes_without_changes(monkeypatch) -> None:
     normalizer = TelemetryNormalizer()
 
     payload = {
@@ -477,14 +477,14 @@ def test_overview_last_updated_refreshes_without_changes(monkeypatch) -> None:
 
     monkeypatch.setattr(telemetry_normalizer, "datetime", FakeDateTime)
 
-    first_overview = normalizer.ingest(payload).overview
-    assert first_overview is not None
-    second_overview = normalizer.ingest(payload).overview
-    assert second_overview is not None
+    first_status = normalizer.ingest(payload).status
+    assert first_status is not None
+    second_status = normalizer.ingest(payload).status
+    assert second_status is not None
 
-    assert first_overview.get("lastUpdatedUtc") is not None
-    assert second_overview.get("lastUpdatedUtc") is not None
-    assert second_overview["lastUpdatedUtc"] != first_overview["lastUpdatedUtc"]
+    assert first_status.get("lastUpdatedUtc") is not None
+    assert second_status.get("lastUpdatedUtc") is not None
+    assert second_status["lastUpdatedUtc"] != first_status["lastUpdatedUtc"]
 
 
 @pytest.mark.asyncio
@@ -509,8 +509,8 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
     # Device authentication now handled via JWT (MQTT password) - no UserProperty needed
     assert getattr(props, "UserProperty", None) is None
 
-    expected_qos = {"overview": 1, "metrics": 0}
-    for channel in ("overview", "metrics"):
+    expected_qos = {"status": 1, "sensors": 0}
+    for channel in ("status", "sensors"):
         topic = f"owl/printers/device-123/{channel}"
         assert topic in messages, f"Missing channel {channel}"
         first_message = messages[topic][0]
@@ -526,11 +526,11 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         assert document.get("_seq") is not None
         assert "raw" not in document, "Raw field should be excluded by default"
 
-    metrics_doc = _decode(messages["owl/printers/device-123/metrics"][0])
-    metrics_body = metrics_doc.get("metrics")
-    assert isinstance(metrics_body, dict)
-    sensors = metrics_body.get("sensors")
-    assert isinstance(sensors, list) and sensors, "Expected metrics sensor payload"
+    sensors_doc = _decode(messages["owl/printers/device-123/sensors"][0])
+    sensors_body = sensors_doc.get("sensors")
+    assert isinstance(sensors_body, dict)
+    sensors = sensors_body.get("sensors")
+    assert isinstance(sensors, list) and sensors, "Expected sensors payload"
     extruder_sensor = next(
         (sensor for sensor in sensors if sensor.get("channel") == "extruder"),
         None,
@@ -540,19 +540,19 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
     assert extruder_sensor.get("value") is not None
     assert extruder_sensor.get("target") is not None
 
-    overview_doc = _decode(messages["owl/printers/device-123/overview"][0])
-    overview_contract = overview_doc.get("overview")
-    assert isinstance(overview_contract, dict)
-    assert overview_contract.get("printerStatus") == "Printing"
-    assert overview_contract.get("elapsedSeconds") is not None
-    assert overview_contract.get("estimatedTimeRemainingSeconds") is not None
-    assert overview_contract.get("subStatus")
-    flags = overview_contract.get("flags")
+    status_doc = _decode(messages["owl/printers/device-123/status"][0])
+    status_contract = status_doc.get("status")
+    assert isinstance(status_contract, dict)
+    assert status_contract.get("printerStatus") == "Printing"
+    assert status_contract.get("elapsedSeconds") is not None
+    assert status_contract.get("estimatedTimeRemainingSeconds") is not None
+    assert status_contract.get("subStatus")
+    flags = status_contract.get("flags")
     assert isinstance(flags, dict)
     assert flags.get("hasActiveJob") is True
     assert flags.get("watchWindowActive") is False
 
-    job_contract = overview_contract.get("job")
+    job_contract = status_contract.get("job")
     assert isinstance(job_contract, dict)
     assert job_contract.get("name")
     assert job_contract.get("progressPercent") is not None
@@ -573,38 +573,37 @@ async def test_pipeline_emits_schema_envelopes() -> None:
     await publisher.stop()
 
     messages = mqtt.by_topic()
-    metrics_topic = "owl/printers/device-123/metrics"
-    overview_topic = "owl/printers/device-123/overview"
+    sensors_topic = "owl/printers/device-123/sensors"
+    status_topic = "owl/printers/device-123/status"
 
-    assert metrics_topic in messages, "Expected metrics channel"
-    assert overview_topic in messages, "Expected overview channel"
-    assert "owl/printers/device-123/sensors" not in messages
+    assert sensors_topic in messages, "Expected sensors channel"
+    assert status_topic in messages, "Expected status channel"
 
-    metrics_envelope = _decode(messages[metrics_topic][0])
-    assert metrics_envelope["_schema"] == 1
-    assert metrics_envelope["kind"] == "full"
-    assert metrics_envelope["_origin"] == EXPECTED_ORIGIN
-    assert metrics_envelope.get("metrics")
-    cadence = metrics_envelope["metrics"].get("cadence")
+    sensors_envelope = _decode(messages[sensors_topic][0])
+    assert sensors_envelope["_schema"] == 1
+    assert sensors_envelope["kind"] == "full"
+    assert sensors_envelope["_origin"] == EXPECTED_ORIGIN
+    assert sensors_envelope.get("sensors")
+    cadence = sensors_envelope["sensors"].get("cadence")
     assert isinstance(cadence, dict)
     assert cadence.get("mode") == "idle"
 
-    sensors = metrics_envelope["metrics"].get("sensors")
+    sensors = sensors_envelope["sensors"].get("sensors")
     assert isinstance(sensors, list) and sensors
 
-    overview_envelope = _decode(messages[overview_topic][0])
-    assert overview_envelope["_schema"] == 1
-    assert overview_envelope["kind"] == "full"
-    overview_payload = overview_envelope.get("overview")
-    assert isinstance(overview_payload, dict)
-    assert overview_payload.get("printerStatus")
+    status_envelope = _decode(messages[status_topic][0])
+    assert status_envelope["_schema"] == 1
+    assert status_envelope["kind"] == "full"
+    status_payload = status_envelope.get("status")
+    assert isinstance(status_payload, dict)
+    assert status_payload.get("printerStatus")
 
 
 def test_cancelled_print_drops_redundant_printing_message() -> None:
     store = MoonrakerStateStore()
     tracker = PrintSessionTracker()
     heater = HeaterMonitor()
-    selector = OverviewSelector()
+    selector = StatusSelector()
 
     observed_at = datetime.now(timezone.utc)
 
@@ -625,10 +624,10 @@ def test_cancelled_print_drops_redundant_printing_message() -> None:
     heater.refresh(store)
 
     session = tracker.compute(store)
-    overview = selector.build(store, session, heater, observed_at)
-    assert overview is not None
-    assert overview.get("printerStatus") == "Printing"
-    assert overview.get("subStatus") == "Printing"
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert status.get("printerStatus") == "Printing"
+    assert status.get("subStatus") == "Printing"
 
     store.ingest(
         {
@@ -646,10 +645,10 @@ def test_cancelled_print_drops_redundant_printing_message() -> None:
     heater.refresh(store)
 
     session = tracker.compute(store)
-    overview = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
-    assert overview is not None
-    assert overview.get("printerStatus") == "Cancelled"
-    assert overview.get("subStatus") is None
+    status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
+    assert status is not None
+    assert status.get("printerStatus") == "Cancelled"
+    assert status.get("subStatus") is None
     assert session.message is None
     assert session.has_active_job is False
 
@@ -658,7 +657,7 @@ def test_pause_then_cancel_clears_paused_state() -> None:
     store = MoonrakerStateStore()
     tracker = PrintSessionTracker()
     heater = HeaterMonitor()
-    selector = OverviewSelector()
+    selector = StatusSelector()
 
     observed_at = datetime.now(timezone.utc)
 
@@ -691,10 +690,10 @@ def test_pause_then_cancel_clears_paused_state() -> None:
     heater.refresh(store)
 
     session = tracker.compute(store)
-    overview = selector.build(store, session, heater, observed_at)
-    assert overview is not None
-    assert overview.get("printerStatus") == "Printing"
-    assert overview.get("subStatus") == "Printing"
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert status.get("printerStatus") == "Printing"
+    assert status.get("subStatus") == "Printing"
     assert session.has_active_job is True
 
     store.ingest(
@@ -713,10 +712,10 @@ def test_pause_then_cancel_clears_paused_state() -> None:
     heater.refresh(store)
 
     session = tracker.compute(store)
-    overview = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
-    assert overview is not None
-    assert overview.get("printerStatus") == "Paused"
-    assert overview.get("subStatus") == "Paused"
+    status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
+    assert status is not None
+    assert status.get("printerStatus") == "Paused"
+    assert status.get("subStatus") == "Paused"
     assert session.has_active_job is True
 
     store.ingest(
@@ -751,16 +750,16 @@ def test_pause_then_cancel_clears_paused_state() -> None:
     heater.refresh(store)
 
     session = tracker.compute(store)
-    overview = selector.build(store, session, heater, observed_at + timedelta(seconds=2))
-    assert overview is not None
-    assert overview.get("printerStatus") == "Cancelled"
-    assert overview.get("subStatus") is None
+    status = selector.build(store, session, heater, observed_at + timedelta(seconds=2))
+    assert status is not None
+    assert status.get("printerStatus") == "Cancelled"
+    assert status.get("subStatus") is None
     assert session.message is None
     assert session.has_active_job is False
 
 
 @pytest.mark.asyncio
-async def test_publisher_emits_overview_full_update() -> None:
+async def test_publisher_emits_status_full_update() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
@@ -787,14 +786,14 @@ async def test_publisher_emits_overview_full_update() -> None:
 
 
 
-    overview_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
-    assert overview_messages, "Expected overview updates"
-    document = _decode(overview_messages[-1])
+    status_messages = mqtt.by_topic().get("owl/printers/device-123/status")
+    assert status_messages, "Expected status updates"
+    document = _decode(status_messages[-1])
     assert document["kind"] == "full"
-    overview = document.get("overview")
-    assert isinstance(overview, dict)
+    status = document.get("status")
+    assert isinstance(status, dict)
 
-    job = overview.get("job")
+    job = status.get("job")
     assert isinstance(job, dict)
     assert job.get("progressPercent") == pytest.approx(55.0, rel=1e-3)
 
@@ -814,7 +813,7 @@ async def test_publisher_emits_events_channel() -> None:
     # Manually queue an event to ensure the publisher forwards orchestrator events.
     publisher._orchestrator.events.record_command_state(
         command_id="cmd-123",
-    command_type="metrics:set-rate",
+    command_type="sensors:set-rate",
         state="completed",
         session_id="history-1",
     )
@@ -1161,9 +1160,9 @@ async def test_polling_fetches_unsubscribed_objects() -> None:
     await asyncio.sleep(0.1)
 
     topics = mqtt.by_topic()
-    assert topics, f"Expected metrics replay topics, found: {topics}"
+    assert topics, f"Expected sensors replay topics, found: {topics}"
 
-    replay_messages = topics.get("owl/printers/device-123/metrics")
+    replay_messages = topics.get("owl/printers/device-123/sensors")
     polled_objects = next(
         (
             entry
@@ -1228,16 +1227,16 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
     await asyncio.sleep(0.1)
     await publisher.stop()
 
-    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
-    assert metrics_messages, "Expected metrics publish after heater ramp"
-    assert len(metrics_messages) == 1
+    sensors_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    assert sensors_messages, "Expected sensors publish after heater ramp"
+    assert len(sensors_messages) == 1
 
-    document = _decode(metrics_messages[0])
+    document = _decode(sensors_messages[0])
     assert document.get("_seq", 0) > 1
 
-    metrics_body = document.get("metrics")
-    assert isinstance(metrics_body, dict)
-    sensors = metrics_body.get("sensors")
+    sensors_body = document.get("sensors")
+    assert isinstance(sensors_body, dict)
+    sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list)
     extruder_sensor = next(
         sensor for sensor in sensors if sensor.get("channel") == "extruder"
@@ -1247,7 +1246,7 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_system_status_clears_retained_overview() -> None:
+async def test_publish_system_status_clears_retained_status() -> None:
     initial_state = {
         "result": {
             "status": {
@@ -1280,23 +1279,23 @@ async def test_publish_system_status_clears_retained_overview() -> None:
     await asyncio.sleep(0.05)
     await publisher.stop()
 
-    overview_messages = [
+    status_messages = [
         message
         for message in mqtt.messages
-        if message["topic"].endswith("/overview")
+        if message["topic"].endswith("/status")
     ]
 
-    assert overview_messages, "Expected overview publications"
-    clear_message = overview_messages[0]
+    assert status_messages, "Expected status publications"
+    clear_message = status_messages[0]
     assert clear_message["retain"] is True
     assert clear_message["payload"] == b""
 
-    error_message = overview_messages[-1]
+    error_message = status_messages[-1]
     assert error_message["retain"] is False
     document = _decode(error_message)
-    overview = document.get("overview")
-    assert isinstance(overview, dict)
-    assert overview.get("printerStatus") == "Error"
+    status = document.get("status")
+    assert isinstance(status, dict)
+    assert status.get("printerStatus") == "Error"
 
 
 def test_telemetry_configuration_requires_device_id():
@@ -1428,14 +1427,14 @@ async def test_temperature_target_preserved_across_updates() -> None:
     await publisher.stop()
 
     # Verify the target was preserved
-    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
-    assert metrics_messages, "Expected metrics updates"
+    sensors_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    assert sensors_messages, "Expected sensors updates"
 
-    document = _decode(metrics_messages[-1])
-    metrics_body = document.get("metrics")
-    assert isinstance(metrics_body, dict)
-    sensors = metrics_body.get("sensors")
-    assert isinstance(sensors, list)
+    document = _decode(sensors_messages[-1])
+    sensors_body = document.get("sensors")
+    assert isinstance(sensors_body, dict)
+    sensors = sensors_body.get("sensors")
+    assert isinstance(sensors, list) and sensors
 
     def _find(channel: str) -> Dict[str, Any]:
         for sensor in sensors:
@@ -1491,7 +1490,7 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
 
     await asyncio.sleep(0.1)
 
-    first_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
+    first_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
     assert not first_messages, "Expected fractional change to be suppressed by rounding"
 
     await moonraker.emit(
@@ -1510,13 +1509,13 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
     await asyncio.sleep(0.1)
     await publisher.stop()
 
-    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
-    assert metrics_messages, "Expected integer-scale change to publish metrics"
+    sensors_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    assert sensors_messages, "Expected integer-scale change to publish sensors"
 
-    document = _decode(metrics_messages[-1])
-    metrics_body = document.get("metrics")
-    assert isinstance(metrics_body, dict)
-    sensors = metrics_body.get("sensors")
+    document = _decode(sensors_messages[-1])
+    sensors_body = document.get("sensors")
+    assert isinstance(sensors_body, dict)
+    sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list)
     extruder_sensor = next(
         sensor for sensor in sensors if sensor.get("channel") == "extruder"
@@ -1578,13 +1577,13 @@ async def test_idle_cadence_flushes_latest_payload() -> None:
     await asyncio.sleep(2.5)
     await publisher.stop()
 
-    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
-    assert metrics_messages, "Expected deferred payload to flush"
+    sensors_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    assert sensors_messages, "Expected deferred payload to flush"
 
-    document = _decode(metrics_messages[-1])
-    metrics_body = document.get("metrics")
-    assert isinstance(metrics_body, dict)
-    sensors = metrics_body.get("sensors")
+    document = _decode(sensors_messages[-1])
+    sensors_body = document.get("sensors")
+    assert isinstance(sensors_body, dict)
+    sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list)
 
     extruder_sensor = next(
@@ -1594,7 +1593,7 @@ async def test_idle_cadence_flushes_latest_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restart_fetches_fresh_overview_state() -> None:
+async def test_restart_fetches_fresh_status_state() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
 
     moonraker = FakeMoonrakerClient(sample)
@@ -1606,8 +1605,8 @@ async def test_restart_fetches_fresh_overview_state() -> None:
     await publisher.start()
     await asyncio.sleep(0.05)
 
-    initial_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
-    assert initial_messages, "Expected initial overview publish"
+    initial_messages = mqtt.by_topic().get("owl/printers/device-123/status")
+    assert initial_messages, "Expected initial status publish"
 
     await publisher.stop()
     mqtt.messages.clear()
@@ -1622,20 +1621,20 @@ async def test_restart_fetches_fresh_overview_state() -> None:
     latest_status: Optional[str] = None
 
     while loop.time() < deadline:
-        resumed_messages = mqtt.by_topic().get("owl/printers/device-123/overview") or []
+        resumed_messages = mqtt.by_topic().get("owl/printers/device-123/status") or []
         if resumed_messages:
             last_message = _decode(resumed_messages[-1])
-            overview_body = last_message.get("overview")
-            if isinstance(overview_body, dict):
-                latest_status = overview_body.get("printerStatus")
+            status_body = last_message.get("status")
+            if isinstance(status_body, dict):
+                latest_status = status_body.get("printerStatus")
                 if latest_status == "Completed":
                     break
         await asyncio.sleep(0.01)
 
-    assert latest_status == "Completed", f"Expected overview status Completed but saw {latest_status!r}"
+    assert latest_status == "Completed", f"Expected status Completed but saw {latest_status!r}"
 
-    resumed_messages = mqtt.by_topic().get("owl/printers/device-123/overview") or []
-    assert resumed_messages, "Expected overview publish after restart"
+    resumed_messages = mqtt.by_topic().get("owl/printers/device-123/status") or []
+    assert resumed_messages, "Expected status publish after restart"
     # Agent no longer uses retained messages, all messages are retain=false
     assert all(not message["retain"] for message in resumed_messages)
 
@@ -1663,14 +1662,14 @@ async def test_start_recovers_after_loop_termination() -> None:
     await publisher.start()
     await asyncio.sleep(0.05)
 
-    overview_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
-    assert overview_messages, "Expected overview publish after recovering start"
+    status_messages = mqtt.by_topic().get("owl/printers/device-123/status")
+    assert status_messages, "Expected status publish after recovering start"
 
     await publisher.stop()
 
 
 @pytest.mark.asyncio
-async def test_restart_emits_current_metrics_after_start() -> None:
+async def test_restart_emits_current_sensors_after_start() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
 
     moonraker = FakeMoonrakerClient(sample)
@@ -1682,12 +1681,12 @@ async def test_restart_emits_current_metrics_after_start() -> None:
     await publisher.start()
     await asyncio.sleep(0.05)
 
-    initial_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
-    assert initial_messages, "Expected metrics publish on first start"
+    initial_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    assert initial_messages, "Expected sensors publish on first start"
     initial_payload = _decode(initial_messages[-1])
-    initial_metrics = initial_payload.get("metrics", {})
+    initial_sensors = initial_payload.get("sensors", {})
     initial_extruder = next(
-        (sensor for sensor in initial_metrics.get("sensors", []) if sensor.get("channel") == "extruder"),
+        (sensor for sensor in initial_sensors.get("sensors", []) if sensor.get("channel") == "extruder"),
         None,
     )
     assert initial_extruder is not None
@@ -1707,11 +1706,11 @@ async def test_restart_emits_current_metrics_after_start() -> None:
     extruder_sensor = None
 
     while loop.time() < deadline:
-        replay_messages = mqtt.by_topic().get("owl/printers/device-123/metrics") or []
+        replay_messages = mqtt.by_topic().get("owl/printers/device-123/sensors") or []
         if replay_messages:
             latest_payload = _decode(replay_messages[-1])
-            metrics_body = latest_payload.get("metrics", {})
-            sensors = metrics_body.get("sensors", [])
+            sensors_body = latest_payload.get("sensors", {})
+            sensors = sensors_body.get("sensors", [])
             candidate = next(
                 (sensor for sensor in sensors if sensor.get("channel") == "extruder"),
                 None,
@@ -1723,13 +1722,13 @@ async def test_restart_emits_current_metrics_after_start() -> None:
                     break
         await asyncio.sleep(0.01)
 
-    assert extruder_sensor is not None, "Expected extruder sensor metrics after restart"
+    assert extruder_sensor is not None, "Expected extruder sensor sensors after restart"
     assert extruder_sensor.get("target") == pytest.approx(0.0, abs=1e-6)
     assert extruder_sensor.get("value") == pytest.approx(45.04, rel=1e-3)
 
 
 @pytest.mark.asyncio
-async def test_restart_replays_full_overview_when_state_unchanged() -> None:
+async def test_restart_replays_full_status_when_state_unchanged() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
 
     moonraker = FakeMoonrakerClient(sample)
@@ -1748,19 +1747,19 @@ async def test_restart_replays_full_overview_when_state_unchanged() -> None:
     await asyncio.sleep(0.05)
 
     topics = mqtt.by_topic()
-    overview_messages = topics.get("owl/printers/device-123/overview")
-    metrics_messages = topics.get("owl/printers/device-123/metrics")
+    status_messages = topics.get("owl/printers/device-123/status")
+    sensors_messages = topics.get("owl/printers/device-123/sensors")
 
-    assert overview_messages, "Expected overview publish after restart"
-    assert metrics_messages, "Expected metrics publish after restart"
+    assert status_messages, "Expected status publish after restart"
+    assert sensors_messages, "Expected sensors publish after restart"
 
-    overview_document = _decode(overview_messages[-1])
-    metrics_document = _decode(metrics_messages[-1])
+    status_document = _decode(status_messages[-1])
+    sensors_document = _decode(sensors_messages[-1])
 
-    assert overview_document.get("kind") == "full"
-    assert metrics_document.get("kind") == "full"
-    assert isinstance(overview_document.get("overview"), dict)
-    assert isinstance(metrics_document.get("metrics"), dict)
+    assert status_document.get("kind") == "full"
+    assert sensors_document.get("kind") == "full"
+    assert isinstance(status_document.get("status"), dict)
+    assert isinstance(sensors_document.get("sensors"), dict)
 
     assert not publisher._force_full_channels_after_reset  # type: ignore[attr-defined]
 
@@ -1787,15 +1786,15 @@ async def test_publish_system_status_emits_error_snapshot() -> None:
         message="Moonraker unavailable",
     )
 
-    overview_messages = mqtt.by_topic().get("owl/printers/device-123/overview")
-    assert overview_messages, "Expected overview publish for system status"
+    status_messages = mqtt.by_topic().get("owl/printers/device-123/status")
+    assert status_messages, "Expected status publish for system status"
 
-    snapshot = json.loads(overview_messages[-1]["payload"].decode("utf-8"))
-    overview_body = snapshot.get("overview")
-    assert overview_body is not None
-    assert overview_body.get("printerStatus") == "Error"
-    assert overview_body.get("subStatus") == "Moonraker unavailable"
-    assert overview_messages[-1]["retain"] is True
+    snapshot = json.loads(status_messages[-1]["payload"].decode("utf-8"))
+    status_body = snapshot.get("status")
+    assert status_body is not None
+    assert status_body.get("printerStatus") == "Error"
+    assert status_body.get("subStatus") == "Moonraker unavailable"
+    assert status_messages[-1]["retain"] is True
 
     await publisher.stop()
 
@@ -1833,6 +1832,7 @@ async def test_status_listener_invoked_for_system_status() -> None:
 
     await publisher.stop()
 
+
 def test_watch_window_expiration_reverts_to_idle_rate() -> None:
     request_at = datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc)
 
@@ -1842,7 +1842,7 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
-    expires_at = publisher.apply_metrics_rate(
+    expires_at = publisher.apply_sensors_rate(
         mode="watch",
         max_hz=2.0,
         duration_seconds=90,
@@ -1856,7 +1856,7 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
 
     assert publisher._current_mode == "idle"
     assert publisher._watch_window_expires is None
-    schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
+    schedule = publisher._cadence_controller.get_schedule("sensors")  # type: ignore[attr-defined]
     assert schedule.interval == pytest.approx(
         publisher._idle_interval,
         rel=1e-6,
@@ -1875,11 +1875,11 @@ def test_forced_interval_tracks_watch_mode() -> None:
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     idle_interval = publisher._idle_interval
-    schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
+    schedule = publisher._cadence_controller.get_schedule("sensors")  # type: ignore[attr-defined]
     assert schedule.interval == pytest.approx(idle_interval, rel=1e-6)
     assert schedule.forced_interval == pytest.approx(idle_interval, rel=1e-6)
 
-    watch_expires = publisher.apply_metrics_rate(
+    watch_expires = publisher.apply_sensors_rate(
         mode="watch",
         max_hz=1.0,
         duration_seconds=120,
@@ -1887,18 +1887,18 @@ def test_forced_interval_tracks_watch_mode() -> None:
     )
     assert watch_expires is not None
 
-    watch_schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
+    watch_schedule = publisher._cadence_controller.get_schedule("sensors")  # type: ignore[attr-defined]
     assert watch_schedule.interval == pytest.approx(1.0, rel=1e-6)
     assert watch_schedule.forced_interval == pytest.approx(1.0, rel=1e-6)
 
-    publisher.apply_metrics_rate(
+    publisher.apply_sensors_rate(
         mode="idle",
         max_hz=1.0 / idle_interval if idle_interval > 0 else 0.0,
         duration_seconds=None,
         requested_at=datetime.now(timezone.utc),
     )
 
-    reverted_schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
+    reverted_schedule = publisher._cadence_controller.get_schedule("sensors")  # type: ignore[attr-defined]
     assert reverted_schedule.interval == pytest.approx(idle_interval, rel=1e-6)
     assert reverted_schedule.forced_interval == pytest.approx(idle_interval, rel=1e-6)
 
@@ -1925,14 +1925,14 @@ def test_reset_runtime_state_requeues_previous_snapshot() -> None:
     publisher._last_payload_snapshot = copy.deepcopy(snapshot)
     publisher._current_mode = "watch"
     publisher._pending_payload = None
-    publisher._pending_channels.clear()  # type: ignore[attr-defined]
+    publisher._pending_channels.clear()  # type: ignore[attrdefined]
 
     publisher._reset_runtime_state()
 
     assert publisher._pending_payload == snapshot
-    pending_channels = publisher._pending_channels  # type: ignore[attr-defined]
-    assert {"overview", "metrics"}.issubset(pending_channels.keys())
-    for channel in ("overview", "metrics"):
+    pending_channels = publisher._pending_channels  # type: ignore[attrdefined]
+    assert {"status", "sensors"}.issubset(pending_channels.keys())
+    for channel in ("status", "sensors"):
         entry = pending_channels[channel]
         assert entry.forced is True
         assert entry.respect_cadence is False
@@ -2028,7 +2028,7 @@ async def test_watch_cadence_enforces_max_rate() -> None:
     await publisher.start()
     await asyncio.sleep(0.1)
 
-    publisher.apply_metrics_rate(
+    publisher.apply_sensors_rate(
         mode="watch",
         max_hz=1.0,
         duration_seconds=None,
@@ -2061,16 +2061,16 @@ async def test_watch_cadence_enforces_max_rate() -> None:
     )
     await asyncio.sleep(0.2)
 
-    metrics_topic = "owl/printers/device-123/metrics"
-    early_messages = mqtt.by_topic().get(metrics_topic, [])
+    sensors_topic = "owl/printers/device-123/sensors"
+    early_messages = mqtt.by_topic().get(sensors_topic, [])
     assert (
         len(early_messages) <= 1
-    ), "Metrics should respect the 1 Hz cadence and avoid bursts"
+    ), "Sensors should respect the 1 Hz cadence and avoid bursts"
 
     await asyncio.sleep(1.0)
 
-    later_messages = mqtt.by_topic().get(metrics_topic, [])
-    assert len(later_messages) >= 2, "Metrics should continue publishing after the cadence interval"
+    later_messages = mqtt.by_topic().get(sensors_topic, [])
+    assert len(later_messages) >= 2, "Sensors should continue publishing after the cadence interval"
 
     await publisher.stop()
 
@@ -2083,7 +2083,7 @@ def test_rate_request_reapplied_after_reset() -> None:
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
-    expires_at = publisher.apply_metrics_rate(
+    expires_at = publisher.apply_sensors_rate(
         mode="watch",
         max_hz=2.0,
         duration_seconds=120,
@@ -2097,7 +2097,7 @@ def test_rate_request_reapplied_after_reset() -> None:
 
     # Reset cadence back to idle to mirror _reset_runtime_state side effects.
     publisher._current_mode = "idle"
-    publisher._metrics_interval = publisher._idle_interval
+    publisher._sensors_interval = publisher._idle_interval
     publisher._watch_window_expires = None
     publisher._refresh_channel_schedules()
 
@@ -2107,7 +2107,7 @@ def test_rate_request_reapplied_after_reset() -> None:
     remaining_window = fake_now + timedelta(seconds=90)
 
     assert publisher._current_mode == "watch"
-    schedule = publisher._cadence_controller.get_schedule("metrics")  # type: ignore[attr-defined]
+    schedule = publisher._cadence_controller.get_schedule("sensors")  # type: ignore[attr-defined]
     assert schedule.interval == pytest.approx(
         expected_interval,
         rel=1e-6,
@@ -2134,18 +2134,18 @@ def test_forced_publish_respects_one_hz_cap() -> None:
     force_interval = publisher._watch_interval or 1.0
     if force_interval <= 0:
         force_interval = 1.0
-    publisher._metrics_interval = force_interval
-    publisher._metrics_watchdog_seconds = max(300.0, force_interval * 5)
+    publisher._sensors_interval = force_interval
+    publisher._sensors_watchdog_seconds = max(300.0, force_interval * 5)
     publisher._refresh_channel_schedules()
 
-    controller = publisher._cadence_controller  # type: ignore[attr-defined]
-    state = controller._state["metrics"]  # type: ignore[attr-defined]
+    controller = publisher._cadence_controller  # type: ignore[attrdefined]
+    state = controller._state["sensors"]  # type: ignore[attrdefined]
     state.last_publish = 100.0
     payload = {"sensors": []}
 
     controller._monotonic = lambda: 100.2  # type: ignore[attr-defined]
     decision = controller.evaluate(
-    "metrics",
+    "sensors",
         payload,
         explicit_force=True,
         respect_cadence=True,
@@ -2158,7 +2158,7 @@ def test_forced_publish_respects_one_hz_cap() -> None:
 
     controller._monotonic = lambda: 100.2 + force_interval  # type: ignore[attr-defined]
     decision = controller.evaluate(
-    "metrics",
+    "sensors",
         payload,
         explicit_force=True,
         respect_cadence=True,
@@ -2245,10 +2245,10 @@ async def test_notify_status_update_does_not_trigger_query():
     )
     assert moonraker.last_query_objects == initial_query_objects
 
-    # No new metrics publish is expected when the contract does not change
+    # No new sensors publish is expected when the contract does not change
     assert (
-        mqtt.by_topic().get("owl/printers/device-123/metrics") is None
-    ), "Expected no metrics publish for unchanged contract"
+        mqtt.by_topic().get("owl/printers/device-123/sensors") is None
+    ), "Expected no sensors publish for unchanged contract"
 
     await publisher.stop()
 
@@ -2300,7 +2300,7 @@ async def test_status_listener_handles_future_return() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overview_recovery_retained_after_error_snapshot() -> None:
+async def test_status_recovery_retained_after_error_snapshot() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
 
     moonraker = FakeMoonrakerClient(sample)
@@ -2312,26 +2312,26 @@ async def test_overview_recovery_retained_after_error_snapshot() -> None:
     await publisher.start()
     await asyncio.sleep(0.05)
 
-    overview_topic = "owl/printers/device-123/overview"
+    status_topic = "owl/printers/device-123/status"
 
     await publisher.publish_system_status(
         printer_state="error",
         message="Moonraker unavailable",
     )
 
-    overview_messages = mqtt.by_topic().get(overview_topic)
-    assert overview_messages, "Expected overview retain for error snapshot"
-    assert overview_messages[-1]["retain"] is True
+    status_messages = mqtt.by_topic().get(status_topic)
+    assert status_messages, "Expected status retain for error snapshot"
+    assert status_messages[-1]["retain"] is True
     mqtt.messages.clear()
 
     await moonraker.emit(sample)
     await asyncio.sleep(0.05)
 
-    recovery_messages = mqtt.by_topic().get(overview_topic)
-    assert recovery_messages, "Expected overview after recovery"
+    recovery_messages = mqtt.by_topic().get(status_topic)
+    assert recovery_messages, "Expected status after recovery"
     assert recovery_messages[-1]["retain"] is True
     snapshot = json.loads(recovery_messages[-1]["payload"].decode("utf-8"))
-    assert snapshot.get("overview", {}).get("printerStatus") != "Error"
+    assert snapshot.get("status", {}).get("printerStatus") != "Error"
 
     await publisher.stop()
 
@@ -2405,11 +2405,11 @@ async def test_raw_payload_excluded_by_default():
     await asyncio.sleep(0.2)
 
     # Verify messages were published
-    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
-    assert metrics_messages, "Expected metrics messages"
+    sensors_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    assert sensors_messages, "Expected sensors messages"
 
     # Check that raw field is NOT present
-    document = _decode(metrics_messages[-1])
+    document = _decode(sensors_messages[-1])
     assert "raw" not in document, (
         "Raw field should be excluded by default to save bandwidth (~450 bytes)"
     )
@@ -2417,9 +2417,9 @@ async def test_raw_payload_excluded_by_default():
     # Verify normalized data is still present
     assert "deviceId" in document, "Expected device metadata"
     assert document.get("_origin") == EXPECTED_ORIGIN
-    metrics_body = document.get("metrics")
-    assert isinstance(metrics_body, dict)
-    sensors = metrics_body.get("sensors")
+    sensors_body = document.get("sensors")
+    assert isinstance(sensors_body, dict)
+    sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list)
     assert any(sensor.get("channel") == "extruder" for sensor in sensors)
 
@@ -2446,19 +2446,19 @@ async def test_raw_payload_included_when_configured():
     await asyncio.sleep(0.2)
 
     # Verify messages were published
-    metrics_messages = mqtt.by_topic().get("owl/printers/device-123/metrics")
-    assert metrics_messages, "Expected metrics messages"
+    sensors_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    assert sensors_messages, "Expected sensors messages"
 
     # Check that raw field IS present
-    document = _decode(metrics_messages[-1])
+    document = _decode(sensors_messages[-1])
     assert "raw" in document, "Raw field should be included when configured"
     assert isinstance(document["raw"], str), "Raw field should be a JSON string"
 
     # Verify normalized data is also present
     assert document.get("_origin") == EXPECTED_ORIGIN
-    metrics_body = document.get("metrics")
-    assert isinstance(metrics_body, dict)
-    sensors = metrics_body.get("sensors")
+    sensors_body = document.get("sensors")
+    assert isinstance(sensors_body, dict)
+    sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list) and sensors
     assert any(sensor.get("channel") == "extruder" for sensor in sensors)
 

@@ -17,7 +17,7 @@ from .trackers import HeaterMonitor, SessionInfo
 LOGGER = logging.getLogger(__name__)
 
 
-class OverviewSelector:
+class StatusSelector:
     def __init__(self, *, heartbeat_seconds: int = 60) -> None:
         self._heartbeat_seconds = heartbeat_seconds
         self._state_engine = PrinterStateEngine()
@@ -79,7 +79,7 @@ class OverviewSelector:
         if session.message:
             lifecycle["reason"] = session.message
 
-        overview: Dict[str, Any] = {
+        status: Dict[str, Any] = {
             "printerStatus": phase,
             "lifecycle": lifecycle,
             "flags": {
@@ -89,22 +89,22 @@ class OverviewSelector:
         }
 
         if session.message:
-            overview["subStatus"] = session.message
+            status["subStatus"] = session.message
         elif display_status_snapshot is not None:
             candidate = display_status_snapshot.data.get("message")
             if isinstance(candidate, str):
                 cleaned = candidate.strip()
                 if cleaned and _should_use_display_message(cleaned, session):
-                    overview["subStatus"] = cleaned
+                    status["subStatus"] = cleaned
 
         if session.progress_percent is not None:
             quantized_progress = max(
                 0,
                 min(100, int(math.floor(session.progress_percent))),
             )
-            overview["progressPercent"] = quantized_progress
+            status["progressPercent"] = quantized_progress
         if session.elapsed_seconds is not None:
-            overview["elapsedSeconds"] = session.elapsed_seconds
+            status["elapsedSeconds"] = session.elapsed_seconds
         estimated_remaining = session.remaining_seconds
         if estimated_remaining is None and print_stats_snapshot is not None:
             total_duration = _to_float(
@@ -121,23 +121,23 @@ class OverviewSelector:
                 estimated_remaining = max(int(total_duration - elapsed_duration), 0)
 
         if estimated_remaining is not None:
-            overview["estimatedTimeRemainingSeconds"] = estimated_remaining
+            status["estimatedTimeRemainingSeconds"] = estimated_remaining
 
         job_payload = _build_job_payload(session)
         if job_payload:
-            overview["job"] = job_payload
+            status["job"] = job_payload
             if estimated_remaining is not None:
                 progress_section = job_payload.setdefault("progress", {})
                 progress_section["estimatedTimeRemainingSeconds"] = (
                     estimated_remaining
                 )
 
-        overview["cadence"] = {
+        status["cadence"] = {
             "heartbeatSeconds": self._heartbeat_seconds,
             "watchWindowActive": False,
         }
 
-        contract_hash = self._build_contract_hash(overview)
+        contract_hash = self._build_contract_hash(status)
         heartbeat_due = (
             self._last_emitted_at is None
             or (observed_at - self._last_emitted_at) >= timedelta(seconds=self._heartbeat_seconds)
@@ -153,7 +153,7 @@ class OverviewSelector:
 
         last_updated = self._last_updated or observed_at
 
-        overview["lastUpdatedUtc"] = last_updated.replace(microsecond=0).isoformat()
+        status["lastUpdatedUtc"] = last_updated.replace(microsecond=0).isoformat()
         self._last_emitted_at = observed_at
 
         if LOGGER.isEnabledFor(logging.DEBUG):
@@ -195,7 +195,7 @@ class OverviewSelector:
                 )
                 self._last_debug_signature = signature
 
-        return overview
+        return status
 
     def _build_contract_hash(self, payload: Dict[str, Any]) -> str:
         time_keys = {"elapsedSeconds", "estimatedTimeRemainingSeconds", "lastUpdatedUtc"}
@@ -224,7 +224,7 @@ class _SensorState:
     last_updated: datetime
 
 
-class MetricsSelector:
+class SensorsSelector:
     def __init__(self) -> None:
         self._sensor_state: Dict[str, _SensorState] = {}
         self._last_contract_hash: Optional[str] = None

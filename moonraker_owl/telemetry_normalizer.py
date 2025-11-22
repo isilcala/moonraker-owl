@@ -15,7 +15,7 @@ from .printer_state import PrinterContext, PrinterStateResolver
 
 @dataclass(slots=True)
 class NormalizedPayloads:
-    overview: Optional[Dict[str, Any]] = None
+    status: Optional[Dict[str, Any]] = None
     sensors: Optional[Dict[str, Any]] = None
     events: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -37,7 +37,7 @@ class TelemetryNormalizer:
         self._file_metadata: Dict[str, Any] = {}
         self._pending_events: List[Dict[str, Any]] = []
         self._temperature_state: Dict[str, Dict[str, Optional[float]]] = {}
-        self._last_overview_timestamp: Optional[str] = None
+        self._last_status_timestamp: Optional[str] = None
         self._last_print_stats_at: Optional[datetime] = None
         self._active_job_hint: Optional[str] = None
         self._active_job_expires_at: Optional[datetime] = None
@@ -56,14 +56,14 @@ class TelemetryNormalizer:
         observed_at = datetime.now(timezone.utc)
         self._process_payload(payload, observed_at)
 
-        overview_payload = self._build_overview_payload(observed_at)
+        status_payload = self._build_status_payload(observed_at)
         sensors_payload = self._build_sensors_payload()
         events_payload = self._drain_events()
 
         self._initialized = True
 
         return NormalizedPayloads(
-            overview=overview_payload,
+            status=status_payload,
             sensors=sensors_payload,
             events=events_payload,
         )
@@ -506,10 +506,10 @@ class TelemetryNormalizer:
     # ------------------------------------------------------------------
     # builders
     # ------------------------------------------------------------------
-    def _build_overview_payload(
+    def _build_status_payload(
         self, observed_at: datetime
     ) -> Optional[Dict[str, Any]]:
-        overview_updates, job_payload, sub_status = self._compose_job_payload(
+        status_updates, job_payload, sub_status = self._compose_job_payload(
             observed_at
         )
 
@@ -522,10 +522,10 @@ class TelemetryNormalizer:
             ),
         )
 
-        overview: Dict[str, Any] = {"printerStatus": printer_status}
+        status: Dict[str, Any] = {"printerStatus": printer_status}
 
-        if overview_updates:
-            overview.update(overview_updates)
+        if status_updates:
+            status.update(status_updates)
 
         progress = _build_progress_section(
             self._status_sections.get("display_status"),
@@ -536,28 +536,28 @@ class TelemetryNormalizer:
         if progress:
             percent_value = progress.get("percent")
             if percent_value is not None:
-                overview["progressPercent"] = percent_value
+                status["progressPercent"] = percent_value
             if (elapsed := progress.get("elapsedSeconds")) is not None:
-                overview["elapsedSeconds"] = elapsed
+                status["elapsedSeconds"] = elapsed
             if (remaining := progress.get("remainingSeconds")) is not None:
-                overview["estimatedTimeRemainingSeconds"] = remaining
+                status["estimatedTimeRemainingSeconds"] = remaining
 
         if job_payload:
-            overview["job"] = job_payload
+            status["job"] = job_payload
 
         if sub_status:
-            overview.setdefault("subStatus", sub_status)
+            status.setdefault("subStatus", sub_status)
         else:
             display_status = self._status_sections.get("display_status")
             if isinstance(display_status, dict):
                 candidate = display_status.get("message")
                 if isinstance(candidate, str) and candidate.strip():
-                    overview.setdefault("subStatus", candidate.strip())
+                    status.setdefault("subStatus", candidate.strip())
 
-        self._last_overview_timestamp = observed_at.isoformat(timespec="seconds")
-        overview["lastUpdatedUtc"] = self._last_overview_timestamp
+        self._last_status_timestamp = observed_at.isoformat(timespec="seconds")
+        status["lastUpdatedUtc"] = self._last_status_timestamp
 
-        return overview
+        return status
 
     def _build_sensors_payload(self) -> Optional[Dict[str, Any]]:
         toolhead = _build_toolhead_section(self._status_sections)

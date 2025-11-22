@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, Optional, Set
 from ..config import TelemetryCadenceConfig
 from ..version import __version__
 from .events import EventCollector
-from .selectors import EventsSelector, MetricsSelector, OverviewSelector
+from .selectors import EventsSelector, SensorsSelector, StatusSelector
 from .state_store import MoonrakerStateStore, MoonrakerStoreState
 from .trackers import HeaterMonitor, PrintSessionTracker
 
@@ -46,7 +46,7 @@ class TelemetryOrchestrator:
         heartbeat = (
             heartbeat_seconds
             if heartbeat_seconds is not None
-            else self._cadence.overview_heartbeat_seconds
+            else self._cadence.status_heartbeat_seconds
         )
 
         self.store = MoonrakerStateStore(clock=self._clock)
@@ -54,39 +54,39 @@ class TelemetryOrchestrator:
         self.heater_monitor = HeaterMonitor()
         self.events = EventCollector()
 
-        self.overview_selector = OverviewSelector(heartbeat_seconds=heartbeat)
-        self.metrics_selector = MetricsSelector()
+        self.status_selector = StatusSelector(heartbeat_seconds=heartbeat)
+        self.sensors_selector = SensorsSelector()
         self.events_selector = EventsSelector(
             max_per_second=self._cadence.events_max_per_second,
             max_per_minute=self._cadence.events_max_per_minute,
         )
 
-        self._metrics_mode = "idle"
-        self._metrics_max_hz = 0.033
+        self._sensors_mode = "idle"
+        self._sensors_max_hz = 0.033
         self._watch_window_expires: Optional[datetime] = None
 
     def reset(self, *, snapshot: Optional[MoonrakerStoreState] = None) -> None:
         self.store = MoonrakerStateStore(clock=self._clock)
         if snapshot is not None:
             self.store.restore_state(snapshot)
-        self.overview_selector.reset()
-        self.metrics_selector.reset()
+        self.status_selector.reset()
+        self.sensors_selector.reset()
         self.events.reset()
         self.session_tracker = PrintSessionTracker()
         self.heater_monitor = HeaterMonitor()
-        self._metrics_mode = "idle"
-        self._metrics_max_hz = 0.033
+        self._sensors_mode = "idle"
+        self._sensors_max_hz = 0.033
         self._watch_window_expires = None
 
     def ingest(self, payload: Dict[str, Any]) -> None:
         self.store.ingest(payload)
         self.heater_monitor.refresh(self.store)
 
-    def set_metrics_mode(
+    def set_sensors_mode(
         self, *, mode: str, max_hz: float, watch_window_expires: Optional[datetime]
     ) -> None:
-        self._metrics_mode = mode
-        self._metrics_max_hz = max_hz
+        self._sensors_mode = mode
+        self._sensors_max_hz = max_hz
         self._watch_window_expires = watch_window_expires
 
     def set_telemetry_mode(
@@ -94,7 +94,7 @@ class TelemetryOrchestrator:
     ) -> None:
         """Backward-compatible wrapper for the legacy telemetry channel name."""
 
-        self.set_metrics_mode(mode=mode, max_hz=max_hz, watch_window_expires=watch_window_expires)
+        self.set_sensors_mode(mode=mode, max_hz=max_hz, watch_window_expires=watch_window_expires)
 
     @property
     def origin(self) -> str:
@@ -109,22 +109,22 @@ class TelemetryOrchestrator:
         forced: Set[str] = set(forced_channels or ())
         if "telemetry" in forced:
             forced.discard("telemetry")
-            forced.add("metrics")
+            forced.add("sensors")
         session = self.session_tracker.compute(self.store)
 
-        overview_payload = self.overview_selector.build(
+        status_payload = self.status_selector.build(
             self.store,
             session,
             self.heater_monitor,
             observed_at,
         )
-        metrics_payload = self.metrics_selector.build(
+        sensors_payload = self.sensors_selector.build(
             self.store,
-            mode=self._metrics_mode,
-            max_hz=self._metrics_max_hz,
+            mode=self._sensors_mode,
+            max_hz=self._sensors_max_hz,
             watch_window_expires=self._watch_window_expires,
             observed_at=observed_at,
-            force_emit="metrics" in forced,
+            force_emit="sensors" in forced,
         )
         events_payload = self.events_selector.build(
             events=self.events.drain(),
@@ -132,27 +132,27 @@ class TelemetryOrchestrator:
         )
 
         frames: Dict[str, ChannelPayload] = {}
-        if overview_payload:
-            cadence = overview_payload.setdefault("cadence", {})
-            cadence["watchWindowActive"] = self._metrics_mode != "idle"
-            overview_payload.setdefault("flags", {})["watchWindowActive"] = (
-                self._metrics_mode != "idle"
+        if status_payload:
+            cadence = status_payload.setdefault("cadence", {})
+            cadence["watchWindowActive"] = self._sensors_mode != "idle"
+            status_payload.setdefault("flags", {})["watchWindowActive"] = (
+                self._sensors_mode != "idle"
             )
-            frames["overview"] = ChannelPayload(
-                channel="overview",
-                payload=overview_payload,
+            frames["status"] = ChannelPayload(
+                channel="status",
+                payload=status_payload,
                 session_id=session.session_id,
                 observed_at=observed_at,
-                forced="overview" in forced,
+                forced="status" in forced,
             )
 
-        if metrics_payload:
-            frames["metrics"] = ChannelPayload(
-                channel="metrics",
-                payload=metrics_payload,
+        if sensors_payload:
+            frames["sensors"] = ChannelPayload(
+                channel="sensors",
+                payload=sensors_payload,
                 session_id=session.session_id,
                 observed_at=observed_at,
-                forced="metrics" in forced,
+                forced="sensors" in forced,
             )
 
         if events_payload:
