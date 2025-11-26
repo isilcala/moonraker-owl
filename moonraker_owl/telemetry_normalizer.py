@@ -656,7 +656,8 @@ def _build_progress_section(
     if percent is None:
         return None
 
-    progress: Dict[str, Any] = {"percent": int(round(percent))}
+    # Use floor (truncation) for progress percentage to avoid showing 100% prematurely
+    progress: Dict[str, Any] = {"percent": int(percent)}
 
     elapsed = _safe_float(print_stats.get("print_duration"))
     if elapsed is not None:

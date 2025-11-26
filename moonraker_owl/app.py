@@ -8,7 +8,6 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Awaitable, Callable, Dict, Optional
 
@@ -71,7 +70,6 @@ class MoonrakerOwlApp:
         self._state = AgentState.COLD_START
         self._state_detail: Optional[str] = None
         self._device_id: Optional[str] = None
-        self._agent_topic: Optional[str] = None
         self._base_topic: Optional[str] = None
         self._mqtt_ready = False
         self._telemetry_ready = False
@@ -146,66 +144,6 @@ class MoonrakerOwlApp:
         else:
             asyncio.run_coroutine_threadsafe(_runner(), loop)
 
-    def _build_presence_payload(
-        self, state: str, *, detail: Optional[str] = None
-    ) -> bytes:
-        document = {
-            "state": state,
-            "updatedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        }
-        if self._device_id:
-            document["deviceId"] = self._device_id
-        if detail:
-            document["detail"] = detail
-        return json.dumps(document).encode("utf-8")
-
-    async def _publish_presence(
-        self,
-        state: str,
-        *,
-        retain: bool = True,
-        detail: Optional[str] = None,
-    ) -> None:
-        if self._mqtt_client is None or self._agent_topic is None:
-            return
-
-        payload = self._build_presence_payload(state, detail=detail)
-        try:
-            self._mqtt_client.publish(
-                self._agent_topic,
-                payload,
-                qos=1,
-                retain=retain,
-            )
-        except MQTTConnectionError as exc:
-            LOGGER.debug("Failed to publish agent presence: %s", exc)
-        except Exception:  # pragma: no cover - defensive logging
-            LOGGER.debug("Unexpected error publishing agent presence", exc_info=True)
-
-    def _queue_presence_publish(
-        self,
-        state: str,
-        *,
-        retain: bool = True,
-        detail: Optional[str] = None,
-    ) -> None:
-        loop = self._loop
-        if loop is None:
-            return
-
-        async def _runner() -> None:
-            await self._publish_presence(state, retain=retain, detail=detail)
-
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            current_loop = None
-
-        if current_loop is loop:
-            asyncio.create_task(_runner())
-        else:
-            asyncio.run_coroutine_threadsafe(_runner(), loop)
-
     def _schedule_health_update(
         self, name: str, healthy: bool, detail: Optional[str]
     ) -> None:
@@ -259,9 +197,6 @@ class MoonrakerOwlApp:
         client_id = _build_client_id(device_id)
         self._device_id = device_id
         self._base_topic = f"owl/printers/{device_id}" if device_id else None
-        self._agent_topic = (
-            f"{self._base_topic}/agent/state" if self._base_topic is not None else None
-        )
 
         self._stopping = False
         self._last_disconnect_rc = None
@@ -311,17 +246,6 @@ class MoonrakerOwlApp:
         )
         self._mqtt_client.register_disconnect_handler(self._on_mqtt_disconnect)
         self._mqtt_client.register_connect_handler(self._on_mqtt_connect)
-
-        if self._agent_topic is not None:
-            offline_payload = self._build_presence_payload(
-                "offline", detail="unexpected disconnect"
-            )
-            self._mqtt_client.set_last_will(
-                self._agent_topic,
-                offline_payload,
-                qos=1,
-                retain=True,
-            )
 
         # Create ConnectionCoordinator with session expiry from config
         resilience = self._config.resilience
@@ -374,7 +298,6 @@ class MoonrakerOwlApp:
 
         if runtime_ready:
             await self._transition_state(AgentState.ACTIVE, detail="runtime ready")
-            self._queue_presence_publish("online", retain=True, detail="agent active")
         else:
             await self._transition_state(
                 AgentState.DEGRADED, detail="runtime initialisation incomplete"
@@ -479,9 +402,6 @@ class MoonrakerOwlApp:
                 await self._transition_state(
                     AgentState.ACTIVE,
                     detail="moonraker recovered",
-                )
-                self._queue_presence_publish(
-                    "online", retain=True, detail="agent active"
                 )
             else:
                 await self._transition_state(
@@ -879,9 +799,6 @@ class MoonrakerOwlApp:
                 AgentState.ACTIVE,
                 detail="runtime recovered",
             )
-            self._queue_presence_publish(
-                "online", retain=True, detail="agent active"
-            )
         else:
             await self._transition_state(
                 AgentState.DEGRADED,
@@ -953,9 +870,6 @@ class MoonrakerOwlApp:
             self._moonraker_client = None
 
         if self._mqtt_client is not None:
-            await self._publish_presence(
-                "offline", retain=True, detail="shutdown"
-            )
             await self._mqtt_client.disconnect()
             self._mqtt_client = None
             await self._health.update("mqtt", False, "shutdown")

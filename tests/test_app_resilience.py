@@ -139,19 +139,6 @@ async def test_moonraker_recovery_restarts_components() -> None:
     app._telemetry_publisher = telemetry
     app._command_processor = commands
 
-    presence_calls: list[tuple[str, bool, Optional[str]]] = []
-
-    def _fake_queue(
-        self: MoonrakerOwlApp,
-        state: str,
-        *,
-        retain: bool = True,
-        detail: Optional[str] = None,
-    ) -> None:
-        presence_calls.append((state, retain, detail))
-
-    app._queue_presence_publish = types.MethodType(_fake_queue, app)
-
     async def _fake_restart(self: MoonrakerOwlApp) -> bool:
         self._telemetry_ready = True
         self._commands_ready = True
@@ -164,7 +151,6 @@ async def test_moonraker_recovery_restarts_components() -> None:
     assert app._moonraker_failures == 0
     assert app._moonraker_breaker_tripped is False
     assert app._state == AgentState.ACTIVE
-    assert presence_calls == [("online", True, "agent active")]
     assert commands.stop_calls == 0
     assert commands.abandon_reasons == []
     assert telemetry.stop_calls == 0
