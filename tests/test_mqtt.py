@@ -316,13 +316,9 @@ async def test_publish_failure_raises(monkeypatch):
     await client.disconnect()
 
 
-@pytest.mark.asyncio
-async def test_reconnect_triggers_paho(mqtt_client):
-    client, events = mqtt_client
-
-    await client.reconnect()
-
-    assert events.get("reconnect_called") == 1
+# NOTE: test_reconnect_triggers_paho was removed as reconnect() method
+# has been moved to ConnectionCoordinator (see connection.py).
+# MQTTClient now only provides connect/disconnect as a pure communication layer.
 
 
 @pytest.mark.asyncio

@@ -202,23 +202,6 @@ class MQTTClient:
             self._client = None
         self._connected = False
 
-    async def reconnect_with_new_token(self, timeout: float = 30.0) -> None:
-        """Disconnect and reconnect with refreshed JWT token.
-        
-        Called by token renewal loop when JWT is refreshed.
-        """
-        if not self.token_manager:
-            LOGGER.warning("reconnect_with_new_token called but no TokenManager configured")
-            return
-
-        LOGGER.info("Reconnecting MQTT with refreshed JWT token")
-        
-        # Gracefully disconnect
-        await self.disconnect(timeout=5.0)
-        
-        # Reconnect with new token (connect() will call get_mqtt_credentials())
-        await self.connect(timeout=timeout)
-
     def publish(
         self,
         topic: str,
@@ -281,32 +264,6 @@ class MQTTClient:
 
     def is_connected(self) -> bool:
         return self._connected
-
-    async def reconnect(self, timeout: float = 30.0) -> None:
-        if not self._client:
-            raise RuntimeError("MQTT client not initialised")
-
-        self._connected_event = asyncio.Event()
-        self._last_connect_rc = None
-
-        reconnect_async = getattr(self._client, "reconnect_async", None)
-
-        if reconnect_async is not None:
-            reconnect_async()
-        else:
-            rc = self._client.reconnect()
-            if rc != mqtt.MQTT_ERR_SUCCESS:
-                raise MQTTConnectionError(f"MQTT reconnect failed with rc={rc}")
-
-        try:
-            await asyncio.wait_for(self._connected_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError as exc:
-            raise MQTTConnectionError("Timed out reconnecting to MQTT broker") from exc
-
-        if self._last_connect_rc is None or self._last_connect_rc != 0:
-            raise MQTTConnectionError(
-                f"MQTT broker rejected reconnection (rc={self._last_connect_rc})"
-            )
 
     # ------------------------------------------------------------------
     # Internal callbacks bridging the threaded paho callbacks into asyncio

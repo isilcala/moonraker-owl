@@ -10,13 +10,13 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-import random
 from typing import Awaitable, Callable, Dict, Optional
 
 from . import constants
 from .adapters import MoonrakerClient, MQTTClient, MQTTConnectionError
 from .commands import CommandConfigurationError, CommandProcessor
 from .config import OwlConfig, load_config
+from .connection import ConnectionCoordinator, ReconnectReason
 from .health import HealthReporter, HealthServer
 from .logging import configure_logging
 from .telemetry import (
@@ -59,11 +59,9 @@ class MoonrakerOwlApp:
         self._moonraker_client: Optional[MoonrakerClient] = None
         self._mqtt_client: Optional[MQTTClient] = None
         self._token_manager: Optional[TokenManager] = None
+        self._connection_coordinator: Optional[ConnectionCoordinator] = None
         self._telemetry_publisher: Optional[TelemetryPublisher] = None
         self._command_processor: Optional[CommandProcessor] = None
-        self._supervisor_task: Optional[asyncio.Task[None]] = None
-        self._connection_lost_event: Optional[asyncio.Event] = None
-        self._supervisor_stop: Optional[asyncio.Event] = None
         self._shutdown_event: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stopping = False
@@ -265,8 +263,6 @@ class MoonrakerOwlApp:
             f"{self._base_topic}/agent/state" if self._base_topic is not None else None
         )
 
-        self._connection_lost_event = asyncio.Event()
-        self._supervisor_stop = asyncio.Event()
         self._stopping = False
         self._last_disconnect_rc = None
         self._mqtt_ready = False
@@ -327,6 +323,27 @@ class MoonrakerOwlApp:
                 retain=True,
             )
 
+        # Create ConnectionCoordinator with session expiry from config
+        resilience = self._config.resilience
+        session_expiry = resilience.session_expiry_seconds
+        if session_expiry <= 0:
+            session_expiry = None
+
+        self._connection_coordinator = ConnectionCoordinator(
+            mqtt_client=self._mqtt_client,
+            token_manager=self._token_manager,
+            resilience_config=resilience,
+            session_expiry=session_expiry,
+        )
+
+        # Register callbacks with coordinator
+        self._connection_coordinator.register_disconnected_callback(
+            self._on_connection_lost
+        )
+        self._connection_coordinator.register_reconnected_callback(
+            self._on_connection_restored
+        )
+
         await self._transition_state(
             AgentState.AWAITING_MQTT,
             detail="connecting to mqtt broker",
@@ -352,12 +369,8 @@ class MoonrakerOwlApp:
         await self._start_health_server()
         self._start_moonraker_monitor()
 
-        if self._connection_lost_event is None:
-            self._connection_lost_event = asyncio.Event()
-        if self._supervisor_stop is None:
-            self._supervisor_stop = asyncio.Event()
-
-        self._supervisor_task = asyncio.create_task(self._supervise_connection())
+        # Start connection supervisor via ConnectionCoordinator
+        self._connection_coordinator.start_supervisor()
 
         if runtime_ready:
             await self._transition_state(AgentState.ACTIVE, detail="runtime ready")
@@ -611,25 +624,15 @@ class MoonrakerOwlApp:
         return _MoonrakerAssessment(healthy=True)
 
     async def _connect_mqtt(self) -> bool:
-        if self._mqtt_client is None:
+        """Establish initial MQTT connection via ConnectionCoordinator."""
+        if self._connection_coordinator is None:
             return False
 
-        resilience = self._config.resilience
-        session_expiry = resilience.session_expiry_seconds
-        if session_expiry <= 0:
-            session_expiry = None
-
         try:
-            await self._mqtt_client.connect(
-                clean_start=False,
-                session_expiry=session_expiry,
-            )
+            await self._connection_coordinator.connect()
         except MQTTConnectionError as exc:
             await self._health.update("mqtt", False, str(exc))
             LOGGER.error("MQTT connection failed: %s", exc)
-            if self._mqtt_client is not None:
-                await self._mqtt_client.disconnect()
-            self._mqtt_client = None
             return False
 
         self._mqtt_ready = True
@@ -824,105 +827,99 @@ class MoonrakerOwlApp:
     async def _restart_components(self) -> bool:
         return await self._start_runtime_components()
 
-    async def _supervise_connection(self) -> None:
-        if self._connection_lost_event is None or self._supervisor_stop is None:
-            return
-        if self._mqtt_client is None:
-            return
+    # -------------------------------------------------------------------------
+    # Connection Coordinator Callbacks
+    # -------------------------------------------------------------------------
 
-        resilience = self._config.resilience
-        backoff_initial = max(0.5, resilience.reconnect_initial_seconds)
-        backoff_max = max(backoff_initial, resilience.reconnect_max_seconds)
-        jitter_ratio = max(0.0, min(1.0, resilience.reconnect_jitter_ratio))
-        delay = backoff_initial
+    async def _on_connection_lost(self, reason: ReconnectReason) -> None:
+        """Called by ConnectionCoordinator when connection is lost.
 
-        while not self._supervisor_stop.is_set():
-            await self._connection_lost_event.wait()
-            self._connection_lost_event.clear()
+        This callback handles state transitions and component deactivation
+        before reconnection is attempted.
+        """
+        LOGGER.info("Connection lost (reason=%s), deactivating components", reason.value)
 
-            if self._supervisor_stop.is_set() or self._mqtt_client is None:
-                break
+        await self._transition_state(
+            AgentState.RECOVERING,
+            detail=f"mqtt disconnected ({reason.value})",
+        )
 
+        await self._health.update(
+            "mqtt",
+            False,
+            f"disconnected ({reason.value})",
+        )
+
+        await self._deactivate_components("waiting for mqtt reconnect")
+        self._mqtt_ready = False
+
+    async def _on_connection_restored(self) -> None:
+        """Called by ConnectionCoordinator when connection is restored.
+
+        This callback handles component reactivation and state transitions
+        after successful reconnection.
+        """
+        LOGGER.info("Connection restored, restarting components")
+
+        self._mqtt_ready = True
+        await self._health.update("mqtt", True, None)
+
+        try:
+            runtime_ready = await self._restart_components()
+        except Exception as exc:
+            LOGGER.exception("Failed to restart components after reconnect: %s", exc)
             await self._transition_state(
-                AgentState.RECOVERING,
-                detail=f"mqtt disconnected (rc={self._last_disconnect_rc})",
+                AgentState.DEGRADED,
+                detail="runtime restart failed",
+            )
+            return
+
+        if runtime_ready:
+            await self._transition_state(
+                AgentState.ACTIVE,
+                detail="runtime recovered",
+            )
+            self._queue_presence_publish(
+                "online", retain=True, detail="agent active"
+            )
+        else:
+            await self._transition_state(
+                AgentState.DEGRADED,
+                detail="runtime restart incomplete",
             )
 
-            await self._health.update(
-                "mqtt",
-                False,
-                f"disconnected (rc={self._last_disconnect_rc})",
-            )
-            await self._deactivate_components("waiting for mqtt reconnect")
-            self._mqtt_ready = False
-
-            while not self._supervisor_stop.is_set():
-                try:
-                    await self._mqtt_client.reconnect()
-                    self._mqtt_ready = True
-                    await self._health.update("mqtt", True, None)
-                    delay = backoff_initial
-                    break
-                except MQTTConnectionError as exc:
-                    LOGGER.warning("MQTT reconnect failed: %s", exc)
-                    await self._health.update("mqtt", False, str(exc))
-                    sleep_for = delay
-                    if jitter_ratio > 0.0:
-                        jitter = delay * jitter_ratio
-                        lower = max(0.1, delay - jitter)
-                        upper = delay + jitter
-                        sleep_for = random.uniform(lower, upper)
-                    await asyncio.sleep(sleep_for)
-                    delay = min(delay * 2, backoff_max)
-            else:
-                break
-
-            if self._supervisor_stop.is_set():
-                break
-
-            try:
-                runtime_ready = await self._restart_components()
-            except Exception as exc:  # pragma: no cover - defensive restart handling
-                LOGGER.exception(
-                    "Failed to restart components after reconnect: %s", exc
-                )
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, backoff_max)
-                continue
-            else:
-                if runtime_ready:
-                    await self._transition_state(
-                        AgentState.ACTIVE,
-                        detail="runtime recovered",
-                    )
-                    self._queue_presence_publish(
-                        "online", retain=True, detail="agent active"
-                    )
-                else:
-                    await self._transition_state(
-                        AgentState.DEGRADED,
-                        detail="runtime restart incomplete",
-                    )
-
-        LOGGER.debug("MQTT supervisor loop terminated")
+    # -------------------------------------------------------------------------
+    # MQTT Client Callbacks (from paho-mqtt thread)
+    # -------------------------------------------------------------------------
 
     def _on_mqtt_disconnect(self, rc: int) -> None:
+        """Handle MQTT disconnect event from paho-mqtt.
+
+        This is called from the paho-mqtt thread when connection is lost.
+        It schedules a reconnection request via the ConnectionCoordinator.
+        """
         self._last_disconnect_rc = rc
         self._mqtt_ready = False
+
         if self._stopping:
             self._schedule_health_update(
                 "mqtt", False, f"disconnected (rc={rc})"
             )
             return
-        if self._connection_lost_event is not None:
-            self._connection_lost_event.set()
+
         self._schedule_health_update(
             "mqtt", False, f"disconnected (rc={rc})"
         )
-        self._schedule_state_transition(
-            AgentState.RECOVERING,
-            detail=f"mqtt disconnected (rc={rc})",
-        )
+
+        # Request reconnection via coordinator
+        if self._connection_coordinator is not None:
+            # Determine reconnect reason based on disconnect code
+            if rc == 5:  # CONNACK code 5 = Not authorized
+                reason = ReconnectReason.AUTH_FAILURE
+            else:
+                reason = ReconnectReason.CONNECTION_LOST
+
+            self._connection_coordinator.request_reconnect(reason)
 
     def _on_mqtt_connect(self, rc: int) -> None:
         if self._stopping:
@@ -933,31 +930,19 @@ class MoonrakerOwlApp:
     async def _on_token_renewed(self) -> None:
         """Callback invoked when TokenManager renews JWT token.
         
-        Reconnects MQTT client with the new token.
+        Requests reconnection via ConnectionCoordinator with new credentials.
         """
-        if self._mqtt_client and self._mqtt_ready:
-            try:
-                LOGGER.info("JWT token renewed, reconnecting MQTT")
-                await self._mqtt_client.reconnect_with_new_token()
-                LOGGER.info("MQTT reconnected with new JWT token")
-            except Exception as exc:
-                LOGGER.error("Failed to reconnect MQTT after token renewal: %s", exc, exc_info=True)
-                # Connection error will trigger recovery via _on_mqtt_disconnect
+        if self._connection_coordinator is not None and self._mqtt_ready:
+            LOGGER.info("JWT token renewed, requesting MQTT reconnection")
+            self._connection_coordinator.request_reconnect(ReconnectReason.TOKEN_RENEWED)
 
     async def _stop_services(self) -> None:
         await self._transition_state(AgentState.STOPPING, detail="shutdown requested")
         self._stopping = True
 
-        if self._supervisor_stop is not None:
-            self._supervisor_stop.set()
-        if self._connection_lost_event is not None:
-            self._connection_lost_event.set()
-
-        if self._supervisor_task is not None:
-            self._supervisor_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._supervisor_task
-            self._supervisor_task = None
+        # Stop connection coordinator first
+        if self._connection_coordinator is not None:
+            await self._connection_coordinator.stop_supervisor()
 
         await self._stop_moonraker_monitor()
         await self._deactivate_components("shutdown", preserve_instances=False)
