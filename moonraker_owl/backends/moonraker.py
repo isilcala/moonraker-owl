@@ -231,7 +231,9 @@ class MoonrakerBackend(PrinterBackend):
             failure_detail = print_stats_message or "moonraker reports printer shutdown"
             force_trip = True
         elif print_stats_state in failure_print_states:
-            failure_detail = print_stats_message or f"print_stats state {print_stats_state}"
+            failure_detail = (
+                print_stats_message or f"print_stats state {print_stats_state}"
+            )
             force_trip = True
         elif printer_state in {"shutdown", "error"}:
             failure_detail = print_stats_message or f"printer state {printer_state}"
@@ -241,7 +243,9 @@ class MoonrakerBackend(PrinterBackend):
                 failure_detail = None
                 force_trip = False
             else:
-                failure_detail = print_stats_message or f"webhooks state {webhooks_state}"
+                failure_detail = (
+                    print_stats_message or f"webhooks state {webhooks_state}"
+                )
                 force_trip = True
 
         if failure_detail is not None:

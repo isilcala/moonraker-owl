@@ -45,13 +45,13 @@ class AgentState(str, Enum):
 
 class MoonrakerOwlApp:
     """Coordinates application startup and shutdown.
-    
+
     This class orchestrates the Owl agent lifecycle, managing:
     - MQTT connectivity and authentication
     - Printer backend health monitoring
     - Telemetry publishing and command processing
     - State machine transitions
-    
+
     The printer backend can be injected for testing or to support
     different printer control systems (Moonraker, OctoPrint, etc.).
     """
@@ -63,7 +63,7 @@ class MoonrakerOwlApp:
         printer_backend: Optional[PrinterBackend] = None,
     ) -> None:
         """Initialize the Owl agent.
-        
+
         Args:
             config: Application configuration. If None, loads from default path.
             printer_backend: Printer backend implementation. If None, creates
@@ -105,10 +105,10 @@ class MoonrakerOwlApp:
     @property
     def _moonraker_client(self) -> Any:
         """Backward-compatible access to underlying Moonraker client.
-        
+
         This property provides access to the MoonrakerClient for components
         that haven't been migrated to use the PrinterBackend abstraction.
-        
+
         Deprecated: Use self._printer_backend methods instead.
         """
         backend = self._printer_backend
@@ -151,7 +151,12 @@ class MoonrakerOwlApp:
         self._state_detail = detail
 
         message_detail = detail or state.value
-        LOGGER.info("Agent state transition %s -> %s (%s)", previous.value, state.value, message_detail)
+        LOGGER.info(
+            "Agent state transition %s -> %s (%s)",
+            previous.value,
+            state.value,
+            message_detail,
+        )
         await self._health.set_agent_state(
             state.value,
             healthy=state == AgentState.ACTIVE,
@@ -273,9 +278,7 @@ class MoonrakerOwlApp:
             return False
 
         self._mqtt_client = MQTTClient(
-            self._config.cloud, 
-            client_id=client_id, 
-            token_manager=self._token_manager
+            self._config.cloud, client_id=client_id, token_manager=self._token_manager
         )
         self._mqtt_client.register_disconnect_handler(self._on_mqtt_disconnect)
         self._mqtt_client.register_connect_handler(self._on_mqtt_connect)
@@ -308,9 +311,7 @@ class MoonrakerOwlApp:
 
         mqtt_connected = await self._connect_mqtt()
         if not mqtt_connected:
-            await self._transition_state(
-                AgentState.DEGRADED, detail="mqtt unavailable"
-            )
+            await self._transition_state(AgentState.DEGRADED, detail="mqtt unavailable")
             if self._printer_backend is not None:
                 await self._printer_backend.stop()
                 self._printer_backend = None
@@ -358,7 +359,10 @@ class MoonrakerOwlApp:
             await self._health.update("health-endpoint", True, None)
 
     def _start_moonraker_monitor(self) -> None:
-        if self._moonraker_monitor_task is not None and not self._moonraker_monitor_task.done():
+        if (
+            self._moonraker_monitor_task is not None
+            and not self._moonraker_monitor_task.done()
+        ):
             return
         if self._printer_backend is None:
             return
@@ -455,9 +459,7 @@ class MoonrakerOwlApp:
         except Exception:  # pragma: no cover - defensive logging
             LOGGER.debug("Failed to publish degraded telemetry snapshot", exc_info=True)
 
-    async def _handle_telemetry_status_update(
-        self, payload: dict[str, Any]
-    ) -> None:
+    async def _handle_telemetry_status_update(self, payload: dict[str, Any]) -> None:
         assessment = self._analyse_moonraker_snapshot(payload)
         if not assessment.healthy:
             await self._register_moonraker_failure(
@@ -500,21 +502,23 @@ class MoonrakerOwlApp:
 
             await self._register_moonraker_recovery()
 
-    def _analyse_moonraker_snapshot(self, snapshot: dict[str, Any]) -> PrinterHealthAssessment:
+    def _analyse_moonraker_snapshot(
+        self, snapshot: dict[str, Any]
+    ) -> PrinterHealthAssessment:
         """Analyse a snapshot using the backend's health analysis.
-        
+
         This method delegates to MoonrakerBackend._analyse_snapshot() if available,
         otherwise returns a generic healthy assessment.
         """
         backend = self._printer_backend
         if backend is None:
             return PrinterHealthAssessment(healthy=True)
-        
+
         # Try to use backend's analysis method if available
         analyse_method = getattr(backend, "_analyse_snapshot", None)
         if analyse_method is not None:
             return analyse_method(snapshot)
-        
+
         # Fallback: assume healthy if no analysis available
         return PrinterHealthAssessment(healthy=True)
 
@@ -532,12 +536,12 @@ class MoonrakerOwlApp:
 
         self._mqtt_ready = True
         await self._health.update("mqtt", True, None)
-        
+
         # Start JWT token renewal loop after MQTT connection succeeds
         if self._token_manager:
             LOGGER.info("Starting TokenManager renewal loop")
             self._token_manager.start_renewal_loop(on_renewed=self._on_token_renewed)
-        
+
         return True
 
     async def _start_runtime_components(self) -> bool:
@@ -589,9 +593,7 @@ class MoonrakerOwlApp:
             await self._health.update("telemetry", True, None)
             if not self._status_listener_registered:
                 try:
-                    telemetry.register_status_listener(
-                        self._telemetry_status_listener
-                    )
+                    telemetry.register_status_listener(self._telemetry_status_listener)
                 except AttributeError:  # pragma: no cover - defensive guard
                     LOGGER.debug(
                         "Telemetry publisher does not support status listeners"
@@ -733,7 +735,9 @@ class MoonrakerOwlApp:
         This callback handles state transitions and component deactivation
         before reconnection is attempted.
         """
-        LOGGER.info("Connection lost (reason=%s), deactivating components", reason.value)
+        LOGGER.info(
+            "Connection lost (reason=%s), deactivating components", reason.value
+        )
 
         await self._transition_state(
             AgentState.RECOVERING,
@@ -795,14 +799,10 @@ class MoonrakerOwlApp:
         self._mqtt_ready = False
 
         if self._stopping:
-            self._schedule_health_update(
-                "mqtt", False, f"disconnected (rc={rc})"
-            )
+            self._schedule_health_update("mqtt", False, f"disconnected (rc={rc})")
             return
 
-        self._schedule_health_update(
-            "mqtt", False, f"disconnected (rc={rc})"
-        )
+        self._schedule_health_update("mqtt", False, f"disconnected (rc={rc})")
 
         # Request reconnection via coordinator
         if self._connection_coordinator is not None:
@@ -822,12 +822,14 @@ class MoonrakerOwlApp:
 
     async def _on_token_renewed(self) -> None:
         """Callback invoked when TokenManager renews JWT token.
-        
+
         Requests reconnection via ConnectionCoordinator with new credentials.
         """
         if self._connection_coordinator is not None and self._mqtt_ready:
             LOGGER.info("JWT token renewed, requesting MQTT reconnection")
-            self._connection_coordinator.request_reconnect(ReconnectReason.TOKEN_RENEWED)
+            self._connection_coordinator.request_reconnect(
+                ReconnectReason.TOKEN_RENEWED
+            )
 
     async def _stop_services(self) -> None:
         await self._transition_state(AgentState.STOPPING, detail="shutdown requested")
