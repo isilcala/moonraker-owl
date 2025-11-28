@@ -1,45 +1,140 @@
+"""Tests for the unified printer state resolver aligned with Mainsail/Obico."""
+
 from datetime import datetime, timezone
 
-from moonraker_owl.telemetry.state_engine import PrinterContext, PrinterStateEngine
+import pytest
+
+from moonraker_owl.printer_state import (
+    PrinterContext,
+    PrinterState,
+    resolve_printer_state,
+)
+from moonraker_owl.telemetry.state_engine import PrinterStateEngine
 
 
 def _ctx(**overrides):
+    """Create a PrinterContext with sensible defaults."""
     base = dict(
         observed_at=datetime.now(tz=timezone.utc),
-        has_active_job=True,
+        has_active_job=False,
         is_heating=False,
         idle_state=None,
         timelapse_paused=False,
-        progress_percent=0.0,
-        progress_trend="unknown",
-        job_status=None,
     )
     base.update(overrides)
     return PrinterContext(**base)
 
 
-def test_cancelled_progress_reset_coerces_phase_cancelled() -> None:
+# ============================================================================
+# Mainsail-aligned state resolution tests (parametrized)
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "raw_state,expected",
+    [
+        # Active states
+        ("printing", PrinterState.PRINTING),
+        ("Printing", PrinterState.PRINTING),  # Case insensitive
+        ("resuming", PrinterState.PRINTING),
+        ("paused", PrinterState.PAUSED),
+        ("pausing", PrinterState.PAUSED),
+        ("cancelling", "Cancelling"),  # Mainsail shows raw state
+        ("canceling", "Cancelling"),
+        # Terminal states
+        ("cancelled", PrinterState.CANCELLED),
+        ("canceled", PrinterState.CANCELLED),
+        ("complete", PrinterState.COMPLETED),
+        ("completed", PrinterState.COMPLETED),
+        ("error", PrinterState.ERROR),
+        # Idle states
+        ("standby", PrinterState.IDLE),
+        ("ready", PrinterState.IDLE),
+        ("idle", PrinterState.IDLE),
+        # Offline
+        ("shutdown", PrinterState.OFFLINE),
+        ("offline", PrinterState.OFFLINE),
+    ],
+)
+def test_print_stats_state_mapping(raw_state: str, expected: str) -> None:
+    """Verify print_stats.state maps correctly to canonical states."""
+    context = _ctx()
+    result = resolve_printer_state(raw_state, context)
+    assert result == expected
+
+
+def test_timelapse_paused_shows_printing() -> None:
+    """Mainsail behavior: timelapse pause shows as Printing, not Paused."""
+    context = _ctx(has_active_job=True, timelapse_paused=True)
+    result = resolve_printer_state("paused", context)
+    assert result == PrinterState.PRINTING
+
+
+def test_idle_timeout_fallback() -> None:
+    """When print_stats.state is empty, use idle_timeout.state."""
+    context = _ctx(idle_state="printing")
+    result = resolve_printer_state("", context)
+    assert result == PrinterState.PRINTING
+
+
+def test_idle_timeout_with_heating() -> None:
+    """idle_timeout printing + heating shows Heating."""
+    context = _ctx(idle_state="printing", is_heating=True)
+    result = resolve_printer_state("", context)
+    assert result == PrinterState.HEATING
+
+
+def test_active_job_fallback() -> None:
+    """When no state available, active job means Printing."""
+    context = _ctx(has_active_job=True)
+    result = resolve_printer_state("", context)
+    assert result == PrinterState.PRINTING
+
+
+def test_active_job_with_heating() -> None:
+    """Active job + heating shows Heating."""
+    context = _ctx(has_active_job=True, is_heating=True)
+    result = resolve_printer_state("", context)
+    assert result == PrinterState.HEATING
+
+
+def test_heating_only_fallback() -> None:
+    """Heating without job shows Heating."""
+    context = _ctx(is_heating=True)
+    result = resolve_printer_state("", context)
+    assert result == PrinterState.HEATING
+
+
+def test_no_state_defaults_to_idle() -> None:
+    """No state info defaults to Idle."""
+    context = _ctx()
+    result = resolve_printer_state("", context)
+    assert result == PrinterState.IDLE
+
+
+def test_none_state_defaults_to_idle() -> None:
+    """None state defaults to Idle."""
+    context = _ctx()
+    result = resolve_printer_state(None, context)
+    assert result == PrinterState.IDLE
+
+
+# ============================================================================
+# Legacy PrinterStateEngine compatibility tests
+# ============================================================================
+
+
+def test_engine_wrapper_cancelled() -> None:
+    """PrinterStateEngine wrapper resolves cancelled correctly."""
     engine = PrinterStateEngine()
-    context = _ctx(progress_percent=0.0, progress_trend="decreasing", idle_state="ready")
-
+    context = _ctx()
     result = engine.resolve("cancelled", context)
+    assert result == PrinterState.CANCELLED
 
-    assert result == "Cancelled"
 
-
-def test_cancelled_with_active_progress_still_reports_cancelled() -> None:
+def test_engine_wrapper_printing() -> None:
+    """PrinterStateEngine wrapper resolves printing correctly."""
     engine = PrinterStateEngine()
-    context = _ctx(progress_percent=42.0, progress_trend="increasing")
-
-    result = engine.resolve("cancelled", context)
-
-    assert result == "Cancelled"
-
-
-def test_cancelled_while_heating_transitions_to_heating() -> None:
-    engine = PrinterStateEngine()
-    context = _ctx(is_heating=True, progress_percent=0.0)
-
-    result = engine.resolve("cancelled", context)
-
-    assert result == "Heating"
+    context = _ctx(has_active_job=True)
+    result = engine.resolve("printing", context)
+    assert result == PrinterState.PRINTING

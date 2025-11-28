@@ -301,30 +301,11 @@ def test_status_update_reports_cancelled() -> None:
     assert status.get("printerStatus") == "Cancelled"
 
 
-def test_cancelled_state_persists_briefly(monkeypatch) -> None:
+def test_cancelled_state_transitions_to_idle_immediately() -> None:
+    """After removing the latch mechanism (Mainsail alignment), cancelled state
+    does NOT persist. When print_stats transitions to standby, we immediately
+    report Idle - matching Mainsail's simpler state model."""
     normalizer = TelemetryNormalizer()
-
-    base_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    timeline = [
-        base_time,
-        base_time,
-        base_time + timedelta(seconds=20),
-        base_time + timedelta(seconds=20),
-        base_time + timedelta(seconds=20),
-    ]
-
-    class FakeDateTime(datetime):  # type: ignore[misc]
-        _index = -1
-
-        @classmethod
-        def now(cls, tz=None):
-            cls._index += 1
-            value = timeline[min(cls._index, len(timeline) - 1)]
-            if tz is not None:
-                return value if value.tzinfo else value.replace(tzinfo=tz)
-            return value
-
-    monkeypatch.setattr(telemetry_normalizer, "datetime", FakeDateTime)
 
     cancelled = normalizer.ingest(
         {
@@ -335,23 +316,15 @@ def test_cancelled_state_persists_briefly(monkeypatch) -> None:
     assert cancelled.status is not None
     assert cancelled.status.get("printerStatus") == "Cancelled"
 
-    standby_recent = normalizer.ingest(
+    # Standby immediately transitions to Idle (no latch)
+    standby = normalizer.ingest(
         {
             "method": "notify_print_stats_update",
             "params": [{"state": "standby"}],
         }
     )
-    assert standby_recent.status is not None
-    assert standby_recent.status.get("printerStatus") == "Cancelled"
-
-    standby_late = normalizer.ingest(
-        {
-            "method": "notify_print_stats_update",
-            "params": [{"state": "standby"}],
-        }
-    )
-    assert standby_late.status is not None
-    assert standby_late.status.get("printerStatus") == "Idle"
+    assert standby.status is not None
+    assert standby.status.get("printerStatus") == "Idle"
 
 
 def test_terminal_state_clears_on_printing(monkeypatch) -> None:
@@ -396,29 +369,11 @@ def test_terminal_state_clears_on_printing(monkeypatch) -> None:
     assert printing.status.get("printerStatus") == "Printing"
 
 
-def test_active_job_overrides_cancelled_latch(monkeypatch) -> None:
+def test_standby_with_filename_reports_idle() -> None:
+    """After removing the latch mechanism (Mainsail alignment), standby state
+    always reports Idle regardless of filename. The filename is for job tracking,
+    not state determination - matching Mainsail's behavior."""
     normalizer = TelemetryNormalizer()
-
-    base_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    timeline = [
-        base_time,
-        base_time,
-        base_time + timedelta(seconds=1),
-        base_time + timedelta(seconds=1),
-    ]
-
-    class FakeDateTime(datetime):  # type: ignore[misc]
-        _index = -1
-
-        @classmethod
-        def now(cls, tz=None):
-            cls._index += 1
-            value = timeline[min(cls._index, len(timeline) - 1)]
-            if tz is not None:
-                return value if value.tzinfo else value.replace(tzinfo=tz)
-            return value
-
-    monkeypatch.setattr(telemetry_normalizer, "datetime", FakeDateTime)
 
     normalizer.ingest(
         {
@@ -440,8 +395,9 @@ def test_active_job_overrides_cancelled_latch(monkeypatch) -> None:
         }
     )
 
+    # Standby with filename still reports Idle (Mainsail alignment)
     assert job_loaded.status is not None
-    assert job_loaded.status.get("printerStatus") == "Printing"
+    assert job_loaded.status.get("printerStatus") == "Idle"
 
 
 def test_status_last_updated_refreshes_without_changes(monkeypatch) -> None:

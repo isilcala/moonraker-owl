@@ -51,9 +51,6 @@ class StatusSelector:
             is_heating=heater_monitor.is_heating_for_print(),
             idle_state=session.idle_timeout_state,
             timelapse_paused=session.timelapse_paused,
-            progress_percent=session.progress_percent,
-            progress_trend=session.progress_trend,
-            job_status=session.job_status,
         )
 
         phase = self._state_engine.resolve(state, context)
@@ -107,9 +104,7 @@ class StatusSelector:
             status["elapsedSeconds"] = session.elapsed_seconds
         estimated_remaining = session.remaining_seconds
         if estimated_remaining is None and print_stats_snapshot is not None:
-            total_duration = _to_float(
-                print_stats_snapshot.data.get("total_duration")
-            )
+            total_duration = _to_float(print_stats_snapshot.data.get("total_duration"))
             elapsed_duration = _to_float(
                 print_stats_snapshot.data.get("print_duration")
             )
@@ -128,9 +123,7 @@ class StatusSelector:
             status["job"] = job_payload
             if estimated_remaining is not None:
                 progress_section = job_payload.setdefault("progress", {})
-                progress_section["estimatedTimeRemainingSeconds"] = (
-                    estimated_remaining
-                )
+                progress_section["estimatedTimeRemainingSeconds"] = estimated_remaining
 
         status["cadence"] = {
             "heartbeatSeconds": self._heartbeat_seconds,
@@ -138,10 +131,9 @@ class StatusSelector:
         }
 
         contract_hash = self._build_contract_hash(status)
-        heartbeat_due = (
-            self._last_emitted_at is None
-            or (observed_at - self._last_emitted_at) >= timedelta(seconds=self._heartbeat_seconds)
-        )
+        heartbeat_due = self._last_emitted_at is None or (
+            observed_at - self._last_emitted_at
+        ) >= timedelta(seconds=self._heartbeat_seconds)
         has_meaningful_change = contract_hash != self._last_contract_hash
 
         if not has_meaningful_change and not heartbeat_due:
@@ -198,7 +190,11 @@ class StatusSelector:
         return status
 
     def _build_contract_hash(self, payload: Dict[str, Any]) -> str:
-        time_keys = {"elapsedSeconds", "estimatedTimeRemainingSeconds", "lastUpdatedUtc"}
+        time_keys = {
+            "elapsedSeconds",
+            "estimatedTimeRemainingSeconds",
+            "lastUpdatedUtc",
+        }
 
         def sanitize(value: Any) -> Any:
             if isinstance(value, dict):

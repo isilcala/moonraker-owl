@@ -1,124 +1,143 @@
-"""Printer state resolution logic aligning with Mainsail/Obico semantics."""
+"""Unified printer state resolution aligned with Mainsail/Obico semantics.
+
+This module provides a single, stateless state resolver following the proven
+patterns used by Mainsail and moonraker-obico. State determination is based on:
+
+1. print_stats.state (primary source)
+2. idle_timeout.state (fallback for idle detection)
+3. timelapse pause detection (Mainsail behavior)
+
+References:
+- Mainsail: src/store/printer/getters.ts (printer_state getter)
+- moonraker-obico: moonraker_obico/printer.py (PrinterState.get_state_from_status)
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Optional
 
 __all__ = [
     "PrinterContext",
+    "PrinterState",
     "PrinterStateResolver",
+    "resolve_printer_state",
 ]
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class PrinterContext:
-    """Contextual signals used to resolve high level printer status."""
+    """Minimal context for state resolution - matches Mainsail inputs."""
 
     observed_at: datetime
     has_active_job: bool
     is_heating: bool
+    idle_state: Optional[str] = None
+    timelapse_paused: bool = False
+
+
+class PrinterState:
+    """Canonical printer states aligned with Mainsail display."""
+
+    PRINTING = "Printing"
+    PAUSED = "Paused"
+    IDLE = "Idle"
+    CANCELLED = "Cancelled"
+    COMPLETED = "Completed"
+    ERROR = "Error"
+    OFFLINE = "Offline"
+    HEATING = "Heating"
+
+
+# State mappings following Mainsail/Obico patterns
+_PRINT_STATS_STATE_MAP = {
+    # Active states
+    "printing": PrinterState.PRINTING,
+    "resuming": PrinterState.PRINTING,
+    "paused": PrinterState.PAUSED,
+    "pausing": PrinterState.PAUSED,
+    "cancelling": "Cancelling",  # Mainsail shows raw state
+    "canceling": "Cancelling",
+    # Terminal states
+    "cancelled": PrinterState.CANCELLED,
+    "canceled": PrinterState.CANCELLED,
+    "complete": PrinterState.COMPLETED,
+    "completed": PrinterState.COMPLETED,
+    "error": PrinterState.ERROR,
+    # Idle states
+    "standby": PrinterState.IDLE,
+    "ready": PrinterState.IDLE,
+    "idle": PrinterState.IDLE,
+    # Offline
+    "shutdown": PrinterState.OFFLINE,
+    "offline": PrinterState.OFFLINE,
+}
+
+
+def resolve_printer_state(
+    raw_state: Optional[str],
+    context: PrinterContext,
+) -> str:
+    """Resolve printer state from Moonraker data, aligned with Mainsail.
+
+    This is a stateless function - no latches, no TTLs, no side effects.
+    The state is determined purely from the current data snapshot.
+
+    Args:
+        raw_state: The print_stats.state value from Moonraker
+        context: Additional context for state resolution
+
+    Returns:
+        A canonical state string (e.g., "Printing", "Paused", "Idle")
+    """
+    normalized = (raw_state or "").strip().lower()
+
+    # 1. Check explicit state mapping first (like Obico's approach)
+    if normalized in _PRINT_STATS_STATE_MAP:
+        state = _PRINT_STATS_STATE_MAP[normalized]
+
+        # Mainsail behavior: timelapse pause shows as "Printing" not "Paused"
+        if state == PrinterState.PAUSED and context.timelapse_paused:
+            return PrinterState.PRINTING
+
+        return state
+
+    # 2. Fallback to idle_timeout.state (like Mainsail's ?? operator)
+    idle_normalized = (context.idle_state or "").strip().lower()
+    if idle_normalized in _PRINT_STATS_STATE_MAP:
+        state = _PRINT_STATS_STATE_MAP[idle_normalized]
+
+        # idle_timeout "printing" means busy/active
+        if state == PrinterState.PRINTING or idle_normalized == "printing":
+            if context.is_heating:
+                return PrinterState.HEATING
+            return PrinterState.PRINTING
+
+        return state
+
+    # 3. Context-based fallback
+    if context.has_active_job:
+        if context.is_heating:
+            return PrinterState.HEATING
+        return PrinterState.PRINTING
+
+    if context.is_heating:
+        return PrinterState.HEATING
+
+    # 4. Default to Idle (like Mainsail when no state available)
+    return PrinterState.IDLE
 
 
 class PrinterStateResolver:
-    """Map raw Moonraker states to Owl printer status labels."""
+    """Stateless wrapper for backward compatibility.
 
-    _TERMINAL_STATES = {
-        "cancelled": "Cancelled",
-        "canceled": "Cancelled",
-        "completed": "Completed",
-        "complete": "Completed",
-        "error": "Error",
-        "shutdown": "Error",
-    }
+    New code should use resolve_printer_state() directly.
+    """
 
-    _ACTIVE_STATES = {
-        "printing": "Printing",
-        "resuming": "Printing",
-        "paused": "Paused",
-        "cancelling": "Cancelling",
-        "canceling": "Cancelling",
-    }
-
-    _IDLE_STATES = {"standby", "ready", "idle", ""}
-
-    def __init__(self, *, terminal_ttl: timedelta = timedelta(seconds=10)) -> None:
-        self._terminal_ttl = terminal_ttl
-        self._latched_state: Optional[tuple[str, datetime]] = None
+    def __init__(self, *, terminal_ttl=None) -> None:
+        # terminal_ttl is ignored - we no longer use latches
+        pass
 
     def resolve(self, raw_state: Optional[str], context: PrinterContext) -> str:
-        normalized = (raw_state or "").strip().lower()
-
-        if normalized in self._ACTIVE_STATES:
-            self._clear_latch()
-            status = self._ACTIVE_STATES[normalized]
-            if status in {"Printing", "Cancelling"}:
-                # Active extrusion clears any previous terminal latch.
-                self._clear_latch()
-            return status
-
-        if normalized in self._TERMINAL_STATES:
-            status = self._TERMINAL_STATES[normalized]
-            self._latch(status, context.observed_at)
-            return status
-
-        if normalized == "offline":
-            self._clear_latch()
-            return "Offline"
-
-        if normalized in self._IDLE_STATES:
-            latched = self._current_latch(context.observed_at)
-            if latched is not None:
-                if context.has_active_job:
-                    self._clear_latch()
-                else:
-                    return latched
-
-            if context.is_heating:
-                # Mainsail labels pre-print heating as printing to signal activity.
-                return "Printing"
-
-            if context.has_active_job:
-                return "Printing"
-
-            self._clear_latch()
-            return "Idle"
-
-        latched = self._current_latch(context.observed_at)
-        if latched is not None:
-            return latched
-
-        if normalized:
-            # Unknown but non-empty state -> surface raw value for diagnostics.
-            if isinstance(raw_state, str):
-                return raw_state.strip().title()
-            return normalized.title()
-
-        return "Unknown"
-
-    # ------------------------------------------------------------------
-    # latch management
-    # ------------------------------------------------------------------
-    def _latch(self, status: str, observed_at: datetime) -> None:
-        expires_at = observed_at + self._terminal_ttl
-        self._latched_state = (status, expires_at)
-
-    def _clear_latch(self) -> None:
-        self._latched_state = None
-
-    def _current_latch(self, observed_at: datetime) -> Optional[str]:
-        if self._latched_state is None:
-            return None
-
-        status, expires_at = self._latched_state
-        if observed_at >= expires_at:
-            self._latched_state = None
-            return None
-        return status
-
-
-def utcnow() -> datetime:
-    """Return timezone aware UTC timestamp."""
-
-    return datetime.now(timezone.utc)
+        return resolve_printer_state(raw_state, context)
