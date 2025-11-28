@@ -341,3 +341,74 @@ async def test_connect_with_backoff_retries(coordinator_setup):
     # Should have made multiple attempts
     assert mqtt_client.connect_call_count > 1
 
+
+@pytest.mark.asyncio
+async def test_connection_lost_ignored_during_reconnecting(coordinator_setup):
+    """Test that CONNECTION_LOST requests are ignored while RECONNECTING.
+
+    This prevents a reconnection loop when disconnect() is called as part of
+    the reconnection process - the resulting on_disconnect callback should not
+    trigger another reconnection.
+    """
+    coordinator, _, _ = coordinator_setup()
+
+    # Simulate being in RECONNECTING state
+    coordinator._state = ConnectionState.RECONNECTING
+
+    # Clear any pending state
+    coordinator._pending_reason = None
+    coordinator._reconnect_event.clear()
+
+    # Request reconnect with CONNECTION_LOST (as would happen from on_disconnect)
+    coordinator.request_reconnect(ReconnectReason.CONNECTION_LOST)
+
+    # Should be ignored - no pending reason set
+    assert coordinator._pending_reason is None
+    assert not coordinator._reconnect_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_token_renewed_not_ignored_during_reconnecting(coordinator_setup):
+    """Test that TOKEN_RENEWED is still processed during RECONNECTING.
+
+    Unlike CONNECTION_LOST, TOKEN_RENEWED should be processed even during
+    reconnection as it indicates we have new credentials that need to be used.
+    """
+    coordinator, _, _ = coordinator_setup()
+
+    # Simulate being in RECONNECTING state
+    coordinator._state = ConnectionState.RECONNECTING
+
+    # Clear any pending state
+    coordinator._pending_reason = None
+    coordinator._reconnect_event.clear()
+
+    # Request reconnect with TOKEN_RENEWED
+    coordinator.request_reconnect(ReconnectReason.TOKEN_RENEWED)
+
+    # Should be accepted
+    assert coordinator._pending_reason == ReconnectReason.TOKEN_RENEWED
+    assert coordinator._reconnect_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_not_ignored_during_reconnecting(coordinator_setup):
+    """Test that AUTH_FAILURE is still processed during RECONNECTING.
+
+    AUTH_FAILURE indicates a credential issue that needs immediate attention.
+    """
+    coordinator, _, _ = coordinator_setup()
+
+    # Simulate being in RECONNECTING state
+    coordinator._state = ConnectionState.RECONNECTING
+
+    # Clear any pending state
+    coordinator._pending_reason = None
+    coordinator._reconnect_event.clear()
+
+    # Request reconnect with AUTH_FAILURE
+    coordinator.request_reconnect(ReconnectReason.AUTH_FAILURE)
+
+    # Should be accepted
+    assert coordinator._pending_reason == ReconnectReason.AUTH_FAILURE
+    assert coordinator._reconnect_event.is_set()

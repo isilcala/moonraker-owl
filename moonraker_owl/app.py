@@ -101,6 +101,8 @@ class MoonrakerOwlApp:
         )
         self._status_listener_registered = False
         self._moonraker_recovery_lock: Optional[asyncio.Lock] = None
+        self._component_restart_lock: Optional[asyncio.Lock] = None
+        self._component_restart_in_progress = False
 
     @property
     def _moonraker_client(self) -> Any:
@@ -126,6 +128,7 @@ class MoonrakerOwlApp:
         self._loop = asyncio.get_running_loop()
         self._shutdown_event = asyncio.Event()
         self._moonraker_recovery_lock = asyncio.Lock()
+        self._component_restart_lock = asyncio.Lock()
 
         LOGGER.info("moonraker-owl starting with config: %s", self._config.path)
         started = await self._start_services()
@@ -759,6 +762,29 @@ class MoonrakerOwlApp:
         This callback handles component reactivation and state transitions
         after successful reconnection.
         """
+        # Prevent concurrent component restarts
+        if self._component_restart_in_progress:
+            LOGGER.debug("Component restart already in progress, skipping")
+            return
+
+        lock = self._component_restart_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._component_restart_lock = lock
+
+        if lock.locked():
+            LOGGER.debug("Component restart lock held, skipping")
+            return
+
+        async with lock:
+            self._component_restart_in_progress = True
+            try:
+                await self._do_connection_restored()
+            finally:
+                self._component_restart_in_progress = False
+
+    async def _do_connection_restored(self) -> None:
+        """Internal implementation of connection restored handling."""
         LOGGER.info("Connection restored, restarting components")
 
         self._mqtt_ready = True

@@ -114,6 +114,15 @@ class ConnectionCoordinator:
             LOGGER.debug("Ignoring reconnect request during shutdown")
             return
 
+        # Ignore CONNECTION_LOST during reconnection - this is expected when we
+        # disconnect as part of the reconnection process
+        if reason == ReconnectReason.CONNECTION_LOST and self._state == ConnectionState.RECONNECTING:
+            LOGGER.debug(
+                "Ignoring connection_lost during reconnection (state=%s)",
+                self._state.value,
+            )
+            return
+
         # Priority: TOKEN_RENEWED > AUTH_FAILURE > others
         if self._pending_reason is None:
             self._pending_reason = reason
