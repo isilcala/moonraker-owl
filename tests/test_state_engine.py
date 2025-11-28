@@ -16,10 +16,9 @@ def _ctx(**overrides):
     """Create a PrinterContext with sensible defaults."""
     base = dict(
         observed_at=datetime.now(tz=timezone.utc),
-        has_active_job=False,
-        is_heating=False,
         idle_state=None,
         timelapse_paused=False,
+        has_active_job=False,  # UI-only field
     )
     base.update(overrides)
     return PrinterContext(**base)
@@ -75,34 +74,6 @@ def test_idle_timeout_fallback() -> None:
     context = _ctx(idle_state="printing")
     result = resolve_printer_state("", context)
     assert result == PrinterState.PRINTING
-
-
-def test_idle_timeout_with_heating() -> None:
-    """idle_timeout printing + heating shows Heating."""
-    context = _ctx(idle_state="printing", is_heating=True)
-    result = resolve_printer_state("", context)
-    assert result == PrinterState.HEATING
-
-
-def test_active_job_fallback() -> None:
-    """When no state available, active job means Printing."""
-    context = _ctx(has_active_job=True)
-    result = resolve_printer_state("", context)
-    assert result == PrinterState.PRINTING
-
-
-def test_active_job_with_heating() -> None:
-    """Active job + heating shows Heating."""
-    context = _ctx(has_active_job=True, is_heating=True)
-    result = resolve_printer_state("", context)
-    assert result == PrinterState.HEATING
-
-
-def test_heating_only_fallback() -> None:
-    """Heating without job shows Heating."""
-    context = _ctx(is_heating=True)
-    result = resolve_printer_state("", context)
-    assert result == PrinterState.HEATING
 
 
 def test_no_state_defaults_to_idle() -> None:

@@ -513,12 +513,16 @@ class TelemetryNormalizer:
             observed_at
         )
 
+        # State resolution now only uses print_stats.state and idle_timeout.state
+        # (Mainsail alignment - no is_heating/has_active_job fallbacks)
+        idle_timeout = self._status_sections.get("idle_timeout", {})
+        idle_state = idle_timeout.get("state") if isinstance(idle_timeout, dict) else None
+
         printer_status = self._state_resolver.resolve(
             _extract_state_value(self._print_stats),
             PrinterContext(
                 observed_at=observed_at,
-                has_active_job=self._has_active_job(job_payload, observed_at),
-                is_heating=self._is_heating_for_print(),
+                idle_state=idle_state,
             ),
         )
 

@@ -47,10 +47,10 @@ class StatusSelector:
 
         context = PrinterContext(
             observed_at=observed_at,
-            has_active_job=session.has_active_job,
-            is_heating=heater_monitor.is_heating_for_print(),
             idle_state=session.idle_timeout_state,
             timelapse_paused=session.timelapse_paused,
+            # has_active_job is only used for UI display, not state determination
+            has_active_job=session.has_active_job,
         )
 
         phase = self._state_engine.resolve(state, context)

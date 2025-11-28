@@ -28,13 +28,17 @@ __all__ = [
 
 @dataclass(slots=True, frozen=True)
 class PrinterContext:
-    """Minimal context for state resolution - matches Mainsail inputs."""
+    """Minimal context for state resolution - matches Mainsail inputs.
+
+    Note: has_active_job is NOT used for state determination (Mainsail alignment).
+    It exists only for backward compatibility with UI code that displays job status.
+    """
 
     observed_at: datetime
-    has_active_job: bool
-    is_heating: bool
     idle_state: Optional[str] = None
     timelapse_paused: bool = False
+    # UI-only field, not used in state determination
+    has_active_job: bool = False
 
 
 class PrinterState:
@@ -81,6 +85,9 @@ def resolve_printer_state(
 ) -> str:
     """Resolve printer state from Moonraker data, aligned with Mainsail.
 
+    This follows Mainsail's exact logic:
+        print_stats.state ?? idle_timeout.state ?? "Idle"
+
     This is a stateless function - no latches, no TTLs, no side effects.
     The state is determined purely from the current data snapshot.
 
@@ -93,7 +100,7 @@ def resolve_printer_state(
     """
     normalized = (raw_state or "").strip().lower()
 
-    # 1. Check explicit state mapping first (like Obico's approach)
+    # 1. Check print_stats.state first (primary source)
     if normalized in _PRINT_STATS_STATE_MAP:
         state = _PRINT_STATS_STATE_MAP[normalized]
 
@@ -106,26 +113,9 @@ def resolve_printer_state(
     # 2. Fallback to idle_timeout.state (like Mainsail's ?? operator)
     idle_normalized = (context.idle_state or "").strip().lower()
     if idle_normalized in _PRINT_STATS_STATE_MAP:
-        state = _PRINT_STATS_STATE_MAP[idle_normalized]
+        return _PRINT_STATS_STATE_MAP[idle_normalized]
 
-        # idle_timeout "printing" means busy/active
-        if state == PrinterState.PRINTING or idle_normalized == "printing":
-            if context.is_heating:
-                return PrinterState.HEATING
-            return PrinterState.PRINTING
-
-        return state
-
-    # 3. Context-based fallback
-    if context.has_active_job:
-        if context.is_heating:
-            return PrinterState.HEATING
-        return PrinterState.PRINTING
-
-    if context.is_heating:
-        return PrinterState.HEATING
-
-    # 4. Default to Idle (like Mainsail when no state available)
+    # 3. Default to Idle (like Mainsail when no state available)
     return PrinterState.IDLE
 
 

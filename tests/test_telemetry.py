@@ -740,8 +740,6 @@ async def test_publisher_emits_status_full_update() -> None:
     await asyncio.sleep(0.05)
     await publisher.stop()
 
-
-
     status_messages = mqtt.by_topic().get("owl/printers/device-123/status")
     assert status_messages, "Expected status updates"
     document = _decode(status_messages[-1])
@@ -769,7 +767,7 @@ async def test_publisher_emits_events_channel() -> None:
     # Manually queue an event to ensure the publisher forwards orchestrator events.
     publisher._orchestrator.events.record_command_state(
         command_id="cmd-123",
-    command_type="sensors:set-rate",
+        command_type="sensors:set-rate",
         state="completed",
         session_id="history-1",
     )
@@ -955,8 +953,7 @@ def test_state_store_handles_notify_klippy_state_ready() -> None:
     snapshot = store.as_dict()
     assert snapshot.get("webhooks", {}).get("state") == "ready"
     assert (
-        snapshot.get("webhooks", {}).get("state_message")
-        == "Firmware restart complete"
+        snapshot.get("webhooks", {}).get("state_message") == "Firmware restart complete"
     )
     assert snapshot.get("printer", {}).get("state") == "ready"
     assert snapshot.get("printer", {}).get("is_shutdown") is False
@@ -1049,11 +1046,11 @@ def test_state_store_handles_notify_klippy_state_mapping_sequence() -> None:
 
     snapshot = store.as_dict()
     assert snapshot.get("webhooks", {}).get("state") == "ready"
-    assert (
-        snapshot.get("webhooks", {}).get("state_message") == "Restart complete"
-    )
+    assert snapshot.get("webhooks", {}).get("state_message") == "Restart complete"
     assert snapshot.get("printer", {}).get("state") == "ready"
     assert snapshot.get("printer", {}).get("is_shutdown") is False
+
+
 @pytest.mark.asyncio
 async def test_subscription_normalizes_field_names() -> None:
     moonraker = FakeMoonrakerClient({"result": {}})
@@ -1123,8 +1120,7 @@ async def test_polling_fetches_unsubscribed_objects() -> None:
         (
             entry
             for entry in reversed(moonraker.query_log)
-            if isinstance(entry, dict)
-            and "temperature_sensor ambient" in entry
+            if isinstance(entry, dict) and "temperature_sensor ambient" in entry
         ),
         None,
     )
@@ -1236,9 +1232,7 @@ async def test_publish_system_status_clears_retained_status() -> None:
     await publisher.stop()
 
     status_messages = [
-        message
-        for message in mqtt.messages
-        if message["topic"].endswith("/status")
+        message for message in mqtt.messages if message["topic"].endswith("/status")
     ]
 
     assert status_messages, "Expected status publications"
@@ -1587,7 +1581,9 @@ async def test_restart_fetches_fresh_status_state() -> None:
                     break
         await asyncio.sleep(0.01)
 
-    assert latest_status == "Completed", f"Expected status Completed but saw {latest_status!r}"
+    assert (
+        latest_status == "Completed"
+    ), f"Expected status Completed but saw {latest_status!r}"
 
     resumed_messages = mqtt.by_topic().get("owl/printers/device-123/status") or []
     assert resumed_messages, "Expected status publish after restart"
@@ -1642,7 +1638,11 @@ async def test_restart_emits_current_sensors_after_start() -> None:
     initial_payload = _decode(initial_messages[-1])
     initial_sensors = initial_payload.get("sensors", {})
     initial_extruder = next(
-        (sensor for sensor in initial_sensors.get("sensors", []) if sensor.get("channel") == "extruder"),
+        (
+            sensor
+            for sensor in initial_sensors.get("sensors", [])
+            if sensor.get("channel") == "extruder"
+        ),
         None,
     )
     assert initial_extruder is not None
@@ -2026,7 +2026,9 @@ async def test_watch_cadence_enforces_max_rate() -> None:
     await asyncio.sleep(1.0)
 
     later_messages = mqtt.by_topic().get(sensors_topic, [])
-    assert len(later_messages) >= 2, "Sensors should continue publishing after the cadence interval"
+    assert (
+        len(later_messages) >= 2
+    ), "Sensors should continue publishing after the cadence interval"
 
     await publisher.stop()
 
@@ -2101,7 +2103,7 @@ def test_forced_publish_respects_one_hz_cap() -> None:
 
     controller._monotonic = lambda: 100.2  # type: ignore[attr-defined]
     decision = controller.evaluate(
-    "sensors",
+        "sensors",
         payload,
         explicit_force=True,
         respect_cadence=True,
@@ -2114,7 +2116,7 @@ def test_forced_publish_respects_one_hz_cap() -> None:
 
     controller._monotonic = lambda: 100.2 + force_interval  # type: ignore[attr-defined]
     decision = controller.evaluate(
-    "sensors",
+        "sensors",
         payload,
         explicit_force=True,
         respect_cadence=True,
@@ -2196,9 +2198,9 @@ async def test_notify_status_update_does_not_trigger_query():
     await asyncio.sleep(0.5)
 
     # Verify that no HTTP query was executed
-    assert moonraker.query_count == initial_query_count, (
-        "Expected no HTTP query when processing notify_status_update"
-    )
+    assert (
+        moonraker.query_count == initial_query_count
+    ), "Expected no HTTP query when processing notify_status_update"
     assert moonraker.last_query_objects == initial_query_objects
 
     # No new sensors publish is expected when the contract does not change
@@ -2366,9 +2368,9 @@ async def test_raw_payload_excluded_by_default():
 
     # Check that raw field is NOT present
     document = _decode(sensors_messages[-1])
-    assert "raw" not in document, (
-        "Raw field should be excluded by default to save bandwidth (~450 bytes)"
-    )
+    assert (
+        "raw" not in document
+    ), "Raw field should be excluded by default to save bandwidth (~450 bytes)"
 
     # Verify normalized data is still present
     assert "deviceId" in document, "Expected device metadata"
