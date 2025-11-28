@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from .state_engine import PrinterContext, PrinterStateEngine
+from .state_engine import PrinterContext, resolve_printer_state
 from .state_store import MoonrakerStateStore, SectionSnapshot
 from .trackers import HeaterMonitor, SessionInfo
 
@@ -20,7 +20,6 @@ LOGGER = logging.getLogger(__name__)
 class StatusSelector:
     def __init__(self, *, heartbeat_seconds: int = 60) -> None:
         self._heartbeat_seconds = heartbeat_seconds
-        self._state_engine = PrinterStateEngine()
         self._last_contract_hash: Optional[str] = None
         self._last_updated: Optional[datetime] = None
         self._last_emitted_at: Optional[datetime] = None
@@ -53,7 +52,7 @@ class StatusSelector:
             has_active_job=session.has_active_job,
         )
 
-        phase = self._state_engine.resolve(state, context)
+        phase = resolve_printer_state(state, context)
         if (
             phase == "Printing"
             and isinstance(state, str)
@@ -69,7 +68,7 @@ class StatusSelector:
         lifecycle: Dict[str, Any] = {
             "phase": phase,
             "statusLabel": phase,
-            "isHeating": heater_monitor.is_heating_for_print(),
+            "isHeating": heater_monitor.is_actively_heating(),
             "hasActiveJob": session.has_active_job,
         }
 
@@ -159,7 +158,7 @@ class StatusSelector:
                 session.remaining_seconds,
                 session.layer_current,
                 session.layer_total,
-                heater_monitor.is_heating_for_print(),
+                heater_monitor.is_actively_heating(),
                 state,
                 session.idle_timeout_state,
                 session.timelapse_paused,
@@ -174,7 +173,7 @@ class StatusSelector:
                     lifecycle.get("reason"),
                     session.session_id,
                     session.has_active_job,
-                    heater_monitor.is_heating_for_print(),
+                    heater_monitor.is_actively_heating(),
                     session.progress_percent,
                     session.elapsed_seconds,
                     session.remaining_seconds,

@@ -12,6 +12,7 @@ from .state_store import MoonrakerStateStore, SectionSnapshot
 
 LOGGER = logging.getLogger(__name__)
 
+
 @dataclass
 class SessionInfo:
     session_id: str
@@ -48,14 +49,14 @@ class PrintSessionTracker:
         virtual_sdcard = _coerce_section(store.get("virtual_sdcard"))
         display_status = _coerce_section(store.get("display_status"))
         idle_timeout = _coerce_section(store.get("idle_timeout"))
-        timelapse_macro = _coerce_section(
-            store.get("gcode_macro TIMELAPSE_TAKE_FRAME")
-        )
+        timelapse_macro = _coerce_section(store.get("gcode_macro TIMELAPSE_TAKE_FRAME"))
         history_event = _coerce_section(store.get("history_event"))
 
         observed_at = store.latest_observed_at()
 
-        history_id = _extract_history_id(print_stats) or _extract_history_id(history_event)
+        history_id = _extract_history_id(print_stats) or _extract_history_id(
+            history_event
+        )
         filename = (
             _extract_filename(print_stats)
             or _extract_filename(virtual_sdcard)
@@ -93,7 +94,7 @@ class PrintSessionTracker:
             sd_paused=sd_paused,
         )
 
-    # Monotonic clamp removed after verifying parity with Mainsail’s progress feed.
+        # Monotonic clamp removed after verifying parity with Mainsail’s progress feed.
 
         progress_value = _as_float(progress_percent)
         progress_trend = self._derive_progress_trend(progress_value, observed_at)
@@ -245,9 +246,23 @@ class PrintSessionTracker:
         sd_printing = bool(sd_printing)
         sd_paused = bool(sd_paused)
 
-        terminal_states = {"complete", "completed", "cancelled", "canceled", "error", "failed", "aborted"}
+        terminal_states = {
+            "complete",
+            "completed",
+            "cancelled",
+            "canceled",
+            "error",
+            "failed",
+            "aborted",
+        }
         active_states = {"printing", "paused", "resuming", "cancelling", "pausing"}
-        active_job_statuses = {"in_progress", "printing", "running", "resuming", "starting"}
+        active_job_statuses = {
+            "in_progress",
+            "printing",
+            "running",
+            "resuming",
+            "starting",
+        }
 
         if job_status in terminal_states:
             return False
@@ -302,7 +317,18 @@ class HeaterMonitor:
                     target=target,
                 )
 
-    def is_heating_for_print(self) -> bool:
+    def is_actively_heating(self) -> bool:
+        """Check if any heater is actively warming up.
+
+        Used for UI display (lifecycle.isHeating) to indicate the printer
+        is heating before/during a print. This is NOT used for state
+        determination - printer state follows Mainsail's pattern:
+        ``print_stats.state ?? idle_timeout.state ?? "Idle"``
+
+        Returns:
+            True if any heater has a target > 40°C and hasn't reached
+            within 5°C of that target.
+        """
         for snapshot in self.heaters.values():
             if snapshot.target is None or snapshot.temperature is None:
                 continue

@@ -23,7 +23,7 @@ from ..config import OwlConfig
 from ..core import PrinterAdapter, deep_merge
 from .orchestrator import ChannelPayload, TelemetryOrchestrator
 from .state_store import MoonrakerStateStore
-from ..telemetry_state import TelemetryHasher
+from .telemetry_state import TelemetryHasher
 
 LOGGER = logging.getLogger(__name__)
 

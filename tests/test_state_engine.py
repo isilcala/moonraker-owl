@@ -9,7 +9,6 @@ from moonraker_owl.printer_state import (
     PrinterState,
     resolve_printer_state,
 )
-from moonraker_owl.telemetry.state_engine import PrinterStateEngine
 
 
 def _ctx(**overrides):
@@ -88,24 +87,3 @@ def test_none_state_defaults_to_idle() -> None:
     context = _ctx()
     result = resolve_printer_state(None, context)
     assert result == PrinterState.IDLE
-
-
-# ============================================================================
-# Legacy PrinterStateEngine compatibility tests
-# ============================================================================
-
-
-def test_engine_wrapper_cancelled() -> None:
-    """PrinterStateEngine wrapper resolves cancelled correctly."""
-    engine = PrinterStateEngine()
-    context = _ctx()
-    result = engine.resolve("cancelled", context)
-    assert result == PrinterState.CANCELLED
-
-
-def test_engine_wrapper_printing() -> None:
-    """PrinterStateEngine wrapper resolves printing correctly."""
-    engine = PrinterStateEngine()
-    context = _ctx(has_active_job=True)
-    result = engine.resolve("printing", context)
-    assert result == PrinterState.PRINTING

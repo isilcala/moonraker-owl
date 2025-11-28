@@ -21,7 +21,6 @@ from typing import Optional
 __all__ = [
     "PrinterContext",
     "PrinterState",
-    "PrinterStateResolver",
     "resolve_printer_state",
 ]
 
@@ -51,7 +50,6 @@ class PrinterState:
     COMPLETED = "Completed"
     ERROR = "Error"
     OFFLINE = "Offline"
-    HEATING = "Heating"
 
 
 # State mappings following Mainsail/Obico patterns
@@ -117,17 +115,3 @@ def resolve_printer_state(
 
     # 3. Default to Idle (like Mainsail when no state available)
     return PrinterState.IDLE
-
-
-class PrinterStateResolver:
-    """Stateless wrapper for backward compatibility.
-
-    New code should use resolve_printer_state() directly.
-    """
-
-    def __init__(self, *, terminal_ttl=None) -> None:
-        # terminal_ttl is ignored - we no longer use latches
-        pass
-
-    def resolve(self, raw_state: Optional[str], context: PrinterContext) -> str:
-        return resolve_printer_state(raw_state, context)
