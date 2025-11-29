@@ -186,8 +186,12 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
 
     events_frame = frames["events"]
     events = events_frame.payload
-    assert len(events["items"]) == 1
-    event = events["items"][0]
+    # Events include both the command state change and a printStarted event
+    # (triggered by the print_stats.state=printing in the baseline snapshot)
+    assert len(events["items"]) >= 1
+    command_events = [e for e in events["items"] if e["eventName"] == "commandStateChanged"]
+    assert len(command_events) == 1
+    event = command_events[0]
     assert event["eventName"] == "commandStateChanged"
     assert event["data"]["state"] == "completed"
 

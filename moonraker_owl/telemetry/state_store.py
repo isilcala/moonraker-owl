@@ -69,6 +69,59 @@ class MoonrakerStateStore:
     def latest_observed_at(self) -> Optional[datetime]:
         return self._latest_observed_at
 
+    @property
+    def klippy_state(self) -> Optional[str]:
+        """Get the current Klippy state from webhooks section.
+
+        Returns:
+            The current Klippy state (e.g., 'ready', 'shutdown', 'error')
+            or None if webhooks data is not available.
+        """
+        webhooks = self.get("webhooks")
+        if webhooks is None:
+            return None
+        return webhooks.data.get("state")
+
+    @property
+    def klippy_state_message(self) -> Optional[str]:
+        """Get the current Klippy state message.
+
+        The state message provides additional context for shutdown/error states,
+        such as the specific error that caused the shutdown.
+
+        Returns:
+            The state message string, or None if not available.
+        """
+        webhooks = self.get("webhooks")
+        if webhooks is None:
+            return None
+        return webhooks.data.get("state_message")
+
+    @property
+    def print_state(self) -> Optional[str]:
+        """Get the current print state from print_stats section.
+
+        Returns:
+            The current print state (e.g., 'standby', 'printing', 'paused',
+            'complete', 'cancelled', 'error') or None if not available.
+        """
+        print_stats = self.get("print_stats")
+        if print_stats is None:
+            return None
+        return print_stats.data.get("state")
+
+    @property
+    def print_filename(self) -> Optional[str]:
+        """Get the current print filename from print_stats section.
+
+        Returns:
+            The filename of the current/last print, or None if not available.
+        """
+        print_stats = self.get("print_stats")
+        if print_stats is None:
+            return None
+        return print_stats.data.get("filename")
+
     def export_state(self) -> MoonrakerStoreState:
         sections = {
             name: SectionSnapshot(

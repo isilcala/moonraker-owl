@@ -21,11 +21,25 @@ from .. import constants
 from ..adapters import MQTTConnectionError
 from ..config import OwlConfig
 from ..core import PrinterAdapter, deep_merge
+from .event_types import Event, EventName, EventPriority, EventSeverity
+from .events import EventCollector, RateLimitConfig
 from .orchestrator import ChannelPayload, TelemetryOrchestrator
 from .state_store import MoonrakerStateStore
 from .telemetry_state import TelemetryHasher
 
 LOGGER = logging.getLogger(__name__)
+
+# Re-export event types for external use
+__all__ = [
+    "Event",
+    "EventCollector",
+    "EventName",
+    "EventPriority",
+    "EventSeverity",
+    "RateLimitConfig",
+    "TelemetryConfigurationError",
+    "TelemetryPublisher",
+]
 
 
 def is_heater_object(obj_name: str) -> bool:
