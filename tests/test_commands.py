@@ -1,5 +1,6 @@
 """Tests for the command processor."""
 
+import asyncio
 import json
 from configparser import ConfigParser
 from datetime import datetime, timezone
@@ -144,6 +145,11 @@ def config() -> OwlConfig:
 
 @pytest.mark.asyncio
 async def test_command_processor_executes_action_and_sends_ack(config):
+    """Test state-based completion for pause/resume/cancel commands.
+    
+    These commands send 'accepted' immediately, then 'completed' when
+    the printer state changes to the expected state.
+    """
     moonraker = FakeMoonraker()
     mqtt = FakeMQTT()
     processor = CommandProcessor(config, moonraker, mqtt)
@@ -162,9 +168,8 @@ async def test_command_processor_executes_action_and_sends_ack(config):
 
     assert mqtt.subscriptions == [("owl/printers/device-123/commands/#", 1)]
 
-    assert len(mqtt.published) == 2
-
-    # First ack confirms receipt
+    # First ack confirms receipt (state-based commands only send accepted immediately)
+    assert len(mqtt.published) == 1
     topic, payload, qos, retain = mqtt.published[0]
     accepted = json.loads(payload.decode("utf-8"))
     assert topic == "owl/printers/device-123/acks/pause"
@@ -177,7 +182,15 @@ async def test_command_processor_executes_action_and_sends_ack(config):
     assert qos == 1
     assert retain is False
 
-    # Second ack reports final outcome
+    # Simulate print state change to 'paused' - this triggers completion
+    processor.on_print_state_changed("paused")
+
+    # Give the event loop a chance to process the scheduled completion ACK
+    # call_soon requires at least one event loop iteration
+    await asyncio.sleep(0.01)
+
+    # Now the completed ack should be sent
+    assert len(mqtt.published) == 2
     topic, payload, qos, retain = mqtt.published[1]
     completed = json.loads(payload.decode("utf-8"))
     assert topic == "owl/printers/device-123/acks/pause"
@@ -309,6 +322,7 @@ async def test_command_processor_abandons_inflight_on_stop(config):
 
 @pytest.mark.asyncio
 async def test_command_processor_replays_cached_ack_for_duplicate(config):
+    """Test that duplicate commands replay the cached ack (after state completion)."""
     moonraker = FakeMoonraker()
     mqtt = FakeMQTT()
     processor = CommandProcessor(config, moonraker, mqtt)
@@ -322,9 +336,19 @@ async def test_command_processor_replays_cached_ack_for_duplicate(config):
     }
 
     await mqtt.emit("owl/printers/device-123/commands/pause", message)
-    assert len(mqtt.published) == 2
+    # Only accepted ack sent initially for state-based commands
+    assert len(mqtt.published) == 1
     assert moonraker.actions == ["pause"]
 
+    # Simulate state change to complete the command
+    processor.on_print_state_changed("paused")
+
+    # Give the event loop a chance to process the scheduled completion ACK
+    await asyncio.sleep(0.01)
+
+    assert len(mqtt.published) == 2
+
+    # Replay of same command should use cached completed ack
     await mqtt.emit("owl/printers/device-123/commands/pause", message)
 
     assert len(mqtt.published) == 3
@@ -423,3 +447,215 @@ def test_command_processor_requires_device_id():
 
     with pytest.raises(CommandConfigurationError):
         CommandProcessor(config, FakeMoonraker(), FakeMQTT())
+
+
+# =============================================================================
+# State-Based Command Completion Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_state_based_completion_resume_command(config):
+    """Test resume command completes when state changes to 'printing'."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-resume",
+        "action": "resume",
+        "payload": {},
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/resume", message)
+
+    # Only accepted ack sent initially
+    assert len(mqtt.published) == 1
+    accepted = json.loads(mqtt.published[0][1].decode("utf-8"))
+    assert accepted["status"] == "accepted"
+
+    # State change to 'printing' triggers completion
+    processor.on_print_state_changed("printing")
+    await asyncio.sleep(0.01)
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["status"] == "completed"
+    assert completed["commandId"] == "cmd-resume"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_state_based_completion_cancel_command(config):
+    """Test cancel command completes when state changes to 'cancelled'."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-cancel",
+        "action": "cancel",
+        "payload": {},
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/cancel", message)
+
+    # Only accepted ack sent initially
+    assert len(mqtt.published) == 1
+
+    # State change to 'cancelled' triggers completion
+    processor.on_print_state_changed("cancelled")
+    await asyncio.sleep(0.01)
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["status"] == "completed"
+    assert completed["commandId"] == "cmd-cancel"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_state_change_wrong_state_does_not_complete(config):
+    """Test that wrong state change does not trigger completion."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-pause",
+        "action": "pause",
+        "payload": {},
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    assert len(mqtt.published) == 1
+
+    # Wrong state - should not trigger completion
+    processor.on_print_state_changed("printing")
+    await asyncio.sleep(0.01)
+
+    # Still only accepted ack
+    assert len(mqtt.published) == 1
+
+    # Correct state triggers completion
+    processor.on_print_state_changed("paused")
+    await asyncio.sleep(0.01)
+
+    assert len(mqtt.published) == 2
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_pending_command_count(config):
+    """Test pending_command_count property."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    assert processor.pending_state_count == 0
+
+    # Send pause command - should be pending
+    message = {"commandId": "cmd-1", "action": "pause", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    assert processor.pending_state_count == 1
+
+    # Send another pause command - should also be pending
+    message2 = {"commandId": "cmd-2", "action": "resume", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/resume", message2)
+    assert processor.pending_state_count == 2
+
+    # Complete one
+    processor.on_print_state_changed("paused")
+    await asyncio.sleep(0.01)
+    assert processor.pending_state_count == 1
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_state_change_case_insensitive(config):
+    """Test that state matching is case-insensitive."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {"commandId": "cmd-1", "action": "pause", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    assert len(mqtt.published) == 1
+
+    # State with different case should still match
+    processor.on_print_state_changed("PAUSED")
+    await asyncio.sleep(0.01)
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["status"] == "completed"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_multiple_commands_same_expected_state(config):
+    """Test multiple commands waiting for the same state."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    # Send two pause commands
+    msg1 = {"commandId": "cmd-1", "action": "pause", "payload": {}}
+    msg2 = {"commandId": "cmd-2", "action": "pause", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/pause", msg1)
+    await mqtt.emit("owl/printers/device-123/commands/pause", msg2)
+
+    # 2 accepted acks
+    assert len(mqtt.published) == 2
+    assert processor.pending_state_count == 2
+
+    # One state change completes both
+    processor.on_print_state_changed("paused")
+    await asyncio.sleep(0.01)
+
+    # Both should be completed
+    assert len(mqtt.published) == 4
+    assert processor.pending_state_count == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_abandon_pending_commands_on_stop(config):
+    """Test that pending state commands are abandoned on stop."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    telemetry = FakeTelemetry()
+    processor = CommandProcessor(config, moonraker, mqtt, telemetry=telemetry)
+
+    await processor.start()
+
+    message = {"commandId": "cmd-1", "action": "pause", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    assert processor.pending_state_count == 1
+
+    # Stop should abandon pending commands
+    await processor.stop()
+    await processor.abandon_inflight("test_stop")
+    await asyncio.sleep(0.01)
+
+    # Should have abandoned the pending command
+    abandoned_records = [r for r in telemetry.records if r["state"] == "abandoned"]
+    assert len(abandoned_records) >= 1

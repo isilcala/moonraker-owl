@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import deque
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Deque, Dict, Optional, Protocol
 from urllib.parse import quote
 
@@ -79,6 +80,46 @@ class _CommandHistoryEntry:
     error_message: Optional[str]
 
 
+@dataclass(slots=True)
+class _PendingStateCommand:
+    """Tracks a command awaiting state confirmation.
+
+    Some commands (pause, resume, cancel) need to wait for the printer
+    to actually reach the expected state before sending 'completed' ACK.
+    This allows the UI to show accurate command status.
+    """
+
+    command_id: str
+    command_name: str
+    message: CommandMessage
+    expected_state: str
+    accepted_at: datetime
+    timeout_seconds: float = 30.0
+
+    def is_expired(self, now: Optional[datetime] = None) -> bool:
+        """Check if this pending command has timed out."""
+        current = now or datetime.now(timezone.utc)
+        deadline = self.accepted_at + timedelta(seconds=self.timeout_seconds)
+        return current >= deadline
+
+    @property
+    def remaining_seconds(self) -> float:
+        """Get remaining time before timeout."""
+        now = datetime.now(timezone.utc)
+        deadline = self.accepted_at + timedelta(seconds=self.timeout_seconds)
+        remaining = (deadline - now).total_seconds()
+        return max(0.0, remaining)
+
+
+# Commands that require state confirmation before sending 'completed' ACK
+# Maps command name to expected print_stats.state value
+COMMAND_EXPECTED_STATES: Dict[str, str] = {
+    "pause": "paused",
+    "resume": "printing",
+    "cancel": "cancelled",
+}
+
+
 class CommandProcessor:
     """Consumes MQTT command messages and forwards them to Moonraker."""
 
@@ -108,10 +149,16 @@ class CommandProcessor:
         self._history_order: Deque[str] = deque()
         self._history_limit = 64
 
+        # State-based command completion tracking
+        self._pending_state_commands: Dict[str, _PendingStateCommand] = {}
+        self._command_timeout_seconds = 30.0
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
     async def start(self) -> None:
         if self._handler_registered:
             raise RuntimeError("CommandProcessor already started")
 
+        self._loop = asyncio.get_running_loop()
         self._mqtt.set_message_handler(self._handle_message)
         self._mqtt.subscribe(self._command_subscription, qos=1)
         self._handler_registered = True
@@ -197,14 +244,27 @@ class CommandProcessor:
             )
             self._finish_inflight(message.command_id)
         else:
-            await self._publish_ack(
-                command_name,
-                message.command_id,
-                "completed",
-                stage="execution",
-            )
-            self._record_command_state(message, "completed", details=details)
-            self._finish_inflight(message.command_id)
+            # Check if this command requires state confirmation
+            expected_state = COMMAND_EXPECTED_STATES.get(message.command)
+            if expected_state:
+                # Don't send 'completed' yet - wait for state change
+                self._begin_pending_state(command_name, message, expected_state)
+                LOGGER.info(
+                    "Command %s awaiting state '%s' (timeout: %.0fs)",
+                    message.command_id[:8],
+                    expected_state,
+                    self._command_timeout_seconds,
+                )
+            else:
+                # No state confirmation needed - complete immediately
+                await self._publish_ack(
+                    command_name,
+                    message.command_id,
+                    "completed",
+                    stage="execution",
+                )
+                self._record_command_state(message, "completed", details=details)
+                self._finish_inflight(message.command_id)
 
     def _record_command_state(
         self,
@@ -235,6 +295,146 @@ class CommandProcessor:
 
     def _finish_inflight(self, command_id: str) -> None:
         self._inflight.pop(command_id, None)
+
+    def _begin_pending_state(
+        self, command_name: str, message: CommandMessage, expected_state: str
+    ) -> None:
+        """Begin tracking a command that awaits state confirmation."""
+        pending = _PendingStateCommand(
+            command_id=message.command_id,
+            command_name=command_name,
+            message=message,
+            expected_state=expected_state,
+            accepted_at=datetime.now(timezone.utc),
+            timeout_seconds=self._command_timeout_seconds,
+        )
+        self._pending_state_commands[message.command_id] = pending
+
+    def on_print_state_changed(self, new_state: str) -> None:
+        """Called by telemetry when print state changes.
+
+        Checks if any pending commands are now completed because the
+        printer has reached their expected state.
+
+        This method is called synchronously from TelemetryOrchestrator.ingest(),
+        so we schedule async ACK publishing on the event loop.
+
+        Args:
+            new_state: The new print state (e.g., 'paused', 'printing', 'cancelled')
+        """
+        if not self._pending_state_commands:
+            return
+
+        normalized_state = new_state.lower() if new_state else ""
+        completed_ids: list[str] = []
+
+        for cmd_id, pending in self._pending_state_commands.items():
+            if pending.expected_state == normalized_state:
+                completed_ids.append(cmd_id)
+                LOGGER.info(
+                    "Command %s completed: state changed to '%s'",
+                    cmd_id[:8],
+                    new_state,
+                )
+
+        for cmd_id in completed_ids:
+            pending = self._pending_state_commands.pop(cmd_id)
+            self._schedule_completion_ack(pending)
+
+    def _schedule_completion_ack(self, pending: _PendingStateCommand) -> None:
+        """Schedule async ACK publishing on the event loop."""
+        if self._loop is None:
+            LOGGER.warning(
+                "Cannot send completion ACK for %s: no event loop",
+                pending.command_id[:8],
+            )
+            return
+
+        async def send_ack() -> None:
+            try:
+                await self._publish_ack(
+                    pending.command_name,
+                    pending.command_id,
+                    "completed",
+                    stage="execution",
+                )
+                self._record_command_state(pending.message, "completed")
+                self._finish_inflight(pending.command_id)
+            except Exception:
+                LOGGER.exception(
+                    "Error sending completion ACK for %s", pending.command_id[:8]
+                )
+
+        self._loop.call_soon(
+            lambda: asyncio.ensure_future(send_ack(), loop=self._loop)
+        )
+
+    def check_expired_commands(self) -> None:
+        """Check for and fail expired pending commands.
+
+        Should be called periodically (e.g., once per telemetry cycle)
+        to detect commands that timed out waiting for state change.
+        """
+        if not self._pending_state_commands:
+            return
+
+        now = datetime.now(timezone.utc)
+        expired_ids: list[str] = []
+
+        for cmd_id, pending in self._pending_state_commands.items():
+            if pending.is_expired(now):
+                expired_ids.append(cmd_id)
+                LOGGER.warning(
+                    "Command %s timed out waiting for state '%s'",
+                    cmd_id[:8],
+                    pending.expected_state,
+                )
+
+        for cmd_id in expired_ids:
+            pending = self._pending_state_commands.pop(cmd_id)
+            self._schedule_timeout_ack(pending)
+
+    def _schedule_timeout_ack(self, pending: _PendingStateCommand) -> None:
+        """Schedule async timeout ACK publishing on the event loop."""
+        if self._loop is None:
+            LOGGER.warning(
+                "Cannot send timeout ACK for %s: no event loop",
+                pending.command_id[:8],
+            )
+            return
+
+        async def send_ack() -> None:
+            try:
+                await self._publish_ack(
+                    pending.command_name,
+                    pending.command_id,
+                    "failed",
+                    stage="execution",
+                    error_code="state_timeout",
+                    error_message=f"Timeout waiting for state '{pending.expected_state}'",
+                )
+                self._record_command_state(
+                    pending.message,
+                    "timeout",
+                    details={
+                        "expectedState": pending.expected_state,
+                        "timeoutSeconds": pending.timeout_seconds,
+                    },
+                )
+                self._finish_inflight(pending.command_id)
+            except Exception:
+                LOGGER.exception(
+                    "Error sending timeout ACK for %s", pending.command_id[:8]
+                )
+
+        self._loop.call_soon(
+            lambda: asyncio.ensure_future(send_ack(), loop=self._loop)
+        )
+
+    @property
+    def pending_state_count(self) -> int:
+        """Get number of commands awaiting state confirmation."""
+        return len(self._pending_state_commands)
 
     def _remember_history(
         self,
@@ -279,29 +479,57 @@ class CommandProcessor:
         return len(self._inflight)
 
     async def abandon_inflight(self, reason: str) -> None:
-        if not self._inflight:
-            return
+        """Abandon all inflight and pending state commands.
 
-        items = list(self._inflight.values())
-        self._inflight.clear()
+        Called during agent shutdown/restart to notify cloud that
+        commands will not be completed.
+        """
+        # Abandon regular inflight commands
+        if self._inflight:
+            items = list(self._inflight.values())
+            self._inflight.clear()
 
-        for tracked in items:
-            await self._publish_ack(
-                tracked.command_name,
-                tracked.message.command_id,
-                "failed",
-                stage="execution",
-                error_code="agent_restart",
-                error_message=reason,
-            )
-            self._record_command_state(
-                tracked.message,
-                "abandoned",
-                details={
-                    "reason": "agent_restart",
-                    "detail": reason,
-                },
-            )
+            for tracked in items:
+                await self._publish_ack(
+                    tracked.command_name,
+                    tracked.message.command_id,
+                    "failed",
+                    stage="execution",
+                    error_code="agent_restart",
+                    error_message=reason,
+                )
+                self._record_command_state(
+                    tracked.message,
+                    "abandoned",
+                    details={
+                        "reason": "agent_restart",
+                        "detail": reason,
+                    },
+                )
+
+        # Abandon pending state commands
+        if self._pending_state_commands:
+            pending_items = list(self._pending_state_commands.values())
+            self._pending_state_commands.clear()
+
+            for pending in pending_items:
+                await self._publish_ack(
+                    pending.command_name,
+                    pending.command_id,
+                    "failed",
+                    stage="execution",
+                    error_code="agent_restart",
+                    error_message=reason,
+                )
+                self._record_command_state(
+                    pending.message,
+                    "abandoned",
+                    details={
+                        "reason": "agent_restart",
+                        "detail": reason,
+                        "expectedState": pending.expected_state,
+                    },
+                )
 
     async def _execute(self, message: CommandMessage) -> Optional[Dict[str, Any]]:
         if message.command == "sensors:set-rate":

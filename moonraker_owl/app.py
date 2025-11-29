@@ -647,6 +647,11 @@ class MoonrakerOwlApp:
                     True,
                     self._command_health_detail(),
                 )
+                # Wire up print state callback for state-based command completion
+                if self._telemetry_publisher is not None:
+                    self._telemetry_publisher.set_print_state_callback(
+                        processor.on_print_state_changed
+                    )
         else:
             await self._health.update(
                 "commands",
@@ -674,6 +679,12 @@ class MoonrakerOwlApp:
         keep_telemetry: bool = False,
     ) -> None:
         if self._command_processor is not None:
+            # Remove print state callback before stopping
+            if self._telemetry_publisher is not None:
+                try:
+                    self._telemetry_publisher.set_print_state_callback(None)
+                except Exception:  # pragma: no cover - defensive cleanup
+                    LOGGER.debug("Error removing print state callback", exc_info=True)
             try:
                 await self._command_processor.stop()
             except Exception:  # pragma: no cover - defensive cleanup

@@ -996,6 +996,20 @@ class TelemetryPublisher:
         )
         self._event.set()
 
+    def set_print_state_callback(
+        self, callback: Optional[Callable[[str], None]]
+    ) -> None:
+        """Set callback for print state changes.
+
+        This allows the CommandProcessor to be notified when print state
+        changes, enabling state-based command completion ACKs.
+
+        Args:
+            callback: Function accepting the new print state string,
+                     or None to remove the callback.
+        """
+        self._orchestrator.set_print_state_callback(callback)
+
     def _wrap_envelope(
         self,
         channel: str,
