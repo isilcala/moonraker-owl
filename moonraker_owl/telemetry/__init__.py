@@ -207,7 +207,7 @@ class TelemetryPublisher:
         self._status_active_interval = (
             self._cadence.status_active_interval_seconds
         )
-        self._sensors_watchdog_seconds = self._cadence.sensors_watchdog_seconds
+        self._sensors_force_publish_seconds = self._cadence.sensors_force_publish_seconds
         self._watch_window_expires: Optional[datetime] = None
         self._current_mode = "idle"
         self._bootstrapped = False
@@ -575,7 +575,7 @@ class TelemetryPublisher:
                 frame.payload,
                 explicit_force=frame.forced or override_forced or force_due_to_reset,
                 respect_cadence=override_respect_cadence,
-                allow_watchdog=(channel == "sensors"),
+                allow_force_publish=(channel == "sensors"),
             )
 
             if not decision.should_publish:
@@ -677,6 +677,59 @@ class TelemetryPublisher:
             requested_at=current_time,
         )
 
+    def get_current_sensors_state(
+        self,
+    ) -> tuple[str, float, Optional[datetime]]:
+        """Return the current sensors cadence state.
+
+        Returns:
+            A tuple of (mode, interval, watch_window_expires).
+        """
+        return (self._current_mode, self._sensors_interval, self._watch_window_expires)
+
+    def extend_watch_window(
+        self,
+        *,
+        duration_seconds: int,
+        requested_at: Optional[datetime] = None,
+    ) -> Optional[datetime]:
+        """Extend the current watch window without reconfiguring cadence.
+
+        This is an optimization for repeated sensors:set-rate commands that
+        request the same mode and interval. Instead of reconfiguring the
+        entire cadence pipeline, we simply extend the expiration time.
+
+        Args:
+            duration_seconds: New duration from requested_at.
+            requested_at: Base timestamp for computing expiration.
+
+        Returns:
+            The new expiration datetime, or None if not in watch mode.
+        """
+        if self._current_mode != "watch":
+            return None
+
+        requested_at = requested_at or datetime.now(timezone.utc)
+        new_expires = requested_at + timedelta(seconds=duration_seconds)
+        old_expires = self._watch_window_expires
+
+        self._watch_window_expires = new_expires
+        self._orchestrator.set_sensors_mode(
+            mode=self._current_mode,
+            max_hz=1.0 / self._sensors_interval if self._sensors_interval > 0 else 0.0,
+            watch_window_expires=new_expires,
+        )
+
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug(
+                "Extended watch window: %s -> %s (duration=%ds)",
+                old_expires.isoformat() if old_expires else "<none>",
+                new_expires.isoformat(),
+                duration_seconds,
+            )
+
+        return new_expires
+
     def apply_sensors_rate(
         self,
         *,
@@ -710,7 +763,7 @@ class TelemetryPublisher:
         self._sensors_interval = interval
         self._watch_window_expires = expires_at
         if interval > 0:
-            self._sensors_watchdog_seconds = max(300.0, interval * 5)
+            self._sensors_force_publish_seconds = max(300.0, interval * 5)
         self._current_mode = mode
         self._refresh_channel_schedules()
         self._orchestrator.set_sensors_mode(
@@ -758,9 +811,9 @@ class TelemetryPublisher:
             sensors_forced_interval = (
                 sensors_interval if sensors_interval and sensors_interval > 0 else None
             )
-        sensors_watchdog = (
-            self._sensors_watchdog_seconds
-            if self._sensors_watchdog_seconds and self._sensors_watchdog_seconds > 0
+        sensors_force_publish = (
+            self._sensors_force_publish_seconds
+            if self._sensors_force_publish_seconds and self._sensors_force_publish_seconds > 0
             else None
         )
         events_interval = (
@@ -772,7 +825,7 @@ class TelemetryPublisher:
                 "status",
                 interval=status_interval,
                 forced_interval=None,
-                watchdog_seconds=None,
+                force_publish_seconds=None,
             )
 
         if "sensors" in self._channel_topics:
@@ -780,7 +833,7 @@ class TelemetryPublisher:
                 "sensors",
                 interval=sensors_interval,
                 forced_interval=sensors_forced_interval,
-                watchdog_seconds=sensors_watchdog,
+                force_publish_seconds=sensors_force_publish,
             )
 
         if "events" in self._channel_topics:
@@ -788,7 +841,7 @@ class TelemetryPublisher:
                 "events",
                 interval=events_interval,
                 forced_interval=None,
-                watchdog_seconds=None,
+                force_publish_seconds=None,
             )
 
     def record_command_state(
@@ -929,7 +982,7 @@ class TelemetryPublisher:
         )
         self._current_mode = "idle"
         self._sensors_interval = self._idle_interval
-        self._sensors_watchdog_seconds = self._cadence.sensors_watchdog_seconds
+        self._sensors_force_publish_seconds = self._cadence.sensors_force_publish_seconds
         self._watch_window_expires = None
         self._bootstrapped = False
         self._cadence_controller.reset_all()

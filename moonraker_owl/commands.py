@@ -573,6 +573,15 @@ class CommandProcessor:
         if requested_at is None:
             requested_at = _parse_iso8601(params.get("requestedAt"))
 
+        # Clock skew correction: if server provides its current time, use it to
+        # compute the intended expiration relative to server time, then adjust
+        # to our local clock
+        server_utc_now = _parse_iso8601(params.get("serverUtcNow"))
+        local_utc_now = datetime.now(timezone.utc)
+        clock_offset = timedelta(seconds=0)
+        if server_utc_now is not None:
+            clock_offset = local_utc_now - server_utc_now
+
         duration_value = params.get("durationSeconds")
         duration_seconds: Optional[int]
         if duration_value is None:
@@ -596,12 +605,46 @@ class CommandProcessor:
             computed_duration = int((expires_override - baseline).total_seconds())
             duration_seconds = max(0, computed_duration)
 
-        expires_at = self._telemetry.apply_sensors_rate(
-            mode=mode,
-            max_hz=max_hz,
-            duration_seconds=duration_seconds,
-            requested_at=requested_at,
+        # Apply clock offset to requested_at for accurate expiration calculation
+        effective_requested_at = requested_at
+        if effective_requested_at is not None and clock_offset != timedelta(seconds=0):
+            effective_requested_at = effective_requested_at + clock_offset
+
+        # Deduplication: check if this is a no-op or extend-only scenario
+        current_mode, current_interval, current_expires = (
+            self._telemetry.get_current_sensors_state()
         )
+        target_interval = 1.0 / max_hz if max_hz > 0 else None
+
+        # Allow small floating-point tolerance for interval comparison
+        intervals_match = (
+            current_interval is not None
+            and target_interval is not None
+            and abs(current_interval - target_interval) < 0.01
+        ) or (current_interval is None and target_interval is None)
+
+        is_extend_only = (
+            mode == current_mode
+            and intervals_match
+            and mode == "watch"
+            and duration_seconds is not None
+            and duration_seconds > 0
+        )
+
+        if is_extend_only:
+            # Same mode and interval - just extend the watch window
+            expires_at = self._telemetry.extend_watch_window(
+                duration_seconds=duration_seconds,
+                requested_at=effective_requested_at,
+            )
+        else:
+            # Full cadence reconfiguration needed
+            expires_at = self._telemetry.apply_sensors_rate(
+                mode=mode,
+                max_hz=max_hz,
+                duration_seconds=duration_seconds,
+                requested_at=effective_requested_at,
+            )
 
         effective_expires = expires_override or expires_at
 

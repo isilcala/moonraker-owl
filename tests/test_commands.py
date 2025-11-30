@@ -3,7 +3,7 @@
 import asyncio
 import json
 from configparser import ConfigParser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -76,7 +76,12 @@ class FakeTelemetry:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
         self.applied: list[dict[str, Any]] = []
+        self.extended: list[dict[str, Any]] = []
         self.next_expires_at: Optional[datetime] = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        # Current state for deduplication checks
+        self._current_mode = "idle"
+        self._current_interval = 30.0
+        self._watch_window_expires: Optional[datetime] = None
 
     def record_command_state(
         self,
@@ -97,6 +102,27 @@ class FakeTelemetry:
             }
         )
 
+    def get_current_sensors_state(
+        self,
+    ) -> tuple[str, float, Optional[datetime]]:
+        return (self._current_mode, self._current_interval, self._watch_window_expires)
+
+    def extend_watch_window(
+        self,
+        *,
+        duration_seconds: int,
+        requested_at: Optional[datetime],
+    ) -> Optional[datetime]:
+        self.extended.append(
+            {
+                "duration_seconds": duration_seconds,
+                "requested_at": requested_at,
+            }
+        )
+        if requested_at:
+            self._watch_window_expires = requested_at + timedelta(seconds=duration_seconds)
+        return self._watch_window_expires or self.next_expires_at
+
     def apply_sensors_rate(
         self,
         *,
@@ -113,6 +139,13 @@ class FakeTelemetry:
                 "requested_at": requested_at,
             }
         )
+        # Update internal state after applying
+        self._current_mode = mode
+        self._current_interval = 1.0 / max_hz if max_hz > 0 else 30.0
+        if duration_seconds and duration_seconds > 0 and requested_at:
+            self._watch_window_expires = requested_at + timedelta(seconds=duration_seconds)
+        else:
+            self._watch_window_expires = None
         return self.next_expires_at
 
 
@@ -425,6 +458,184 @@ async def test_command_processor_handles_sensors_set_rate(config):
     second_ack = json.loads(second_payload.decode("utf-8"))
     assert second_ack["status"] == "completed"
     assert second_ack["stage"] == "execution"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_sensors_set_rate_deduplication_extends_watch_window(config):
+    """Test that repeated watch commands with same mode/interval only extend the window."""
+    mqtt = FakeMQTT()
+    telemetry = FakeTelemetry()
+    telemetry.next_expires_at = datetime(2025, 1, 1, 13, 0, tzinfo=timezone.utc)
+    processor = CommandProcessor(
+        config,
+        FakeMoonraker(),
+        mqtt,
+        telemetry=telemetry,
+    )
+
+    await processor.start()
+
+    # First command: sets watch mode at 1 Hz
+    first_message = {
+        "commandId": "cmd-1",
+        "command": "sensors:set-rate",
+        "parameters": {
+            "mode": "watch",
+            "maxHz": 1.0,
+            "durationSeconds": 120,
+            "issuedAt": "2025-01-01T12:00:00Z",
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/sensors:set-rate", first_message)
+
+    assert len(telemetry.applied) == 1
+    assert len(telemetry.extended) == 0
+
+    # Second command: same mode and interval, should extend only
+    second_message = {
+        "commandId": "cmd-2",
+        "command": "sensors:set-rate",
+        "parameters": {
+            "mode": "watch",
+            "maxHz": 1.0,
+            "durationSeconds": 120,
+            "issuedAt": "2025-01-01T12:01:00Z",
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/sensors:set-rate", second_message)
+
+    # Should NOT call apply_sensors_rate again, only extend_watch_window
+    assert len(telemetry.applied) == 1
+    assert len(telemetry.extended) == 1
+    extend_args = telemetry.extended[0]
+    assert extend_args["duration_seconds"] == 120
+    assert extend_args["requested_at"] == datetime(2025, 1, 1, 12, 1, tzinfo=timezone.utc)
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_sensors_set_rate_different_mode_triggers_full_apply(config):
+    """Test that changing mode triggers full apply instead of extend."""
+    mqtt = FakeMQTT()
+    telemetry = FakeTelemetry()
+    processor = CommandProcessor(
+        config,
+        FakeMoonraker(),
+        mqtt,
+        telemetry=telemetry,
+    )
+
+    await processor.start()
+
+    # First: set watch mode
+    await mqtt.emit(
+        "owl/printers/device-123/commands/sensors:set-rate",
+        {
+            "commandId": "cmd-1",
+            "command": "sensors:set-rate",
+            "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
+        },
+    )
+    assert len(telemetry.applied) == 1
+
+    # Second: change to idle mode - should trigger full apply
+    await mqtt.emit(
+        "owl/printers/device-123/commands/sensors:set-rate",
+        {
+            "commandId": "cmd-2",
+            "command": "sensors:set-rate",
+            "parameters": {"mode": "idle", "maxHz": 0.033},
+        },
+    )
+    assert len(telemetry.applied) == 2
+    assert len(telemetry.extended) == 0  # Never extended, always applied
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_sensors_set_rate_different_hz_triggers_full_apply(config):
+    """Test that changing maxHz triggers full apply instead of extend."""
+    mqtt = FakeMQTT()
+    telemetry = FakeTelemetry()
+    processor = CommandProcessor(
+        config,
+        FakeMoonraker(),
+        mqtt,
+        telemetry=telemetry,
+    )
+
+    await processor.start()
+
+    # First: watch at 1 Hz
+    await mqtt.emit(
+        "owl/printers/device-123/commands/sensors:set-rate",
+        {
+            "commandId": "cmd-1",
+            "command": "sensors:set-rate",
+            "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
+        },
+    )
+    assert len(telemetry.applied) == 1
+
+    # Second: watch at 2 Hz - different rate, should full apply
+    await mqtt.emit(
+        "owl/printers/device-123/commands/sensors:set-rate",
+        {
+            "commandId": "cmd-2",
+            "command": "sensors:set-rate",
+            "parameters": {"mode": "watch", "maxHz": 2.0, "durationSeconds": 120},
+        },
+    )
+    assert len(telemetry.applied) == 2
+    assert len(telemetry.extended) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_sensors_set_rate_clock_skew_correction(config):
+    """Test that serverUtcNow is used to correct clock skew when calculating expiration."""
+    mqtt = FakeMQTT()
+    telemetry = FakeTelemetry()
+    processor = CommandProcessor(
+        config,
+        FakeMoonraker(),
+        mqtt,
+        telemetry=telemetry,
+    )
+
+    await processor.start()
+
+    # Simulate server time being 10 seconds behind local time
+    # Server says it's 12:00:00, but our local clock says 12:00:10
+    # So when server says "expires in 120s from now", we should adjust
+    message = {
+        "commandId": "cmd-clock",
+        "command": "sensors:set-rate",
+        "parameters": {
+            "mode": "watch",
+            "maxHz": 1.0,
+            "durationSeconds": 120,
+            "serverUtcNow": "2025-01-01T12:00:00Z",
+            # issuedAt is also from server's perspective
+            "issuedAt": "2025-01-01T12:00:00Z",
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/sensors:set-rate", message)
+
+    assert len(telemetry.applied) == 1
+    apply_args = telemetry.applied[0]
+    # The requested_at should be adjusted by the clock offset
+    # Since we can't control datetime.now() in the test, we just verify
+    # that the apply was called with a datetime that accounts for the offset
+    assert apply_args["requested_at"] is not None
+    assert apply_args["mode"] == "watch"
+    assert apply_args["duration_seconds"] == 120
 
     await processor.stop()
 

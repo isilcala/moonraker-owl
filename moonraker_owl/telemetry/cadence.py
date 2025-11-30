@@ -3,7 +3,7 @@
 This module provides centralized cadence evaluation for telemetry channels,
 handling:
 - Minimum interval enforcement between publishes
-- Watchdog timers for liveness
+- Force-publish timers for liveness (ensures UI gets periodic updates)
 - Payload deduplication via hashing
 - Force-publish overrides with optional rate limiting
 
@@ -37,11 +37,12 @@ class ChannelSchedule:
     Attributes:
         interval: Minimum seconds between regular publishes (None = no limit)
         forced_interval: Minimum seconds between forced publishes (None = no limit)
-        watchdog_seconds: Maximum seconds without publish before forcing one (None = disabled)
+        force_publish_seconds: Maximum seconds without publish before forcing one (None = disabled)
+            This ensures UI clients receive periodic updates even when payload is unchanged.
     """
     interval: Optional[float]
     forced_interval: Optional[float]
-    watchdog_seconds: Optional[float]
+    force_publish_seconds: Optional[float]
 
 
 @dataclass
@@ -94,7 +95,7 @@ class ChannelCadenceController:
     This controller manages publish timing for multiple channels, enforcing:
     - Minimum intervals between publishes
     - Deduplication via payload hashing
-    - Watchdog timers for liveness guarantees
+    - Force-publish timers for liveness guarantees
     - Rate limiting for forced publishes
     
     Thread-safety: This class is NOT thread-safe. All calls should occur
@@ -130,7 +131,7 @@ class ChannelCadenceController:
         *,
         interval: Optional[float] = None,
         forced_interval: Optional[float] = None,
-        watchdog_seconds: Optional[float] = None,
+        force_publish_seconds: Optional[float] = None,
     ) -> None:
         """Configure cadence parameters for a channel.
         
@@ -138,12 +139,12 @@ class ChannelCadenceController:
             channel: Channel name (e.g., "status", "sensors", "events")
             interval: Minimum seconds between regular publishes
             forced_interval: Minimum seconds between forced publishes
-            watchdog_seconds: Maximum seconds without publish before forcing
+            force_publish_seconds: Maximum seconds without publish before forcing
         """
         self._schedules[channel] = ChannelSchedule(
             interval=interval if interval and interval > 0 else None,
             forced_interval=forced_interval if forced_interval and forced_interval > 0 else None,
-            watchdog_seconds=watchdog_seconds if watchdog_seconds and watchdog_seconds > 0 else None,
+            force_publish_seconds=force_publish_seconds if force_publish_seconds and force_publish_seconds > 0 else None,
         )
         self._state.setdefault(channel, ChannelRuntimeState())
 
@@ -177,7 +178,7 @@ class ChannelCadenceController:
         *,
         explicit_force: bool = False,
         respect_cadence: bool = False,
-        allow_watchdog: bool = False,
+        allow_force_publish: bool = False,
     ) -> ChannelDecision:
         """Evaluate whether a payload should be published.
         
@@ -186,7 +187,7 @@ class ChannelCadenceController:
             payload: Payload to evaluate
             explicit_force: True if caller explicitly requests publish
             respect_cadence: True to apply forced_interval even when forcing
-            allow_watchdog: True to allow watchdog timer to trigger publish
+            allow_force_publish: True to allow force-publish timer to trigger publish
             
         Returns:
             CadenceDecision indicating whether to publish and why
@@ -203,14 +204,15 @@ class ChannelCadenceController:
         state = self._state.setdefault(channel, ChannelRuntimeState())
         now = self._monotonic()
 
-        # Check watchdog - force publish if too long since last publish
+        # Check force-publish timer - force publish if too long since last publish
+        # This ensures UI clients receive periodic updates for liveness indication
         forced_for_dedup = explicit_force
-        if allow_watchdog and schedule.watchdog_seconds:
+        if allow_force_publish and schedule.force_publish_seconds:
             if state.last_publish == 0.0:
                 forced_for_dedup = True
             else:
                 elapsed = now - state.last_publish
-                if elapsed >= schedule.watchdog_seconds:
+                if elapsed >= schedule.force_publish_seconds:
                     forced_for_dedup = True
 
         # Apply forced_interval rate limiting when explicitly forcing

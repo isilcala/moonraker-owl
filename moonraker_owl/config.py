@@ -42,7 +42,7 @@ class TelemetryCadenceConfig:
     status_heartbeat_seconds: int = 60
     status_idle_interval_seconds: float = 60.0
     status_active_interval_seconds: float = 15.0
-    sensors_watchdog_seconds: float = 300.0
+    sensors_force_publish_seconds: float = 300.0  # Maximum seconds without sensor publish before forcing one
     events_max_per_second: int = 1
     events_max_per_minute: int = 20
 
@@ -159,7 +159,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "status_heartbeat_seconds": "60",
                 "status_idle_interval_seconds": "60",
                 "status_active_interval_seconds": "15",
-                "sensors_watchdog_seconds": "300",
+                "sensors_force_publish_seconds": "300",
                 "events_max_per_second": "1",
                 "events_max_per_minute": "20",
             },
@@ -269,10 +269,10 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             "status_active_interval_seconds",
             fallback=cadence_defaults.status_active_interval_seconds,
         ),
-        sensors_watchdog_seconds=parser.getfloat(
+        sensors_force_publish_seconds=parser.getfloat(
             "telemetry_cadence",
-            "sensors_watchdog_seconds",
-            fallback=cadence_defaults.sensors_watchdog_seconds,
+            "sensors_force_publish_seconds",
+            fallback=cadence_defaults.sensors_force_publish_seconds,
         ),
         events_max_per_second=parser.getint(
             "telemetry_cadence",

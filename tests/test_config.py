@@ -13,7 +13,7 @@ def test_load_config_defaults(tmp_path: Path) -> None:
     assert config.telemetry_cadence.status_heartbeat_seconds == 60
     assert config.telemetry_cadence.status_idle_interval_seconds == 60.0
     assert config.telemetry_cadence.status_active_interval_seconds == 15.0
-    assert config.telemetry_cadence.sensors_watchdog_seconds == 300.0
+    assert config.telemetry_cadence.sensors_force_publish_seconds == 300.0
     assert config.telemetry_cadence.events_max_per_second == 1
     assert config.telemetry_cadence.events_max_per_minute == 20
     assert config.resilience.reconnect_initial_seconds == 1.0

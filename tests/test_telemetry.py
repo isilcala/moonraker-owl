@@ -1951,7 +1951,7 @@ def test_forced_publish_respects_one_hz_cap() -> None:
     if force_interval <= 0:
         force_interval = 1.0
     publisher._sensors_interval = force_interval
-    publisher._sensors_watchdog_seconds = max(300.0, force_interval * 5)
+    publisher._sensors_force_publish_seconds = max(300.0, force_interval * 5)
     publisher._refresh_channel_schedules()
 
     controller = publisher._cadence_controller  # type: ignore[attrdefined]
@@ -1965,7 +1965,7 @@ def test_forced_publish_respects_one_hz_cap() -> None:
         payload,
         explicit_force=True,
         respect_cadence=True,
-        allow_watchdog=True,
+        allow_force_publish=True,
     )
 
     assert decision.should_publish is False
@@ -1978,7 +1978,7 @@ def test_forced_publish_respects_one_hz_cap() -> None:
         payload,
         explicit_force=True,
         respect_cadence=True,
-        allow_watchdog=True,
+        allow_force_publish=True,
     )
 
     assert decision.should_publish is True
