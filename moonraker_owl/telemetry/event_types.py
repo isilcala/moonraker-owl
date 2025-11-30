@@ -124,21 +124,33 @@ EVENT_METADATA: Dict[EventName, Dict[str, Any]] = {
 # Print state transition mappings
 # Maps (previous_state, current_state) tuples to EventName
 # None as previous_state matches any unknown/initial state
+#
+# Official Klipper print_stats.state values (from klippy/extras/print_stats.py):
+# - "standby": Initial/idle state (set in reset())
+# - "printing": Active print (set in note_start())
+# - "paused": Print paused (set in note_pause())
+# - "complete": Print finished successfully (set in note_complete())
+# - "cancelled": Print cancelled by user (set in note_cancel())
+# - "error": Print failed with error (set in note_error())
+#
+# Note: "completed" is kept as defensive mapping but Klipper officially uses "complete"
 PRINT_STATE_TRANSITIONS: Dict[tuple[Optional[str], str], EventName] = {
     # Starting a print (from various idle states)
     (None, "printing"): EventName.PRINT_STARTED,
     ("standby", "printing"): EventName.PRINT_STARTED,
     ("complete", "printing"): EventName.PRINT_STARTED,  # New print after completion
-    ("completed", "printing"): EventName.PRINT_STARTED,  # Alternative spelling
+    ("completed", "printing"): EventName.PRINT_STARTED,  # Defensive: alternative spelling
     ("cancelled", "printing"): EventName.PRINT_STARTED,  # New print after cancel
     ("error", "printing"): EventName.PRINT_STARTED,  # New print after error
     # Resuming from pause
     ("paused", "printing"): EventName.PRINT_RESUMED,
     # Pausing
     ("printing", "paused"): EventName.PRINT_PAUSED,
-    # Completing (Klipper uses "complete", some versions may use "completed")
+    # Completing - Klipper officially uses "complete" (not "completed")
     ("printing", "complete"): EventName.PRINT_COMPLETED,
-    ("printing", "completed"): EventName.PRINT_COMPLETED,
+    ("printing", "completed"): EventName.PRINT_COMPLETED,  # Defensive mapping
+    ("paused", "complete"): EventName.PRINT_COMPLETED,  # Edge case: paused then complete
+    ("paused", "completed"): EventName.PRINT_COMPLETED,  # Defensive mapping
     # Cancelling
     ("printing", "cancelled"): EventName.PRINT_CANCELLED,
     ("paused", "cancelled"): EventName.PRINT_CANCELLED,

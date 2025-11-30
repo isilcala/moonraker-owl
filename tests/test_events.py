@@ -781,6 +781,39 @@ class TestOrchestratorEventDetection:
         assert len(events) == 1
         assert events[0].event_name == EventName.PRINT_STARTED
 
+    def test_detect_print_completed_from_paused(self) -> None:
+        """Edge case: paused -> complete generates printCompleted event.
+
+        This is an unusual transition but can happen if firmware auto-completes
+        a paused print. We handle it defensively.
+        """
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set paused state
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "paused",
+                            "filename": "test.gcode",
+                        }
+                    }
+                }
+            }
+        )
+        orchestrator.events.harvest()
+
+        # Directly complete from paused (edge case)
+        orchestrator.ingest(
+            {"result": {"status": {"print_stats": {"state": "complete"}}}}
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.PRINT_COMPLETED
+
     def test_print_state_callback_invoked(self) -> None:
         """Print state callback is invoked on state change."""
         clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
