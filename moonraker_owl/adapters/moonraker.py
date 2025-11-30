@@ -197,7 +197,7 @@ class MoonrakerClient(PrinterAdapter):
                             if message.type == aiohttp.WSMsgType.TEXT:
                                 await self._dispatch(message.data)
                             elif message.type == aiohttp.WSMsgType.BINARY:
-                                LOGGER.debug("Ignoring binary message from Moonraker")
+                                pass  # Ignore binary messages
                             elif message.type == aiohttp.WSMsgType.ERROR:
                                 raise ws.exception() or RuntimeError("Websocket error")
                     finally:
@@ -212,12 +212,6 @@ class MoonrakerClient(PrinterAdapter):
                 # duration uniformly between 0 and the current backoff value, then increase
                 # the backoff (capped by reconnect_max) for the next attempt.
                 jittered = random.uniform(0, backoff)
-                LOGGER.debug(
-                    "Sleeping %.2fs before reconnect (backoff=%.2fs, cap=%.2fs)",
-                    jittered,
-                    backoff,
-                    self.reconnect_max,
-                )
                 await asyncio.sleep(jittered)
                 backoff = min(backoff * 2, self.reconnect_max)
 
@@ -225,14 +219,10 @@ class MoonrakerClient(PrinterAdapter):
         """Re-send printer.objects.subscribe for the active websocket."""
 
         if self._subscription_objects is None:
-            LOGGER.debug(
-                "Skipping Moonraker resubscribe; no subscription manifest configured"
-            )
             return
 
         ws = self._active_ws
         if ws is None or ws.closed:
-            LOGGER.debug("Skipping Moonraker resubscribe; websocket not connected")
             return
 
         try:
@@ -246,8 +236,7 @@ class MoonrakerClient(PrinterAdapter):
         try:
             payload = json.loads(raw_data)
         except json.JSONDecodeError:
-            LOGGER.debug("Discarding non-JSON message: %s", raw_data)
-            return
+            return  # Discard non-JSON messages
 
         for callback in list(self._callbacks):
             try:

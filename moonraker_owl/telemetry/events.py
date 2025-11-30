@@ -99,11 +99,6 @@ class EventCollector:
             )
         else:
             self._p1_queue.append(event)
-            LOGGER.debug(
-                "Recorded P1 event: %s (id=%s)",
-                event.event_name.value,
-                event.event_id[:8],
-            )
 
     def harvest(self) -> List[Event]:
         """Harvest events for publishing, respecting rate limits.
@@ -125,17 +120,6 @@ class EventCollector:
 
         while self._p1_queue and self._try_acquire_token():
             events.append(self._p1_queue.popleft())
-
-        if events:
-            p0_count = sum(1 for e in events if e.is_critical)
-            p1_count = len(events) - p0_count
-            LOGGER.debug(
-                "Harvested %d events (P0=%d, P1=%d), %d P1 queued",
-                len(events),
-                p0_count,
-                p1_count,
-                len(self._p1_queue),
-            )
 
         return events
 
@@ -198,7 +182,6 @@ class EventCollector:
         self._tokens = float(self._config.burst_size)
         self._minute_count = 0
         self._minute_start = time.monotonic()
-        LOGGER.debug("Event collector reset")
 
     @property
     def pending_count(self) -> int:

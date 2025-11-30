@@ -460,7 +460,7 @@ class MoonrakerOwlApp:
                 message=detail,
             )
         except Exception:  # pragma: no cover - defensive logging
-            LOGGER.debug("Failed to publish degraded telemetry snapshot", exc_info=True)
+            pass  # Best-effort degraded status publish
 
     async def _handle_telemetry_status_update(self, payload: dict[str, Any]) -> None:
         assessment = self._analyse_moonraker_snapshot(payload)
@@ -597,15 +597,8 @@ class MoonrakerOwlApp:
             if not self._status_listener_registered:
                 try:
                     telemetry.register_status_listener(self._telemetry_status_listener)
-                except AttributeError:  # pragma: no cover - defensive guard
-                    LOGGER.debug(
-                        "Telemetry publisher does not support status listeners"
-                    )
-                except Exception:  # pragma: no cover - defensive logging
-                    LOGGER.debug(
-                        "Failed to register telemetry status listener",
-                        exc_info=True,
-                    )
+                except (AttributeError, Exception):  # pragma: no cover - defensive guard
+                    pass  # Status listener optional
                 else:
                     self._status_listener_registered = True
 
@@ -684,17 +677,15 @@ class MoonrakerOwlApp:
                 try:
                     self._telemetry_publisher.set_print_state_callback(None)
                 except Exception:  # pragma: no cover - defensive cleanup
-                    LOGGER.debug("Error removing print state callback", exc_info=True)
+                    pass
             try:
                 await self._command_processor.stop()
             except Exception:  # pragma: no cover - defensive cleanup
-                LOGGER.debug("Error stopping command processor", exc_info=True)
+                pass
             try:
                 await self._command_processor.abandon_inflight(reason)
-            except AttributeError:
-                LOGGER.debug("Command processor missing abandon_inflight handler")
-            except Exception:  # pragma: no cover - defensive cleanup
-                LOGGER.debug("Failed to abandon inflight commands", exc_info=True)
+            except (AttributeError, Exception):  # pragma: no cover - defensive cleanup
+                pass
             await self._health.update(
                 "commands",
                 False,
@@ -713,21 +704,14 @@ class MoonrakerOwlApp:
                         self._telemetry_publisher.unregister_status_listener(
                             self._telemetry_status_listener
                         )
-                    except AttributeError:
-                        LOGGER.debug(
-                            "Telemetry publisher missing unregister_status_listener"
-                        )
-                    except Exception:  # pragma: no cover - defensive cleanup
-                        LOGGER.debug(
-                            "Failed to unregister telemetry status listener",
-                            exc_info=True,
-                        )
+                    except (AttributeError, Exception):  # pragma: no cover - defensive cleanup
+                        pass
                     finally:
                         self._status_listener_registered = False
                 try:
                     await self._telemetry_publisher.stop()
                 except Exception:  # pragma: no cover - defensive cleanup
-                    LOGGER.debug("Error stopping telemetry publisher", exc_info=True)
+                    pass
                 await self._health.update("telemetry", False, reason)
                 if not preserve_instances:
                     self._telemetry_publisher = None
@@ -775,7 +759,6 @@ class MoonrakerOwlApp:
         """
         # Prevent concurrent component restarts
         if self._component_restart_in_progress:
-            LOGGER.debug("Component restart already in progress, skipping")
             return
 
         lock = self._component_restart_lock
@@ -784,7 +767,6 @@ class MoonrakerOwlApp:
             self._component_restart_lock = lock
 
         if lock.locked():
-            LOGGER.debug("Component restart lock held, skipping")
             return
 
         async with lock:

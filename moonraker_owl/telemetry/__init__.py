@@ -246,9 +246,7 @@ class TelemetryPublisher:
             message = str(exc)
             if "callback already registered" not in message.lower():
                 raise
-            LOGGER.debug(
-                "Moonraker callback already registered; reusing existing listener"
-            )
+            # Normal re-entry scenario - callback already registered
             callback_registered = True
         else:
             callback_registered = True
@@ -393,7 +391,7 @@ class TelemetryPublisher:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
-                LOGGER.debug("Polling '%s' failed: %s", group.name, exc)
+                pass  # Polling failure handled by circuit breaker
             else:
                 await self._enqueue(payload)
 
@@ -482,8 +480,6 @@ class TelemetryPublisher:
             pending = self._gather_payloads()
             pending_overrides = {}
 
-        LOGGER.debug("TelemetryPublisher loop terminated")
-
     def _gather_payloads(
         self, base: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
@@ -527,11 +523,6 @@ class TelemetryPublisher:
                 LOGGER.info(
                     "Telemetry pipeline bootstrapped after receiving initial Moonraker status"
                 )
-            else:
-                LOGGER.debug(
-                    "Telemetry bootstrap pending; awaiting Moonraker status (available=%s)",
-                    list(aggregated_status.keys()),
-                )
 
         if self._bootstrapped and has_status:
             self._last_payload_snapshot = copy.deepcopy(payload)
@@ -568,7 +559,6 @@ class TelemetryPublisher:
                 continue
 
             if not self._bootstrapped and channel != "events":
-                LOGGER.debug("Skipping %s publish until initial Moonraker status arrives", channel)
                 skipped_pre_bootstrap = True
                 continue
 
@@ -993,7 +983,7 @@ class TelemetryPublisher:
                 return
             remaining_seconds = math.ceil(remaining)
 
-        LOGGER.debug(
+        LOGGER.info(
             "Reapplying telemetry cadence request after restart: mode=%s max_hz=%.3f remaining=%s",
             request.mode,
             request.max_hz,
@@ -1105,7 +1095,7 @@ class TelemetryPublisher:
             try:
                 outcome = listener(payload)
             except Exception:  # pragma: no cover - defensive logging
-                LOGGER.debug("Status listener raised", exc_info=True)
+                LOGGER.warning("Status listener raised unexpected exception", exc_info=True)
                 continue
 
             if inspect.isawaitable(outcome):
@@ -1160,7 +1150,6 @@ class TelemetryPublisher:
             if not ready_signal and self._klippy_ready_applied:
                 return
             if self._klippy_ready_applied and ready_signal:
-                LOGGER.debug("Skipping Moonraker resubscribe; ready already handled")
                 return
             # On a Klippy reboot the websocket keeps running but loses subscriptions; refresh them lazily.
             LOGGER.info("Detected Klippy ready; refreshing Moonraker subscriptions")
@@ -1171,10 +1160,6 @@ class TelemetryPublisher:
 
     def _schedule_resubscribe(self, reason: str) -> None:
         if not hasattr(self._moonraker, "resubscribe"):
-            LOGGER.debug(
-                "Printer adapter does not support resubscribe; skipping (%s)",
-                reason,
-            )
             return
 
         loop = self._loop
@@ -1182,17 +1167,10 @@ class TelemetryPublisher:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                LOGGER.debug(
-                    "Unable to schedule Moonraker resubscribe (%s); no active loop",
-                    reason,
-                )
                 return
 
         existing_task = self._resubscribe_task
         if existing_task is not None and not existing_task.done():
-            LOGGER.debug(
-                "Moonraker resubscribe already pending; skipping (%s)", reason
-            )
             return
 
         async def _runner() -> None:
@@ -1208,8 +1186,8 @@ class TelemetryPublisher:
                 await self._prime_initial_state()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # pragma: no cover - defensive logging
-                LOGGER.debug(
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.warning(
                     "Failed to refresh Moonraker snapshot after %s: %s",
                     reason,
                     exc,
@@ -1218,11 +1196,10 @@ class TelemetryPublisher:
                 self._resubscribe_task = None
 
         # Resubscribe asynchronously so we do not block the main callback pipeline.
-        LOGGER.debug("Scheduling Moonraker resubscribe (%s)", reason)
         try:
             self._resubscribe_task = loop.create_task(_runner())
         except Exception:  # pragma: no cover - defensive logging
-            LOGGER.debug(
+            LOGGER.warning(
                 "Unable to schedule Moonraker resubscribe task (%s)", reason,
                 exc_info=True,
             )
@@ -1236,21 +1213,18 @@ class TelemetryPublisher:
             except RuntimeError:
                 loop = None
         if loop is None:
-            LOGGER.debug(
-                "Status listener produced awaitable but no loop is available"
-            )
             return
 
         async def _runner() -> None:
             try:
                 await asyncio.shield(awaitable)
             except Exception:  # pragma: no cover - defensive logging
-                LOGGER.debug("Status listener awaitable raised", exc_info=True)
+                LOGGER.warning("Status listener awaitable raised", exc_info=True)
 
         try:
             loop.create_task(_runner())
         except Exception:  # pragma: no cover - defensive logging
-            LOGGER.debug("Failed to schedule status listener", exc_info=True)
+            pass  # Task scheduling failed - no recovery possible
 
 
 def _extract_state_from_params(params: Any) -> Optional[str]:
@@ -1303,7 +1277,7 @@ def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str]:
         )
 
     if not printer_id:
-        LOGGER.debug(
+        LOGGER.warning(
             "Printer ID missing from configuration; telemetry payload will omit it"
         )
 

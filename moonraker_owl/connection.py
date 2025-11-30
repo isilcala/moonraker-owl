@@ -111,31 +111,27 @@ class ConnectionCoordinator:
             reason: Why reconnection is needed.
         """
         if self._stop_event.is_set():
-            LOGGER.debug("Ignoring reconnect request during shutdown")
             return
 
         # Ignore CONNECTION_LOST during reconnection - this is expected when we
         # disconnect as part of the reconnection process
         if reason == ReconnectReason.CONNECTION_LOST and self._state == ConnectionState.RECONNECTING:
-            LOGGER.debug(
-                "Ignoring connection_lost during reconnection (state=%s)",
-                self._state.value,
-            )
             return
 
         # Priority: TOKEN_RENEWED > AUTH_FAILURE > others
+        previous_reason = self._pending_reason
         if self._pending_reason is None:
             self._pending_reason = reason
-            LOGGER.debug("Reconnect requested: %s", reason.value)
         elif reason == ReconnectReason.TOKEN_RENEWED:
             self._pending_reason = reason
-            LOGGER.debug("Reconnect reason upgraded to: %s", reason.value)
         elif (
             reason == ReconnectReason.AUTH_FAILURE
             and self._pending_reason not in (ReconnectReason.TOKEN_RENEWED,)
         ):
             self._pending_reason = reason
-            LOGGER.debug("Reconnect reason upgraded to: %s", reason.value)
+        
+        if self._pending_reason != previous_reason or previous_reason is None:
+            LOGGER.debug("Reconnect requested: %s", self._pending_reason.value)
 
         self._reconnect_event.set()
 
@@ -166,8 +162,8 @@ class ConnectionCoordinator:
 
         try:
             await self._mqtt_client.disconnect()
-        except Exception as exc:
-            LOGGER.debug("Error during disconnect: %s", exc)
+        except Exception:
+            pass  # Disconnect cleanup - ignore errors
 
     def start_supervisor(self) -> None:
         """Start the connection supervision task."""
@@ -177,7 +173,6 @@ class ConnectionCoordinator:
 
         self._stop_event.clear()
         self._supervisor_task = asyncio.create_task(self._supervision_loop())
-        LOGGER.debug("Connection supervisor started")
 
     async def stop_supervisor(self) -> None:
         """Stop the connection supervision task."""
@@ -192,8 +187,6 @@ class ConnectionCoordinator:
                 pass
             self._supervisor_task = None
 
-        LOGGER.debug("Connection supervisor stopped")
-
     def register_reconnected_callback(self, callback) -> None:
         """Register callback to be invoked after successful reconnection."""
         self._on_reconnected_callbacks.append(callback)
@@ -204,8 +197,6 @@ class ConnectionCoordinator:
 
     async def _supervision_loop(self) -> None:
         """Main supervision loop that handles reconnection requests."""
-        LOGGER.debug("Connection supervision loop started")
-
         while not self._stop_event.is_set():
             try:
                 await self._reconnect_event.wait()
@@ -227,8 +218,6 @@ class ConnectionCoordinator:
 
                 await self._execute_reconnect(reason)
 
-        LOGGER.debug("Connection supervision loop terminated")
-
     async def _execute_reconnect(self, reason: ReconnectReason) -> None:
         """Execute reconnection with proper state management and backoff.
 
@@ -245,13 +234,13 @@ class ConnectionCoordinator:
                 if asyncio.iscoroutine(result):
                     await result
             except Exception:
-                LOGGER.debug("Disconnected callback failed", exc_info=True)
+                LOGGER.warning("Disconnected callback failed", exc_info=True)
 
         # Disconnect cleanly if still connected
         try:
             await self._mqtt_client.disconnect()
         except Exception:
-            LOGGER.debug("Error during disconnect", exc_info=True)
+            pass  # Cleanup disconnect - ignore errors
 
         # For auth failures, try to refresh token first
         if reason == ReconnectReason.AUTH_FAILURE:

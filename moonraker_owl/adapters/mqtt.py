@@ -120,7 +120,6 @@ class MQTTClient:
         actual_client_id = device_id
         username = device_id
         password = jwt_token
-        LOGGER.debug("Using JWT authentication with clientId=%s (attempt %d)", device_id, attempt)
 
         client_kwargs: dict[str, Any] = {
             "client_id": actual_client_id,

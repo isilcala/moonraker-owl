@@ -110,7 +110,6 @@ class MoonrakerBackend(PrinterBackend):
                 }
             )
         except Exception as exc:
-            LOGGER.debug("Health check failed: %s", exc)
             return PrinterHealthAssessment(
                 healthy=False,
                 detail=f"connection error: {exc}",

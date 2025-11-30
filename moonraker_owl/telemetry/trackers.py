@@ -117,12 +117,14 @@ class PrintSessionTracker:
         )
 
         if LOGGER.isEnabledFor(logging.DEBUG):
+            # Floor progress to integer for deduplication (matches UI display logic)
+            progress_floored = int(progress_percent) if progress_percent is not None else None
             signature = (
                 session_id,
                 raw_state,
                 job_status,
                 has_active_job,
-                progress_percent,
+                progress_floored,
                 message,
             )
             if signature != self._last_debug_signature:
@@ -132,7 +134,7 @@ class PrintSessionTracker:
                     raw_state,
                     job_status,
                     has_active_job,
-                    progress_percent,
+                    progress_floored,
                     message,
                 )
                 self._last_debug_signature = signature

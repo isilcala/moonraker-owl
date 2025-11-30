@@ -186,8 +186,8 @@ class PollingScheduler:
                 payload = await self._fetch_state(group.objects)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                LOGGER.debug("Polling '%s' failed: %s", group.name, exc)
+            except Exception:
+                pass  # Polling failure handled by circuit breaker
             else:
                 await self._enqueue(payload)
 

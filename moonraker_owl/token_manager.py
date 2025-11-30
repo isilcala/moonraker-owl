@@ -152,12 +152,6 @@ class TokenManager:
         while not self._stop_event.is_set():
             # Calculate renewal interval based on current token's lifetime
             renewal_interval = self._calculate_renewal_interval()
-            
-            LOGGER.debug(
-                "Token renewal scheduled in %d seconds (%.1f minutes)",
-                renewal_interval,
-                renewal_interval / 60.0
-            )
 
             try:
                 await asyncio.wait_for(
@@ -214,13 +208,6 @@ class TokenManager:
 
         # Ensure minimum interval of 60 seconds
         interval = max(60, int(interval))
-
-        LOGGER.debug(
-            "Token renewal calculation: lifetime=%ds, elapsed=%ds, remaining=%ds, "
-            "renewal_ratio=%.2f, safety_buffer=%ds, calculated_interval=%ds",
-            int(token_lifetime), int(time_elapsed), int(time_remaining),
-            self.renewal_ratio, self.safety_buffer_seconds, interval
-        )
 
         return interval
 

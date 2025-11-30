@@ -170,8 +170,8 @@ class CommandProcessor:
 
         try:
             self._mqtt.unsubscribe(self._command_subscription)
-        except Exception as exc:  # pragma: no cover - defensive cleanup
-            LOGGER.debug("Error unsubscribing from command topic: %s", exc)
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass  # Cleanup - ignore unsubscribe errors
         finally:
             self._mqtt.set_message_handler(None)
             self._handler_registered = False
@@ -206,9 +206,7 @@ class CommandProcessor:
             return
 
         if message.command_id in self._inflight:
-            LOGGER.debug(
-                "Duplicate inflight command received: %s", message.command_id
-            )
+            # Duplicate delivery while still processing - ignore
             return
 
         self._begin_inflight(command_name, message)
@@ -284,7 +282,7 @@ class CommandProcessor:
                 details=details,
             )
         except Exception:  # pragma: no cover - defensive
-            LOGGER.debug("Failed to record command state %s", state, exc_info=True)
+            pass  # Non-critical - telemetry will recover
 
     def _begin_inflight(self, command_name: str, message: CommandMessage) -> None:
         self._inflight[message.command_id] = _InflightCommand(
@@ -645,11 +643,6 @@ class CommandProcessor:
                 "acknowledgedAt": acknowledged_at.isoformat(timespec="seconds"),
             },
         }
-
-        if not command_id:
-            LOGGER.debug(
-                "Publishing acknowledgment for %s without a command ID", command_name
-            )
 
         if stage_value == "dispatch":
             document["timestamps"]["dispatchedAt"] = acknowledged_at.isoformat(
