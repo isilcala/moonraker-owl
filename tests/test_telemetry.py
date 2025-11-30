@@ -1064,7 +1064,8 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_system_status_clears_retained_status() -> None:
+async def test_publish_system_status_publishes_error_snapshot() -> None:
+    """Test that publish_system_status sends an error status snapshot."""
     initial_state = {
         "result": {
             "status": {
@@ -1086,10 +1087,6 @@ async def test_publish_system_status_clears_retained_status() -> None:
     await asyncio.sleep(0.05)
     mqtt.messages.clear()
 
-    await moonraker.emit(initial_state)
-    await asyncio.sleep(0.05)
-    mqtt.messages.clear()
-
     await publisher.publish_system_status(
         printer_state="error", message="Emergency stop"
     )
@@ -1101,17 +1098,14 @@ async def test_publish_system_status_clears_retained_status() -> None:
         message for message in mqtt.messages if message["topic"].endswith("/status")
     ]
 
-    assert status_messages, "Expected status publications"
-    clear_message = status_messages[0]
-    assert clear_message["retain"] is True
-    assert clear_message["payload"] == b""
-
+    assert status_messages, "Expected status publication"
     error_message = status_messages[-1]
     assert error_message["retain"] is False
     document = _decode(error_message)
     status = document.get("status")
     assert isinstance(status, dict)
     assert status.get("printerStatus") == "Error"
+    assert status.get("subStatus") == "Emergency stop"
 
 
 def test_telemetry_configuration_requires_device_id():
@@ -1616,9 +1610,7 @@ async def test_publish_system_status_emits_error_snapshot() -> None:
     assert status_body is not None
     assert status_body.get("printerStatus") == "Error"
     assert status_body.get("subStatus") == "Moonraker unavailable"
-    assert status_messages[-1]["retain"] is True
-
-    await publisher.stop()
+    assert status_messages[-1]["retain"] is False
 
     await publisher.stop()
 
@@ -2144,8 +2136,8 @@ async def test_status_recovery_retained_after_error_snapshot() -> None:
     )
 
     status_messages = mqtt.by_topic().get(status_topic)
-    assert status_messages, "Expected status retain for error snapshot"
-    assert status_messages[-1]["retain"] is True
+    assert status_messages, "Expected status publish for error snapshot"
+    assert status_messages[-1]["retain"] is False
     mqtt.messages.clear()
 
     await moonraker.emit(sample)
@@ -2153,7 +2145,7 @@ async def test_status_recovery_retained_after_error_snapshot() -> None:
 
     recovery_messages = mqtt.by_topic().get(status_topic)
     assert recovery_messages, "Expected status after recovery"
-    assert recovery_messages[-1]["retain"] is True
+    assert recovery_messages[-1]["retain"] is False
     snapshot = json.loads(recovery_messages[-1]["payload"].decode("utf-8"))
     assert snapshot.get("status", {}).get("printerStatus") != "Error"
 

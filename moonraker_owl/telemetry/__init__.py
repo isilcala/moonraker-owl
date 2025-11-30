@@ -318,8 +318,6 @@ class TelemetryPublisher:
             monotonic=time.monotonic,
             hasher=self._hasher,
         )
-        self._retain_next_publish: Set[str] = set()  # Agent no longer uses retained, Nexus snapshot provides authority
-        self._force_error_retain: Optional[bool] = None
         self._status_error_snapshot_active = False
         self._status_listeners: list[Callable[[Dict[str, Any]], Any]] = []
 
@@ -783,32 +781,16 @@ class TelemetryPublisher:
                     if isinstance(state_value, str):
                         normalized_state = state_value.strip()
                         if normalized_state:
-                            previous_state_value = self._last_status_status
                             self._last_status_status = state_value
                             self._last_status_publish_time = now_monotonic
                             state_lower = normalized_state.lower()
                             if state_lower == "error":
-                                if not self._status_error_snapshot_active:
-                                    self._clear_retained_channels(("status", "sensors"))
-                                    self._status_error_snapshot_active = True
-                                retain_error = self._force_error_retain
-                                if retain_error is None:
-                                    previous_lower = (
-                                        (previous_state_value or "").strip().lower()
-                                    )
-                                    retain_error = previous_lower in {"printing", "paused"}
-                                if retain_error:
-                                    self._retain_next_publish.add("status")
-                                else:
-                                    self._retain_next_publish.discard("status")
+                                self._status_error_snapshot_active = True
                             elif self._status_error_snapshot_active:
-                                self._retain_next_publish.add("status")
                                 self._status_error_snapshot_active = False
 
-            retain = channel in self._retain_next_publish
-            if retain:
-                self._retain_next_publish.discard(channel)
-            self._publish(channel, topic, envelope, retain=retain)
+            # Agent never uses retained messages - Nexus snapshot provides authority
+            self._publish(channel, topic, envelope, retain=False)
             self._force_full_channels_after_reset.discard(channel)
 
         if deferred:
@@ -1069,35 +1051,6 @@ class TelemetryPublisher:
                 "Unexpected error publishing telemetry for channel %s", channel
             )
 
-    def _clear_retained_channels(self, channels: Iterable[str]) -> None:
-        if not channels:
-            return
-
-        properties = Properties(PacketTypes.PUBLISH)
-        # Note: Device authentication now handled via JWT (MQTT password)
-        # No need to attach device_token as MQTT user property
-
-        for channel in channels:
-            topic = self._channel_topics.get(channel)
-            if not topic:
-                continue
-
-            try:
-                self._mqtt.publish(
-                    topic,
-                    b"",
-                    qos=self._channel_qos.get(channel, 1),
-                    retain=True,
-                    properties=properties,
-                )
-            except MQTTConnectionError as exc:
-                LOGGER.warning("Retained payload clear failed for %s: %s", channel, exc)
-            except Exception:  # pragma: no cover - defensive logging
-                LOGGER.exception(
-                    "Unexpected error clearing retained payload for channel %s",
-                    channel,
-                )
-
     def _store_pending_payload(self, payload: Dict[str, Any]) -> None:
         if self._pending_payload is None:
             self._pending_payload = copy.deepcopy(payload)
@@ -1219,6 +1172,11 @@ class TelemetryPublisher:
         printer_state: str,
         message: Optional[str] = None,
     ) -> None:
+        """Publish a system-level status update (e.g., error state).
+
+        This is used to communicate system-level errors like Moonraker unavailability.
+        Agent never uses retained messages - Nexus snapshot provides authority.
+        """
         if self._stop_event.is_set():
             return
 
@@ -1241,17 +1199,6 @@ class TelemetryPublisher:
                 }
             }
         }
-        previous_status = (self._last_status_status or "").strip().lower()
-        session = self._orchestrator.session_tracker.compute(self._orchestrator.store)
-        retain_error = previous_status in {"printing", "paused"}
-        if not retain_error:
-            retain_error = session.has_active_job or (
-                session.progress_percent is not None and session.progress_percent > 0
-            )
-
-        self._force_error_retain = retain_error
-        if not retain_error:
-            self._retain_next_publish.discard("status")
 
         snapshot = self._orchestrator.store.export_state()
         try:
@@ -1266,7 +1213,6 @@ class TelemetryPublisher:
             )
         finally:
             self._orchestrator.store.restore_state(snapshot)
-            self._force_error_retain = None
 
     def register_status_listener(
         self,
