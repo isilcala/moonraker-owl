@@ -56,6 +56,18 @@ class PrinterAdapter(Protocol):
         """Execute a high-level print control action (pause, resume, cancel)."""
         ...
 
+    async def execute_gcode(self, script: str) -> None:
+        """Execute an arbitrary GCode script on the printer.
+
+        Args:
+            script: GCode command(s) to execute. Multiple commands can be
+                    separated by newlines.
+
+        Raises:
+            RuntimeError: If script execution fails.
+        """
+        ...
+
     async def aclose(self) -> None:
         """Close any underlying resources."""
         ...

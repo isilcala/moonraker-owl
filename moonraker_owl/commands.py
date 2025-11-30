@@ -37,7 +37,29 @@ class CommandProcessingError(RuntimeError):
 
 
 class MoonrakerCommandClient(Protocol):
-    async def execute_print_action(self, action: str) -> None: ...
+    """Protocol for Moonraker command execution.
+
+    This protocol defines the minimal interface required by CommandProcessor
+    to execute commands on the printer via Moonraker.
+    """
+
+    async def execute_print_action(self, action: str) -> None:
+        """Execute a high-level print control action (pause, resume, cancel)."""
+        ...
+
+    async def execute_gcode(self, script: str) -> None:
+        """Execute an arbitrary GCode script on the printer."""
+        ...
+
+    async def fetch_available_heaters(
+        self, timeout: float = 5.0
+    ) -> dict[str, list[str]]:
+        """Discover all available heaters and temperature sensors.
+
+        Returns:
+            Dictionary with 'available_heaters' and 'available_sensors' lists.
+        """
+        ...
 
 
 class MQTTCommandsClient(Protocol):

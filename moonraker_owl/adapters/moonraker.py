@@ -212,6 +212,40 @@ class MoonrakerClient(PrinterAdapter):
                     f"Moonraker action '{action_normalized}' failed with status {response.status}: {detail.strip()}"
                 )
 
+    async def execute_gcode(self, script: str, timeout: float = 10.0) -> None:
+        """Execute a GCode script via Moonraker HTTP API.
+
+        Args:
+            script: GCode command(s) to execute. Multiple commands can be
+                    separated by newlines.
+            timeout: Request timeout in seconds (default: 10.0).
+
+        Raises:
+            asyncio.TimeoutError: If request exceeds timeout.
+            RuntimeError: If GCode execution fails.
+        """
+        session = await self._ensure_session()
+        url = f"{self._base_url}/printer/gcode/script"
+        payload = {"script": script}
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.post(
+                    url, json=payload, headers=self._headers
+                ) as response:
+                    if response.status >= 400:
+                        detail = await response.text()
+                        raise RuntimeError(
+                            f"GCode execution failed with status {response.status}: {detail.strip()}"
+                        )
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "GCode execution timed out after %.1fs (script=%r)",
+                timeout,
+                script[:50] + "..." if len(script) > 50 else script,
+            )
+            raise
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

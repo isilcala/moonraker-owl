@@ -86,3 +86,92 @@ async def test_fetch_printer_state_round_trips_payload(moonraker_server):
     await client.aclose()
 
     assert result["result"] == {"objects": payload}
+
+
+@pytest_asyncio.fixture
+async def moonraker_gcode_server(unused_tcp_port_factory):
+    """Server fixture that handles GCode script execution."""
+    executed_scripts: list[str] = []
+    fail_next: list[bool] = [False]
+
+    async def gcode_handler(request: web.Request):
+        body = await request.json()
+        script = body.get("script", "")
+        if fail_next[0]:
+            fail_next[0] = False
+            return web.Response(status=500, text="Klipper error: Unknown command")
+        executed_scripts.append(script)
+        return web.json_response({"result": "ok"})
+
+    app = web.Application()
+    app.router.add_post("/printer/gcode/script", gcode_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = unused_tcp_port_factory()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+
+    class _Server:
+        def __init__(self, server_port: int):
+            self._port = server_port
+
+        def make_url(self, path: str = "/") -> str:
+            if not path.startswith("/"):
+                path = "/" + path
+            return f"http://127.0.0.1:{self._port}{path}"
+
+        @property
+        def executed_scripts(self) -> list[str]:
+            return executed_scripts
+
+        def set_fail_next(self) -> None:
+            fail_next[0] = True
+
+    try:
+        yield _Server(port)
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_execute_gcode_sends_script(moonraker_gcode_server):
+    """Test that execute_gcode sends the script to Moonraker."""
+    base_url = str(moonraker_gcode_server.make_url("/"))
+    config = MoonrakerConfig(url=base_url, api_key="")
+    client = MoonrakerClient(config)
+
+    await client.execute_gcode("M104 S200")
+    await client.aclose()
+
+    assert moonraker_gcode_server.executed_scripts == ["M104 S200"]
+
+
+@pytest.mark.asyncio
+async def test_execute_gcode_handles_multi_line_script(moonraker_gcode_server):
+    """Test that multi-line GCode scripts are sent correctly."""
+    base_url = str(moonraker_gcode_server.make_url("/"))
+    config = MoonrakerConfig(url=base_url, api_key="")
+    client = MoonrakerClient(config)
+
+    script = "M104 S200\nM140 S60\nM106 S127"
+    await client.execute_gcode(script)
+    await client.aclose()
+
+    assert moonraker_gcode_server.executed_scripts == [script]
+
+
+@pytest.mark.asyncio
+async def test_execute_gcode_raises_on_failure(moonraker_gcode_server):
+    """Test that execute_gcode raises RuntimeError on server error."""
+    base_url = str(moonraker_gcode_server.make_url("/"))
+    config = MoonrakerConfig(url=base_url, api_key="")
+    client = MoonrakerClient(config)
+
+    moonraker_gcode_server.set_fail_next()
+
+    with pytest.raises(RuntimeError, match="GCode execution failed"):
+        await client.execute_gcode("INVALID_COMMAND")
+
+    await client.aclose()

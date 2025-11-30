@@ -29,11 +29,26 @@ from moonraker_owl.config import (
 class FakeMoonraker:
     def __init__(self) -> None:
         self.actions: list[str] = []
+        self.gcode_scripts: list[str] = []
+        self.available_heaters: dict[str, list[str]] = {
+            "available_heaters": ["extruder", "heater_bed"],
+            "available_sensors": [],
+        }
 
     async def execute_print_action(self, action: str) -> None:
         if action not in {"pause", "resume", "cancel"}:
             raise ValueError(f"Unsupported Moonraker action: {action}")
         self.actions.append(action)
+
+    async def execute_gcode(self, script: str, timeout: float = 10.0) -> None:
+        """Execute a GCode script (fake implementation for testing)."""
+        self.gcode_scripts.append(script)
+
+    async def fetch_available_heaters(
+        self, timeout: float = 5.0
+    ) -> dict[str, list[str]]:
+        """Return configured available heaters for testing."""
+        return self.available_heaters
 
 
 class FakeMQTT:
