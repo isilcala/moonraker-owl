@@ -1239,11 +1239,11 @@ async def test_temperature_target_preserved_across_updates() -> None:
             "params": [
                 {
                     "extruder": {
-                        "temperature": 195.5,
+                        "temperature": 196.3,  # floors to 196
                         # target intentionally omitted
                     },
                     "heater_bed": {
-                        "temperature": 58.2,
+                        "temperature": 58.9,  # floors to 58
                         # target intentionally omitted
                     },
                 }
@@ -1271,11 +1271,11 @@ async def test_temperature_target_preserved_across_updates() -> None:
         raise AssertionError(f"Missing sensor {channel}")
 
     extruder_sensor = _find("extruder")
-    assert extruder_sensor.get("value") == pytest.approx(196.0, rel=1e-3)
+    assert extruder_sensor.get("value") == pytest.approx(196.0, rel=1e-3)  # 196.3 floors to 196
     assert extruder_sensor.get("target") == pytest.approx(210.0, rel=1e-3)
 
     bed_sensor = _find("heaterBed")
-    assert bed_sensor.get("value") == pytest.approx(58.0, rel=1e-3)
+    assert bed_sensor.get("value") == pytest.approx(58.0, rel=1e-3)  # 58.9 floors to 58
     assert bed_sensor.get("target") == pytest.approx(60.0, rel=1e-3)
 
 

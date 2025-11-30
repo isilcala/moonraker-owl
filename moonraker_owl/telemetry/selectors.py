@@ -304,7 +304,10 @@ class SensorsSelector:
             "sensors": sensors,
         }
 
-        contract_hash = json.dumps(payload, sort_keys=True, default=str)
+        # Only hash the sensors data for deduplication.
+        # Cadence metadata (mode, maxHz, watchWindowExpiresUtc) changes frequently
+        # and should not trigger re-emission if sensor values haven't changed.
+        contract_hash = json.dumps(sensors, sort_keys=True, default=str)
         if not force_emit and contract_hash == self._last_contract_hash:
             return None
 
@@ -559,17 +562,17 @@ def _round_sensor_value(sensor_type: str, value: Any) -> Optional[float]:
     numeric = _to_float(value)
     if numeric is None:
         return None
-    # All temperature sensors round to whole numbers
-    return float(round(numeric))
+    # All temperature sensors floor to whole numbers (204.9 -> 204)
+    return float(math.floor(numeric))
 
 
 def _round_fan_speed(value: Any) -> Optional[float]:
-    """Round fan speed to nearest integer percentage (0-100)."""
+    """Floor fan speed to integer percentage (0-100)."""
     numeric = _to_float(value)
     if numeric is None:
         return None
-    # Convert 0.0-1.0 to 0-100 and round to whole number
-    return float(round(numeric * 100))
+    # Convert 0.0-1.0 to 0-100 and floor to whole number (75.9% -> 75%)
+    return float(math.floor(numeric * 100))
 
 
 def _to_float(value: Any) -> Optional[float]:

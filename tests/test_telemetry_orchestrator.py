@@ -386,3 +386,66 @@ def test_status_selector_emits_error_phase_when_klippy_shutdown() -> None:
             if e.get("eventName") == "klippyShutdown"
         ]
         assert len(shutdown_events) == 1, "Should emit klippyShutdown event"
+
+
+def test_sensors_dedup_ignores_watch_window_expiry_changes(baseline_snapshot: dict) -> None:
+    """Verify that changes to watchWindowExpiresUtc don't cause sensor republishing.
+    
+    This is a regression test for a bug where the sensors contract_hash included
+    cadence metadata, causing ~1Hz publish rate in watch mode even when sensor
+    values hadn't changed (because watchWindowExpiresUtc was ticking down).
+    """
+    now = datetime(2025, 10, 10, 16, 42, 0, tzinfo=timezone.utc)
+    clock = FakeClock(now, now, now, now, now, now)
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Set watch mode with initial window expiring in 30 seconds
+    orchestrator.set_sensors_mode(
+        mode="watch", 
+        max_hz=1.0, 
+        watch_window_expires=now + timedelta(seconds=30)
+    )
+    
+    # First build should emit sensors
+    frames1 = orchestrator.build_payloads()
+    assert "sensors" in frames1, "First build should emit sensors"
+    
+    # Simulate time passing - window now expires in 29 seconds (1 second elapsed)
+    orchestrator.set_sensors_mode(
+        mode="watch",
+        max_hz=1.0,
+        watch_window_expires=now + timedelta(seconds=29)
+    )
+    
+    # Second build should NOT emit sensors (values unchanged, only cadence changed)
+    frames2 = orchestrator.build_payloads()
+    assert "sensors" not in frames2, (
+        "Sensors should be deduplicated when only watchWindowExpiresUtc changes"
+    )
+    
+    # Simulate watch window being extended (user opened sensors panel again)
+    orchestrator.set_sensors_mode(
+        mode="watch",
+        max_hz=1.0,
+        watch_window_expires=now + timedelta(seconds=45)
+    )
+    
+    # Third build should still NOT emit sensors
+    frames3 = orchestrator.build_payloads()
+    assert "sensors" not in frames3, (
+        "Sensors should be deduplicated when watch window is extended"
+    )
+    
+    # Now change an actual sensor value
+    value_update = {
+        "method": "notify_status_update",
+        "params": [{"extruder": {"temperature": 210.0}}],  # Changed from 204
+    }
+    orchestrator.ingest(value_update)
+    
+    # Fourth build SHOULD emit sensors (value actually changed)
+    frames4 = orchestrator.build_payloads()
+    assert "sensors" in frames4, (
+        "Sensors should be emitted when sensor values change"
+    )
