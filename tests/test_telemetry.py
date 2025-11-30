@@ -47,6 +47,10 @@ class FakeMoonrakerClient:
         self.last_query_objects = None
         self.query_log: list[Optional[Dict[str, Optional[list[str]]]]] = []
         self.resubscribe_calls = 0
+        self._available_heaters: Dict[str, list[str]] = {
+            "available_heaters": [],
+            "available_sensors": [],
+        }
 
     async def start(self, callback):
         self._callback = callback
@@ -57,6 +61,17 @@ class FakeMoonrakerClient:
 
     def set_subscription_objects(self, objects):
         self.subscription_objects = objects
+
+    def set_available_heaters(self, heaters: list[str], sensors: list[str]) -> None:
+        """Configure available heaters and sensors for testing."""
+        self._available_heaters = {
+            "available_heaters": heaters,
+            "available_sensors": sensors,
+        }
+
+    async def fetch_available_heaters(self, timeout: float = 5.0) -> Dict[str, list[str]]:
+        """Return configured available heaters and sensors."""
+        return self._available_heaters
 
     async def fetch_printer_state(self, objects=None, timeout=5.0):
         self.last_query_objects = objects
@@ -938,7 +953,7 @@ async def test_subscription_normalizes_field_names() -> None:
 
     assert moonraker.subscription_objects == {
         "print_stats": None,
-        "temperature_sensor ambient": None,
+        "temperature_sensor ambient": ["temperature"],  # Sensors only have temperature
         "toolhead": ["position"],
     }
 
@@ -1174,12 +1189,12 @@ async def test_heater_subscriptions_include_temperature_and_target_fields() -> N
     await asyncio.sleep(0.05)
     await publisher.stop()
 
-    # Verify heater objects (not sensors) are subscribed with explicit fields
-    # Temperature sensors subscribe to all fields (None) since they don't have target
+    # Verify heater objects are subscribed with temperature and target fields
+    # Temperature sensors only subscribe to temperature (no target to set)
     assert moonraker.subscription_objects == {
         "extruder": ["temperature", "target"],
         "heater_bed": ["temperature", "target"],
-        "temperature_sensor ambient": None,  # Sensors don't have target
+        "temperature_sensor ambient": ["temperature"],  # Sensors only have temperature
     }
 
 

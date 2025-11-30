@@ -38,6 +38,16 @@ class PrinterAdapter(Protocol):
         """
         ...
 
+    async def fetch_available_heaters(
+        self, timeout: float = 5.0
+    ) -> dict[str, list[str]]:
+        """Discover all available heaters and temperature sensors.
+
+        Returns:
+            Dictionary with 'available_heaters' and 'available_sensors' lists.
+        """
+        ...
+
     async def resubscribe(self) -> None:
         """Reapply any underlying status subscriptions."""
         ...

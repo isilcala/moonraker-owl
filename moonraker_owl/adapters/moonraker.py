@@ -130,6 +130,51 @@ class MoonrakerClient(PrinterAdapter):
             )
             raise
 
+    async def fetch_available_heaters(self, timeout: float = 5.0) -> dict[str, list[str]]:
+        """Fetch all available heaters and temperature sensors from Moonraker.
+
+        This queries the 'heaters' object to discover all configured heating
+        elements and temperature sensors, enabling dynamic subscription.
+
+        Returns:
+            Dictionary with keys:
+                - 'available_heaters': List of heater object names (extruder, heater_bed, heater_generic xxx)
+                - 'available_sensors': List of sensor object names (temperature_sensor xxx, temperature_fan xxx, etc.)
+
+        Raises:
+            asyncio.TimeoutError: If request exceeds timeout
+            aiohttp.ClientError: If HTTP request fails
+        """
+        session = await self._ensure_session()
+        url = f"{self._base_url}/printer/objects/query"
+        payload = {"objects": {"heaters": None}}
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.post(
+                    url, json=payload, headers=self._headers
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+
+            result = data.get("result", {})
+            status = result.get("status", {})
+            heaters_data = status.get("heaters", {})
+
+            return {
+                "available_heaters": heaters_data.get("available_heaters", []),
+                "available_sensors": heaters_data.get("available_sensors", []),
+            }
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Fetching available heaters timed out after %.1fs",
+                timeout,
+            )
+            raise
+        except Exception as exc:
+            LOGGER.warning("Failed to fetch available heaters: %s", exc)
+            return {"available_heaters": [], "available_sensors": []}
+
     def set_subscription_objects(
         self, objects: Mapping[str, Optional[list[str]]] | None
     ) -> None:

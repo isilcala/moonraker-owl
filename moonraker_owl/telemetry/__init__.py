@@ -56,11 +56,31 @@ __all__ = [
 
 
 def is_heater_object(obj_name: str) -> bool:
-    """Return True when the Moonraker object represents a heater."""
+    """Return True when the Moonraker object represents a temperature device.
 
-    return obj_name in ("extruder", "heater_bed") or obj_name.startswith(
-        ("extruder", "heater_generic")
+    This includes:
+    - Heaters: extruder, heater_bed, heater_generic xxx (can set target)
+    - Temperature fans: temperature_fan xxx (can set target)
+    - Temperature sensors: temperature_sensor xxx (read-only)
+    """
+    return (
+        obj_name in ("extruder", "heater_bed")
+        or obj_name.startswith("extruder")
+        or obj_name.startswith("heater_generic")
+        or obj_name.startswith("temperature_sensor")
+        or obj_name.startswith("temperature_fan")
     )
+
+
+def heater_has_target(obj_name: str) -> bool:
+    """Return True when the temperature object supports setting a target.
+
+    Heaters and temperature fans can have their target set.
+    Temperature sensors are read-only.
+    """
+    if obj_name.startswith("temperature_sensor"):
+        return False
+    return is_heater_object(obj_name)
 
 class TelemetryConfigurationError(RuntimeError):
     """Raised when required telemetry configuration values are missing."""
@@ -237,6 +257,9 @@ class TelemetryPublisher:
         self._stop_event.clear()
         self._reset_runtime_state()
 
+        # Discover available heaters and sensors before subscribing
+        await self._discover_and_subscribe_sensors()
+
         await self._prime_initial_state()
 
         callback_registered = False
@@ -255,6 +278,62 @@ class TelemetryPublisher:
 
         self._worker = asyncio.create_task(self._run())
         self._start_pollers()
+
+    async def _discover_and_subscribe_sensors(self) -> None:
+        """Discover all available heaters and sensors and update subscriptions.
+
+        This queries Moonraker's heaters object to find all configured temperature
+        devices (heaters, sensors, fans) and dynamically adds them to the
+        subscription manifest.
+        """
+        try:
+            heater_info = await self._moonraker.fetch_available_heaters()
+        except Exception as exc:
+            LOGGER.warning("Failed to discover heaters/sensors: %s", exc)
+            return
+
+        available_heaters = heater_info.get("available_heaters", [])
+        available_sensors = heater_info.get("available_sensors", [])
+
+        added_objects: list[str] = []
+
+        # Add heaters (extruder, heater_bed, heater_generic xxx)
+        for heater in available_heaters:
+            if heater and heater not in self._subscription_objects:
+                # Skip private objects (starting with _)
+                if heater.startswith("_") or (
+                    " " in heater and heater.split(" ", 1)[1].startswith("_")
+                ):
+                    continue
+                self._subscription_objects[heater] = ["temperature", "target"]
+                added_objects.append(heater)
+
+        # Add sensors (temperature_sensor xxx, temperature_fan xxx, etc.)
+        for sensor in available_sensors:
+            if sensor and sensor not in self._subscription_objects:
+                # Skip private objects (starting with _)
+                if sensor.startswith("_") or (
+                    " " in sensor and sensor.split(" ", 1)[1].startswith("_")
+                ):
+                    continue
+                # Skip if it's already a heater (to avoid duplicate subscriptions)
+                if sensor in available_heaters:
+                    continue
+                # temperature_fan has target, temperature_sensor does not
+                if sensor.startswith("temperature_fan"):
+                    self._subscription_objects[sensor] = ["temperature", "target", "speed"]
+                else:
+                    self._subscription_objects[sensor] = ["temperature"]
+                added_objects.append(sensor)
+
+        if added_objects:
+            LOGGER.info(
+                "Discovered %d additional temperature objects: %s",
+                len(added_objects),
+                ", ".join(added_objects),
+            )
+            # Update subscription on the moonraker client
+            self._moonraker.set_subscription_objects(self._subscription_objects)
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -1379,14 +1458,20 @@ def build_subscription_manifest(
     objects: dict[str, Optional[list[str]]] = {}
     for base in sorted(subscribe_all | attribute_map.keys()):
         if base in subscribe_all:
-            if is_heater_object(base):
+            if heater_has_target(base):
+                # Heaters with target: subscribe to temperature and target
                 objects[base] = ["temperature", "target"]
+            elif is_heater_object(base):
+                # Temperature sensors: only temperature (no target)
+                objects[base] = ["temperature"]
             else:
                 objects[base] = None
         else:
             attrs = attribute_map.get(base, set())
-            if is_heater_object(base):
+            if heater_has_target(base):
                 attrs = attrs | {"temperature", "target"}
+            elif is_heater_object(base):
+                attrs = attrs | {"temperature"}
             objects[base] = sorted(attrs)
 
     return objects

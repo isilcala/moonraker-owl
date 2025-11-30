@@ -339,6 +339,7 @@ class SensorsSelector:
     ) -> tuple[Dict[str, Any], _SensorState]:
         sensor_type = _infer_sensor_type(section.name)
         unit = _infer_unit(section.name)
+        can_set_target = _can_set_target(sensor_type)
 
         raw_value = section.data.get("temperature")
         if raw_value is None:
@@ -366,6 +367,8 @@ class SensorsSelector:
             "type": sensor_type,
             "unit": unit,
             "value": value,
+            "canSetTarget": can_set_target,
+            "sourceObject": section.name,
             **({"target": target} if target is not None else {}),
             "status": status,
             "lastUpdatedUtc": last_updated.replace(microsecond=0).isoformat(),
@@ -471,14 +474,33 @@ def _should_use_display_message(message: str, session: SessionInfo) -> bool:
     return True
 
 
+def _to_camel_case(name: str) -> str:
+    """Convert snake_case or space-separated name to camelCase."""
+    # Replace underscores with spaces, split, then join as camelCase
+    parts = name.replace("_", " ").split()
+    if not parts:
+        return name
+    return parts[0].lower() + "".join(word.capitalize() for word in parts[1:])
+
+
 def _normalise_channel_name(name: str) -> Optional[str]:
     if name.startswith("extruder"):
         suffix = name[len("extruder") :]
         return "extruder" + suffix.capitalize() if suffix else "extruder"
     if name == "heater_bed":
         return "heaterBed"
-    if name.startswith("heater_generic"):
-        return name.replace("heater_generic ", "heaterGeneric-")
+    if name.startswith("heater_generic "):
+        # Extract name after prefix: "heater_generic chamber" -> "chamber"
+        short_name = name[len("heater_generic ") :]
+        return _to_camel_case(short_name)
+    if name.startswith("temperature_sensor "):
+        # Extract name after prefix: "temperature_sensor mcu_temp" -> "mcuTemp"
+        short_name = name[len("temperature_sensor ") :]
+        return _to_camel_case(short_name)
+    if name.startswith("temperature_fan "):
+        # Extract name after prefix: "temperature_fan exhaust_fan" -> "exhaustFan"
+        short_name = name[len("temperature_fan ") :]
+        return _to_camel_case(short_name)
     if name in {"temperatures", "toolhead"}:
         return None
     if name in {"temperature_fan", "temperature_fans", "fan", "part_fan"}:
@@ -487,15 +509,32 @@ def _normalise_channel_name(name: str) -> Optional[str]:
 
 
 def _infer_sensor_type(name: str) -> str:
-    if name.startswith("extruder") or name.startswith("heater"):
+    """Infer sensor type from Moonraker object name.
+    
+    Types:
+    - 'heater': extruder, heater_bed, heater_generic (can set target)
+    - 'temperatureFan': temperature_fan (can set target)
+    - 'sensor': temperature_sensor (read-only)
+    """
+    if name.startswith("extruder") or name == "heater_bed":
         return "heater"
-    return "fan"
+    if name.startswith("heater_generic"):
+        return "heater"
+    if name.startswith("temperature_fan"):
+        return "temperatureFan"
+    if name.startswith("temperature_sensor"):
+        return "sensor"
+    return "sensor"
+
+
+def _can_set_target(sensor_type: str) -> bool:
+    """Check if sensor type supports setting a target temperature."""
+    return sensor_type in {"heater", "temperatureFan"}
 
 
 def _infer_unit(name: str) -> str:
-    if name.startswith("extruder") or name.startswith("heater"):
-        return "celsius"
-    return "percent"
+    """All temperature sensors use celsius."""
+    return "celsius"
 
 
 def _normalise_sensor_state(status: Any) -> str:
@@ -508,9 +547,8 @@ def _round_sensor_value(sensor_type: str, value: Any) -> Optional[float]:
     numeric = _to_float(value)
     if numeric is None:
         return None
-    if sensor_type == "heater":
-        return float(round(numeric))
-    return round(numeric, 1)
+    # All temperature sensors round to whole numbers
+    return float(round(numeric))
 
 
 def _to_float(value: Any) -> Optional[float]:
