@@ -338,15 +338,22 @@ class SensorsSelector:
         section: SectionSnapshot,
     ) -> tuple[Dict[str, Any], _SensorState]:
         sensor_type = _infer_sensor_type(section.name)
-        unit = _infer_unit(section.name)
-        can_set_target = _can_set_target(sensor_type)
+        unit = _infer_unit(sensor_type)
+        is_fan = _is_fan_type(sensor_type)
 
-        raw_value = section.data.get("temperature")
-        if raw_value is None:
-            raw_value = section.data.get("value")
+        # For fans, use 'speed' field; for temperature sensors, use 'temperature'
+        if is_fan:
+            raw_value = section.data.get("speed")
+            # Fan speed is 0.0-1.0, convert to percent (0-100)
+            value = _round_fan_speed(raw_value)
+            target = None  # Regular fans don't have target
+        else:
+            raw_value = section.data.get("temperature")
+            if raw_value is None:
+                raw_value = section.data.get("value")
+            value = _round_sensor_value(sensor_type, raw_value)
+            target = _round_sensor_value(sensor_type, section.data.get("target"))
 
-        value = _round_sensor_value(sensor_type, raw_value)
-        target = _round_sensor_value(sensor_type, section.data.get("target"))
         status = _normalise_sensor_state(section.data.get("state"))
 
         previous = self._sensor_state.get(channel)
@@ -367,7 +374,6 @@ class SensorsSelector:
             "type": sensor_type,
             "unit": unit,
             "value": value,
-            "canSetTarget": can_set_target,
             "sourceObject": section.name,
             **({"target": target} if target is not None else {}),
             "status": status,
@@ -503,7 +509,8 @@ def _normalise_channel_name(name: str) -> Optional[str]:
         return _to_camel_case(short_name)
     if name in {"temperatures", "toolhead"}:
         return None
-    if name in {"temperature_fan", "temperature_fans", "fan", "part_fan"}:
+    # Main part cooling fan
+    if name == "fan":
         return "partCoolingFan"
     return None
 
@@ -513,8 +520,9 @@ def _infer_sensor_type(name: str) -> str:
     
     Types:
     - 'heater': extruder, heater_bed, heater_generic (can set target)
-    - 'temperatureFan': temperature_fan (can set target)
-    - 'sensor': temperature_sensor (read-only)
+    - 'temperatureFan': temperature_fan (can set target temperature)
+    - 'sensor': temperature_sensor (read-only temperature)
+    - 'fan': regular fan (speed only, no temperature)
     """
     if name.startswith("extruder") or name == "heater_bed":
         return "heater"
@@ -524,16 +532,20 @@ def _infer_sensor_type(name: str) -> str:
         return "temperatureFan"
     if name.startswith("temperature_sensor"):
         return "sensor"
+    if name == "fan":
+        return "fan"
     return "sensor"
 
 
-def _can_set_target(sensor_type: str) -> bool:
-    """Check if sensor type supports setting a target temperature."""
-    return sensor_type in {"heater", "temperatureFan"}
+def _is_fan_type(sensor_type: str) -> bool:
+    """Check if sensor type is a fan (speed-based, not temperature-based)."""
+    return sensor_type == "fan"
 
 
-def _infer_unit(name: str) -> str:
-    """All temperature sensors use celsius."""
+def _infer_unit(sensor_type: str) -> str:
+    """Determine the unit based on sensor type."""
+    if sensor_type == "fan":
+        return "percent"
     return "celsius"
 
 
@@ -549,6 +561,15 @@ def _round_sensor_value(sensor_type: str, value: Any) -> Optional[float]:
         return None
     # All temperature sensors round to whole numbers
     return float(round(numeric))
+
+
+def _round_fan_speed(value: Any) -> Optional[float]:
+    """Round fan speed to nearest integer percentage (0-100)."""
+    numeric = _to_float(value)
+    if numeric is None:
+        return None
+    # Convert 0.0-1.0 to 0-100 and round to whole number
+    return float(round(numeric * 100))
 
 
 def _to_float(value: Any) -> Optional[float]:

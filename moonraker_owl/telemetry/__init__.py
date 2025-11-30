@@ -297,6 +297,11 @@ class TelemetryPublisher:
 
         added_objects: list[str] = []
 
+        # Always subscribe to main fan (part cooling fan) if not already subscribed
+        if "fan" not in self._subscription_objects:
+            self._subscription_objects["fan"] = ["speed"]
+            added_objects.append("fan")
+
         # Add heaters (extruder, heater_bed, heater_generic xxx)
         for heater in available_heaters:
             if heater and heater not in self._subscription_objects:

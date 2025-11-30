@@ -715,6 +715,7 @@ async def test_subscription_handles_attribute_selection() -> None:
     await publisher.stop()
 
     assert moonraker.subscription_objects == {
+        "fan": ["speed"],  # Part cooling fan always subscribed
         "toolhead": ["position", "velocity"],
         "virtual_sdcard": None,
     }
@@ -952,6 +953,7 @@ async def test_subscription_normalizes_field_names() -> None:
     await publisher.stop()
 
     assert moonraker.subscription_objects == {
+        "fan": ["speed"],  # Part cooling fan always subscribed
         "print_stats": None,
         "temperature_sensor ambient": ["temperature"],  # Sensors only have temperature
         "toolhead": ["position"],
@@ -1193,6 +1195,7 @@ async def test_heater_subscriptions_include_temperature_and_target_fields() -> N
     # Temperature sensors only subscribe to temperature (no target to set)
     assert moonraker.subscription_objects == {
         "extruder": ["temperature", "target"],
+        "fan": ["speed"],  # Part cooling fan always subscribed
         "heater_bed": ["temperature", "target"],
         "temperature_sensor ambient": ["temperature"],  # Sensors only have temperature
     }
@@ -1274,6 +1277,58 @@ async def test_temperature_target_preserved_across_updates() -> None:
     bed_sensor = _find("heaterBed")
     assert bed_sensor.get("value") == pytest.approx(58.0, rel=1e-3)
     assert bed_sensor.get("target") == pytest.approx(60.0, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_fan_sensor_emits_speed_as_percent() -> None:
+    """Test that fan sensor emits speed as percentage (0-100) not raw value (0.0-1.0)."""
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {
+                    "temperature": 200.0,
+                    "target": 200.0,
+                },
+                "fan": {
+                    "speed": 0.75,  # 75% fan speed
+                },
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=50.0, include_fields=["extruder", "fan"])
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+    await publisher.stop()
+
+    sensors_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
+    assert sensors_messages, "Expected sensors updates"
+
+    document = _decode(sensors_messages[-1])
+    sensors_body = document.get("sensors")
+    assert isinstance(sensors_body, dict)
+    sensors = sensors_body.get("sensors")
+    assert isinstance(sensors, list) and sensors
+
+    # Find the fan sensor
+    fan_sensor = None
+    for sensor in sensors:
+        if sensor.get("channel") == "partCoolingFan":
+            fan_sensor = sensor
+            break
+
+    assert fan_sensor is not None, "Expected partCoolingFan sensor"
+    assert fan_sensor.get("type") == "fan"
+    assert fan_sensor.get("unit") == "percent"
+    assert fan_sensor.get("value") == pytest.approx(75.0, rel=1e-3)  # 0.75 * 100 = 75%
+    assert fan_sensor.get("sourceObject") == "fan"
+    assert "target" not in fan_sensor  # Fans don't have target
+    assert "canSetTarget" not in fan_sensor  # Derived from type, not sent explicitly
 
 
 @pytest.mark.asyncio
