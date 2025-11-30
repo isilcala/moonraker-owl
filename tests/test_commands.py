@@ -885,3 +885,382 @@ async def test_abandon_pending_commands_on_stop(config):
     # Should have abandoned the pending command
     abandoned_records = [r for r in telemetry.records if r["state"] == "abandoned"]
     assert len(abandoned_records) >= 1
+
+
+# =============================================================================
+# Heater Control Command Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_heater_set_target_executes_gcode(config):
+    """Test that heater:set-target sends correct GCode."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-heater-1",
+        "command": "heater:set-target",
+        "parameters": {
+            "heater": "extruder",
+            "target": 200,
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
+
+    # Should have accepted + completed
+    assert len(mqtt.published) == 2
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["status"] == "completed"
+    assert completed["stage"] == "execution"
+
+    # Verify GCode was sent
+    assert len(moonraker.gcode_scripts) == 1
+    assert "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200.0" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_heater_set_target_validates_heater(config):
+    """Test that heater:set-target rejects unknown heaters."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-heater-2",
+        "command": "heater:set-target",
+        "parameters": {
+            "heater": "nonexistent_heater",
+            "target": 200,
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
+
+    # Should have accepted + failed
+    assert len(mqtt.published) == 2
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_heater"
+
+    # No GCode should be sent
+    assert len(moonraker.gcode_scripts) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_heater_set_target_validates_temperature_range(config):
+    """Test that heater:set-target rejects out-of-range temperatures."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    # Test temperature too high for extruder (max 300)
+    message = {
+        "commandId": "cmd-heater-3",
+        "command": "heater:set-target",
+        "parameters": {
+            "heater": "extruder",
+            "target": 350,
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_target"
+    assert "350" in failed["reason"]["message"]
+    assert "300" in failed["reason"]["message"]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_heater_set_target_rejects_negative_temperature(config):
+    """Test that heater:set-target rejects negative temperatures."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-heater-4",
+        "command": "heater:set-target",
+        "parameters": {
+            "heater": "extruder",
+            "target": -10,
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_target"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_heater_set_target_requires_parameters(config):
+    """Test that heater:set-target requires heater and target parameters."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    # Missing heater
+    message = {
+        "commandId": "cmd-heater-5",
+        "command": "heater:set-target",
+        "parameters": {"target": 200},
+    }
+    await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_parameters"
+
+    mqtt.published.clear()
+
+    # Missing target
+    message = {
+        "commandId": "cmd-heater-6",
+        "command": "heater:set-target",
+        "parameters": {"heater": "extruder"},
+    }
+    await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_parameters"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_heater_turn_off_executes_gcode(config):
+    """Test that heater:turn-off sends correct GCode."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-heater-off-1",
+        "command": "heater:turn-off",
+        "parameters": {"heater": "heater_bed"},
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/heater:turn-off", message)
+
+    # Should have accepted + completed
+    assert len(mqtt.published) == 2
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["status"] == "completed"
+
+    # Verify GCode was sent
+    assert len(moonraker.gcode_scripts) == 1
+    assert "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+# =============================================================================
+# Fan Control Command Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_fan_set_speed_part_cooling_fan(config):
+    """Test that fan:set-speed sends M106 for part cooling fan."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-fan-1",
+        "command": "fan:set-speed",
+        "parameters": {
+            "fan": "fan",
+            "speed": 0.5,  # 50%
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
+
+    # Should have accepted + completed
+    assert len(mqtt.published) == 2
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["status"] == "completed"
+
+    # Verify GCode was sent (50% = 127 on 0-255 scale)
+    assert len(moonraker.gcode_scripts) == 1
+    assert "M106 S127" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_fan_set_speed_turn_off(config):
+    """Test that fan:set-speed sends M107 when speed is 0."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-fan-2",
+        "command": "fan:set-speed",
+        "parameters": {
+            "fan": "fan",
+            "speed": 0,
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["status"] == "completed"
+
+    # Verify M107 was sent
+    assert len(moonraker.gcode_scripts) == 1
+    assert "M107" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_fan_set_speed_generic_fan(config):
+    """Test that fan:set-speed sends SET_FAN_SPEED for named fans."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-fan-3",
+        "command": "fan:set-speed",
+        "parameters": {
+            "fan": "fan_generic exhaust_fan",
+            "speed": 0.75,
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["status"] == "completed"
+
+    # Verify SET_FAN_SPEED was sent
+    assert len(moonraker.gcode_scripts) == 1
+    assert "SET_FAN_SPEED FAN=exhaust_fan SPEED=0.75" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_fan_set_speed_validates_range(config):
+    """Test that fan:set-speed rejects out-of-range speeds."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    # Speed > 1.0
+    message = {
+        "commandId": "cmd-fan-4",
+        "command": "fan:set-speed",
+        "parameters": {
+            "fan": "fan",
+            "speed": 1.5,
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_speed"
+
+    mqtt.published.clear()
+
+    # Speed < 0
+    message = {
+        "commandId": "cmd-fan-5",
+        "command": "fan:set-speed",
+        "parameters": {
+            "fan": "fan",
+            "speed": -0.5,
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_speed"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_fan_set_speed_requires_parameters(config):
+    """Test that fan:set-speed requires fan and speed parameters."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    # Missing fan
+    message = {
+        "commandId": "cmd-fan-6",
+        "command": "fan:set-speed",
+        "parameters": {"speed": 0.5},
+    }
+    await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_parameters"
+
+    mqtt.published.clear()
+
+    # Missing speed
+    message = {
+        "commandId": "cmd-fan-7",
+        "command": "fan:set-speed",
+        "parameters": {"fan": "fan"},
+    }
+    await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_parameters"
+
+    await processor.stop()

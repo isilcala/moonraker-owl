@@ -1274,7 +1274,7 @@ async def test_temperature_target_preserved_across_updates() -> None:
     assert extruder_sensor.get("value") == pytest.approx(196.0, rel=1e-3)  # 196.3 floors to 196
     assert extruder_sensor.get("target") == pytest.approx(210.0, rel=1e-3)
 
-    bed_sensor = _find("heaterBed")
+    bed_sensor = _find("heater_bed")
     assert bed_sensor.get("value") == pytest.approx(58.0, rel=1e-3)  # 58.9 floors to 58
     assert bed_sensor.get("target") == pytest.approx(60.0, rel=1e-3)
 
@@ -1318,11 +1318,11 @@ async def test_fan_sensor_emits_speed_as_percent() -> None:
     # Find the fan sensor
     fan_sensor = None
     for sensor in sensors:
-        if sensor.get("channel") == "partCoolingFan":
+        if sensor.get("channel") == "fan":
             fan_sensor = sensor
             break
 
-    assert fan_sensor is not None, "Expected partCoolingFan sensor"
+    assert fan_sensor is not None, "Expected fan sensor"
     assert fan_sensor.get("type") == "fan"
     assert fan_sensor.get("unit") == "percent"
     assert fan_sensor.get("value") == pytest.approx(75.0, rel=1e-3)  # 0.75 * 100 = 75%

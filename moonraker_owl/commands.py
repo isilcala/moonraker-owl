@@ -552,23 +552,51 @@ class CommandProcessor:
                 )
 
     async def _execute(self, message: CommandMessage) -> Optional[Dict[str, Any]]:
+        """Execute a command and return result details.
+
+        Commands are dispatched based on their name:
+        - sensors:set-rate: Configure telemetry cadence
+        - heater:set-target: Set heater target temperature
+        - heater:turn-off: Turn off a specific heater
+        - fan:set-speed: Set fan speed
+        - pause/resume/cancel: Print control actions
+        """
+        # Telemetry cadence control
         if message.command == "sensors:set-rate":
             return self._execute_sensors_set_rate(message)
 
-        try:
-            await self._moonraker.execute_print_action(message.command)
-        except ValueError as exc:
-            raise CommandProcessingError(
-                str(exc), code="unsupported_command", command_id=message.command_id
-            ) from exc
-        except Exception as exc:  # pragma: no cover - networking errors
-            raise CommandProcessingError(
-                f"Moonraker command failed: {exc}",
-                code="moonraker_error",
-                command_id=message.command_id,
-            ) from exc
+        # Heater control commands
+        if message.command == "heater:set-target":
+            return await self._execute_heater_set_target(message)
+        if message.command == "heater:turn-off":
+            return await self._execute_heater_turn_off(message)
 
-        return {"command": message.command}
+        # Fan control commands
+        if message.command == "fan:set-speed":
+            return await self._execute_fan_set_speed(message)
+
+        # Print control commands (pause, resume, cancel)
+        if message.command in {"pause", "resume", "cancel"}:
+            try:
+                await self._moonraker.execute_print_action(message.command)
+            except ValueError as exc:
+                raise CommandProcessingError(
+                    str(exc), code="unsupported_command", command_id=message.command_id
+                ) from exc
+            except Exception as exc:  # pragma: no cover - networking errors
+                raise CommandProcessingError(
+                    f"Moonraker command failed: {exc}",
+                    code="moonraker_error",
+                    command_id=message.command_id,
+                ) from exc
+            return {"command": message.command}
+
+        # Unknown command
+        raise CommandProcessingError(
+            f"Unknown command: {message.command}",
+            code="unsupported_command",
+            command_id=message.command_id,
+        )
 
     def _execute_sensors_set_rate(self, message: CommandMessage) -> Dict[str, Any]:
         if self._telemetry is None:
@@ -684,6 +712,283 @@ class CommandProcessor:
             ).isoformat()
 
         return details
+
+    # -------------------------------------------------------------------------
+    # Heater Control Commands
+    # -------------------------------------------------------------------------
+
+    async def _execute_heater_set_target(
+        self, message: CommandMessage
+    ) -> Dict[str, Any]:
+        """Set target temperature for a heater.
+
+        Parameters:
+            heater (str): Heater object name (e.g., 'extruder', 'heater_bed')
+            target (float): Target temperature in Celsius
+
+        GCode: SET_HEATER_TEMPERATURE HEATER=<name> TARGET=<temp>
+        """
+        params = message.parameters or {}
+
+        heater = params.get("heater")
+        if not heater or not isinstance(heater, str):
+            raise CommandProcessingError(
+                "heater parameter is required and must be a string",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        target = params.get("target")
+        if target is None:
+            raise CommandProcessingError(
+                "target parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        try:
+            target_temp = float(target)
+        except (TypeError, ValueError):
+            raise CommandProcessingError(
+                "target must be a numeric value",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        # Validate heater exists and get temperature limits
+        heater_normalized = heater.strip().lower()
+        valid_heaters = await self._get_valid_heaters()
+        if heater_normalized not in valid_heaters:
+            raise CommandProcessingError(
+                f"Unknown heater: {heater}. Valid heaters: {', '.join(sorted(valid_heaters))}",
+                code="invalid_heater",
+                command_id=message.command_id,
+            )
+
+        # Validate temperature range
+        max_temp = self._get_heater_max_temp(heater_normalized)
+        if target_temp < 0:
+            raise CommandProcessingError(
+                f"Target temperature cannot be negative: {target_temp}",
+                code="invalid_target",
+                command_id=message.command_id,
+            )
+        if target_temp > max_temp:
+            raise CommandProcessingError(
+                f"Target temperature {target_temp}°C exceeds maximum {max_temp}°C for {heater}",
+                code="invalid_target",
+                command_id=message.command_id,
+            )
+
+        # Execute GCode
+        # Use SET_HEATER_TEMPERATURE which works for all heater types
+        script = f"SET_HEATER_TEMPERATURE HEATER={heater_normalized} TARGET={target_temp:.1f}"
+        try:
+            await self._moonraker.execute_gcode(script)
+        except Exception as exc:
+            raise CommandProcessingError(
+                f"Failed to set heater temperature: {exc}",
+                code="gcode_error",
+                command_id=message.command_id,
+            ) from exc
+
+        LOGGER.info(
+            "Set heater %s target to %.1f°C (command %s)",
+            heater_normalized,
+            target_temp,
+            message.command_id[:8],
+        )
+
+        return {
+            "heater": heater_normalized,
+            "target": target_temp,
+        }
+
+    async def _execute_heater_turn_off(
+        self, message: CommandMessage
+    ) -> Dict[str, Any]:
+        """Turn off a specific heater by setting target to 0.
+
+        Parameters:
+            heater (str): Heater object name (e.g., 'extruder', 'heater_bed')
+
+        GCode: SET_HEATER_TEMPERATURE HEATER=<name> TARGET=0
+        """
+        params = message.parameters or {}
+
+        heater = params.get("heater")
+        if not heater or not isinstance(heater, str):
+            raise CommandProcessingError(
+                "heater parameter is required and must be a string",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        heater_normalized = heater.strip().lower()
+        valid_heaters = await self._get_valid_heaters()
+        if heater_normalized not in valid_heaters:
+            raise CommandProcessingError(
+                f"Unknown heater: {heater}. Valid heaters: {', '.join(sorted(valid_heaters))}",
+                code="invalid_heater",
+                command_id=message.command_id,
+            )
+
+        script = f"SET_HEATER_TEMPERATURE HEATER={heater_normalized} TARGET=0"
+        try:
+            await self._moonraker.execute_gcode(script)
+        except Exception as exc:
+            raise CommandProcessingError(
+                f"Failed to turn off heater: {exc}",
+                code="gcode_error",
+                command_id=message.command_id,
+            ) from exc
+
+        LOGGER.info(
+            "Turned off heater %s (command %s)",
+            heater_normalized,
+            message.command_id[:8],
+        )
+
+        return {
+            "heater": heater_normalized,
+            "target": 0,
+        }
+
+    # -------------------------------------------------------------------------
+    # Fan Control Commands
+    # -------------------------------------------------------------------------
+
+    async def _execute_fan_set_speed(self, message: CommandMessage) -> Dict[str, Any]:
+        """Set fan speed.
+
+        Parameters:
+            fan (str): Fan object name (e.g., 'fan', 'fan_generic exhaust_fan')
+            speed (float): Speed from 0.0 to 1.0 (0% to 100%)
+
+        GCode for part cooling fan: M106 S<0-255>
+        GCode for named fans: SET_FAN_SPEED FAN=<name> SPEED=<0.0-1.0>
+        """
+        params = message.parameters or {}
+
+        fan = params.get("fan")
+        if not fan or not isinstance(fan, str):
+            raise CommandProcessingError(
+                "fan parameter is required and must be a string",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        speed = params.get("speed")
+        if speed is None:
+            raise CommandProcessingError(
+                "speed parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        try:
+            speed_value = float(speed)
+        except (TypeError, ValueError):
+            raise CommandProcessingError(
+                "speed must be a numeric value",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        # Validate speed range (0.0 to 1.0)
+        if speed_value < 0.0 or speed_value > 1.0:
+            raise CommandProcessingError(
+                f"Speed must be between 0.0 and 1.0, got: {speed_value}",
+                code="invalid_speed",
+                command_id=message.command_id,
+            )
+
+        fan_lower = fan.strip().lower()
+
+        # Part cooling fan uses M106/M107
+        if fan_lower == "fan":
+            if speed_value == 0:
+                script = "M107"  # Turn off fan
+            else:
+                # M106 uses 0-255 scale
+                pwm_value = int(speed_value * 255)
+                script = f"M106 S{pwm_value}"
+            fan_name = "fan"
+        else:
+            # Named fans use SET_FAN_SPEED
+            # Extract the short fan name from Moonraker object format:
+            # - "fan_generic exhaust_fan" -> "exhaust_fan"
+            # - "heater_fan hotend_fan" -> "hotend_fan"
+            # - "controller_fan controller_fan" -> "controller_fan"
+            if fan_lower.startswith("fan_generic "):
+                fan_name = fan_lower[len("fan_generic ") :]
+            elif fan_lower.startswith("heater_fan "):
+                fan_name = fan_lower[len("heater_fan ") :]
+            elif fan_lower.startswith("controller_fan "):
+                fan_name = fan_lower[len("controller_fan ") :]
+            else:
+                # Assume fan_lower is already the short name
+                fan_name = fan_lower
+
+            script = f"SET_FAN_SPEED FAN={fan_name} SPEED={speed_value:.2f}"
+
+        try:
+            await self._moonraker.execute_gcode(script)
+        except Exception as exc:
+            raise CommandProcessingError(
+                f"Failed to set fan speed: {exc}",
+                code="gcode_error",
+                command_id=message.command_id,
+            ) from exc
+
+        LOGGER.info(
+            "Set fan %s speed to %.0f%% (command %s)",
+            fan_name,
+            speed_value * 100,
+            message.command_id[:8],
+        )
+
+        return {
+            "fan": fan_name,
+            "speed": speed_value,
+        }
+
+    # -------------------------------------------------------------------------
+    # Heater/Fan Discovery Helpers
+    # -------------------------------------------------------------------------
+
+    async def _get_valid_heaters(self) -> set[str]:
+        """Get set of valid heater names from Moonraker."""
+        try:
+            heaters_info = await self._moonraker.fetch_available_heaters(timeout=5.0)
+            return set(h.lower() for h in heaters_info.get("available_heaters", []))
+        except Exception as exc:
+            LOGGER.warning("Failed to fetch available heaters: %s", exc)
+            # Fall back to common heater names
+            return {"extruder", "heater_bed"}
+
+    def _get_heater_max_temp(self, heater: str) -> float:
+        """Get maximum safe temperature for a heater type.
+
+        These are conservative defaults. In future, we could query
+        Klipper's config to get the actual max_temp settings.
+        """
+        heater_lower = heater.lower()
+
+        # Extruders typically max out at 250-300°C
+        if heater_lower.startswith("extruder"):
+            return 300.0
+
+        # Heated beds typically max at 100-120°C
+        if heater_lower == "heater_bed":
+            return 120.0
+
+        # Generic heaters - use a conservative limit
+        if heater_lower.startswith("heater_generic"):
+            return 150.0
+
+        # Default conservative limit
+        return 100.0
 
     async def _publish_ack(
         self,

@@ -319,7 +319,7 @@ class SensorsSelector:
         seen_channels: set[str] = set()
 
         for section in store.iter_sections():
-            channel = _normalise_channel_name(section.name)
+            channel = _get_channel_name(section.name)
             if channel is None:
                 continue
 
@@ -483,38 +483,38 @@ def _should_use_display_message(message: str, session: SessionInfo) -> bool:
     return True
 
 
-def _to_camel_case(name: str) -> str:
-    """Convert snake_case or space-separated name to camelCase."""
-    # Replace underscores with spaces, split, then join as camelCase
-    parts = name.replace("_", " ").split()
-    if not parts:
-        return name
-    return parts[0].lower() + "".join(word.capitalize() for word in parts[1:])
-
-
-def _normalise_channel_name(name: str) -> Optional[str]:
-    if name.startswith("extruder"):
-        suffix = name[len("extruder") :]
-        return "extruder" + suffix.capitalize() if suffix else "extruder"
-    if name == "heater_bed":
-        return "heaterBed"
-    if name.startswith("heater_generic "):
-        # Extract name after prefix: "heater_generic chamber" -> "chamber"
-        short_name = name[len("heater_generic ") :]
-        return _to_camel_case(short_name)
-    if name.startswith("temperature_sensor "):
-        # Extract name after prefix: "temperature_sensor mcu_temp" -> "mcuTemp"
-        short_name = name[len("temperature_sensor ") :]
-        return _to_camel_case(short_name)
-    if name.startswith("temperature_fan "):
-        # Extract name after prefix: "temperature_fan exhaust_fan" -> "exhaustFan"
-        short_name = name[len("temperature_fan ") :]
-        return _to_camel_case(short_name)
+def _get_channel_name(name: str) -> Optional[str]:
+    """Get the channel name from a Moonraker object name.
+    
+    Returns the original Moonraker object name as the channel identifier,
+    or None if this object type should be excluded from sensors.
+    
+    The UI layer is responsible for formatting these names for display.
+    """
+    # Exclude non-sensor objects
     if name in {"temperatures", "toolhead"}:
         return None
-    # Main part cooling fan
+    
+    # Include all recognized sensor types
+    if name.startswith("extruder"):
+        return name
+    if name == "heater_bed":
+        return name
+    if name.startswith("heater_generic "):
+        return name
+    if name.startswith("temperature_sensor "):
+        return name
+    if name.startswith("temperature_fan "):
+        return name
     if name == "fan":
-        return "partCoolingFan"
+        return name
+    if name.startswith("fan_generic "):
+        return name
+    if name.startswith("heater_fan "):
+        return name
+    if name.startswith("controller_fan "):
+        return name
+    
     return None
 
 
@@ -567,12 +567,12 @@ def _round_sensor_value(sensor_type: str, value: Any) -> Optional[float]:
 
 
 def _round_fan_speed(value: Any) -> Optional[float]:
-    """Floor fan speed to integer percentage (0-100)."""
+    """Round fan speed to integer percentage (0-100)."""
     numeric = _to_float(value)
     if numeric is None:
         return None
-    # Convert 0.0-1.0 to 0-100 and floor to whole number (75.9% -> 75%)
-    return float(math.floor(numeric * 100))
+    # Convert 0.0-1.0 to 0-100 and round to nearest integer (0.505 -> 51%)
+    return float(round(numeric * 100))
 
 
 def _to_float(value: Any) -> Optional[float]:
