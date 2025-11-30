@@ -21,9 +21,17 @@ from .. import constants
 from ..adapters import MQTTConnectionError
 from ..config import OwlConfig
 from ..core import PrinterAdapter, deep_merge
+from .cadence import (
+    ChannelCadenceController,
+    ChannelDecision,
+    ChannelRuntimeState,
+    ChannelSchedule,
+    TelemetryCadenceError,
+)
 from .event_types import Event, EventName, EventPriority, EventSeverity
 from .events import EventCollector, RateLimitConfig
 from .orchestrator import ChannelPayload, TelemetryOrchestrator
+from .polling import DEFAULT_POLL_SPECS, PollSpec
 from .state_store import MoonrakerStateStore
 from .telemetry_state import TelemetryHasher
 
@@ -31,12 +39,17 @@ LOGGER = logging.getLogger(__name__)
 
 # Re-export event types for external use
 __all__ = [
+    "ChannelCadenceController",
+    "ChannelDecision",
+    "ChannelSchedule",
     "Event",
     "EventCollector",
     "EventName",
     "EventPriority",
     "EventSeverity",
+    "PollSpec",
     "RateLimitConfig",
+    "TelemetryCadenceError",
     "TelemetryConfigurationError",
     "TelemetryPublisher",
 ]
@@ -49,7 +62,6 @@ def is_heater_object(obj_name: str) -> bool:
         ("extruder", "heater_generic")
     )
 
-
 class TelemetryConfigurationError(RuntimeError):
     """Raised when required telemetry configuration values are missing."""
 
@@ -57,16 +69,6 @@ class TelemetryConfigurationError(RuntimeError):
 @dataclass
 class _ChannelPublishState:
     sequence: int = 0
-
-
-@dataclass(frozen=True)
-class PollSpec:
-    """Declarative definition for a Moonraker polling schedule."""
-
-    name: str
-    fields: Sequence[str]
-    interval_seconds: float
-    initial_delay_seconds: float = 0.0
 
 
 @dataclass
@@ -87,26 +89,6 @@ class _RateRequest:
 
 
 @dataclass
-class ChannelSchedule:
-    interval: Optional[float]
-    forced_interval: Optional[float]
-    watchdog_seconds: Optional[float]
-
-
-@dataclass
-class ChannelRuntimeState:
-    hash: Optional[str] = None
-    last_publish: float = 0.0
-
-
-@dataclass
-class ChannelDecision:
-    should_publish: bool
-    delay_seconds: Optional[float]
-    reason: Optional[str] = None
-
-
-@dataclass
 class _PendingChannel:
     forced: bool = False
     respect_cadence: bool = False
@@ -120,147 +102,6 @@ class _PendingChannel:
             forced=self.forced,
             respect_cadence=self.respect_cadence,
         )
-
-
-class ChannelCadenceController:
-    """Centralised cadence evaluation for telemetry channels."""
-
-    def __init__(
-        self,
-        *,
-        monotonic: Callable[[], float],
-        hasher: TelemetryHasher,
-    ) -> None:
-        self._monotonic = monotonic
-        self._hasher = hasher
-        self._schedules: Dict[str, ChannelSchedule] = {}
-        self._state: Dict[str, ChannelRuntimeState] = {}
-
-    def configure(
-        self,
-        channel: str,
-        *,
-        interval: Optional[float],
-        forced_interval: Optional[float],
-        watchdog_seconds: Optional[float],
-    ) -> None:
-        self._schedules[channel] = ChannelSchedule(
-            interval=interval if interval and interval > 0 else None,
-            forced_interval=forced_interval if forced_interval and forced_interval > 0 else None,
-            watchdog_seconds=watchdog_seconds if watchdog_seconds and watchdog_seconds > 0 else None,
-        )
-        self._state.setdefault(channel, ChannelRuntimeState())
-
-    def reset_channel(self, channel: str) -> None:
-        if channel in self._state:
-            self._state[channel] = ChannelRuntimeState()
-
-    def reset_all(self) -> None:
-        for channel in list(self._state.keys()):
-            self._state[channel] = ChannelRuntimeState()
-
-    def get_schedule(self, channel: str) -> ChannelSchedule:
-        schedule = self._schedules.get(channel)
-        if schedule is None:
-            raise TelemetryConfigurationError(
-                f"Cadence schedule missing for channel '{channel}'"
-            )
-        return schedule
-
-    def evaluate(
-        self,
-        channel: str,
-        payload: Dict[str, Any],
-        *,
-        explicit_force: bool,
-        respect_cadence: bool,
-        allow_watchdog: bool,
-    ) -> ChannelDecision:
-        schedule = self._schedules.get(channel)
-        if schedule is None:
-            raise TelemetryConfigurationError(
-                f"Cadence schedule missing for channel '{channel}'"
-            )
-
-        state = self._state.setdefault(channel, ChannelRuntimeState())
-        now = self._monotonic()
-
-        forced_for_dedup = explicit_force
-
-        if allow_watchdog and schedule.watchdog_seconds:
-            if state.last_publish == 0.0:
-                forced_for_dedup = True
-            else:
-                elapsed = now - state.last_publish
-                if elapsed >= schedule.watchdog_seconds:
-                    forced_for_dedup = True
-
-        if explicit_force and respect_cadence:
-            constrained_interval = (
-                schedule.forced_interval
-                if schedule.forced_interval is not None
-                else schedule.interval
-            )
-            if constrained_interval and state.last_publish != 0.0:
-                elapsed = now - state.last_publish
-                if elapsed < constrained_interval:
-                    return ChannelDecision(
-                        should_publish=False,
-                        delay_seconds=constrained_interval - elapsed,
-                        reason="forced-rate",
-                    )
-
-        if schedule.interval and state.last_publish != 0.0 and not forced_for_dedup:
-            elapsed = now - state.last_publish
-            if elapsed < schedule.interval:
-                return ChannelDecision(
-                    should_publish=False,
-                    delay_seconds=schedule.interval - elapsed,
-                    reason="cadence",
-                )
-
-        payload_hash = self._hasher.hash_payload(payload)
-        if not forced_for_dedup and payload_hash == state.hash:
-            return ChannelDecision(
-                should_publish=False,
-                delay_seconds=None,
-                reason="dedup",
-            )
-
-        state.hash = payload_hash
-        state.last_publish = now
-
-        return ChannelDecision(
-            should_publish=True,
-            delay_seconds=None,
-            reason="ready",
-        )
-
-
-DEFAULT_POLL_SPECS: tuple[PollSpec, ...] = (
-    PollSpec(
-        name="environment-sensors",
-        fields=(
-            "temperature_sensor ambient",
-            "temperature_sensor chamber",
-        ),
-        interval_seconds=30.0,
-        initial_delay_seconds=5.0,
-    ),
-    PollSpec(
-        name="diagnostics",
-        fields=(
-            "moonraker_stats",
-            "system_cpu_usage",
-            "system_memory",
-            "network",
-            "websocket_connections",
-            "cpu_temp",
-        ),
-        interval_seconds=60.0,
-        initial_delay_seconds=10.0,
-    ),
-)
 
 
 class MQTTClientLike(Protocol):

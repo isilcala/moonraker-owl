@@ -7,6 +7,23 @@ A Python companion service that links Moonraker-powered printers to the Owl Clou
 ```
 Owl.Moonraker/
 ├─ moonraker_owl/           # Python package (application code)
+│   ├─ adapters.py          # MQTT and external service adapters
+│   ├─ app.py               # Main OwlApp class and lifecycle
+│   ├─ commands.py          # Command processor (pause/resume/cancel/sensors)
+│   ├─ config.py            # Configuration loader and validation
+│   ├─ connection.py        # MQTT connection coordinator with backoff
+│   ├─ core.py              # Shared types and PrinterAdapter base
+│   ├─ telemetry/           # Telemetry publishing pipeline
+│   │   ├─ __init__.py      # TelemetryPublisher - main entry point
+│   │   ├─ cadence.py       # Rate limiting and deduplication controller
+│   │   ├─ events.py        # Event collector and priority queues
+│   │   ├─ event_types.py   # Event data types and enums
+│   │   ├─ orchestrator.py  # Payload building and channel coordination
+│   │   ├─ polling.py       # Polling scheduler for non-subscribed objects
+│   │   ├─ selectors/       # Channel-specific payload selectors
+│   │   ├─ state_store.py   # Moonraker state aggregation
+│   │   └─ telemetry_state.py  # Hashing utilities
+│   └─ token_manager.py     # JWT token management and renewal
 ├─ scripts/                 # Installation and maintenance helpers
 ├─ systemd/                 # Service unit templates
 ├─ tests/                   # Test suite
@@ -29,6 +46,35 @@ Run the unit tests:
 ```powershell
 pytest
 ```
+
+## Module Overview
+
+### Telemetry Pipeline
+
+The `telemetry/` package handles all MQTT telemetry publishing:
+
+- **TelemetryPublisher** (`__init__.py`): Main orchestrator that consumes Moonraker updates, applies cadence control, and publishes to MQTT channels (status/sensors/events)
+- **ChannelCadenceController** (`cadence.py`): Enforces minimum publish intervals, deduplicates payloads via hashing, and manages watchdog timers
+- **PollingScheduler** (`polling.py`): Declarative polling for Moonraker objects not available via websocket subscriptions
+- **EventCollector** (`events.py`): Priority-based event queuing with rate limiting
+- **TelemetryOrchestrator** (`orchestrator.py`): Builds channel payloads from aggregated Moonraker state
+
+### Command Handling
+
+`commands.py` processes cloud commands via MQTT:
+
+- Subscribes to `owl/printers/{deviceId}/commands/#`
+- Executes Moonraker actions (pause/resume/cancel)
+- Tracks state-based command completion for accurate ACKs
+- Handles `sensors:set-rate` for telemetry cadence control
+
+### Connection Management
+
+`connection.py` provides resilient MQTT connectivity:
+
+- ConnectionCoordinator state machine
+- Automatic reconnection with exponential backoff
+- Token renewal coordination without loops
 
 ## Status
 

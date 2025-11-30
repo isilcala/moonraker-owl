@@ -343,30 +343,13 @@ class CommandProcessor:
 
     def _schedule_completion_ack(self, pending: _PendingStateCommand) -> None:
         """Schedule async ACK publishing on the event loop."""
-        if self._loop is None:
-            LOGGER.warning(
-                "Cannot send completion ACK for %s: no event loop",
-                pending.command_id[:8],
-            )
-            return
-
-        async def send_ack() -> None:
-            try:
-                await self._publish_ack(
-                    pending.command_name,
-                    pending.command_id,
-                    "completed",
-                    stage="execution",
-                )
-                self._record_command_state(pending.message, "completed")
-                self._finish_inflight(pending.command_id)
-            except Exception:
-                LOGGER.exception(
-                    "Error sending completion ACK for %s", pending.command_id[:8]
-                )
-
-        self._loop.call_soon(
-            lambda: asyncio.ensure_future(send_ack(), loop=self._loop)
+        self._schedule_ack(
+            pending,
+            status="completed",
+            error_code=None,
+            error_message=None,
+            state="completed",
+            details=None,
         )
 
     def check_expired_commands(self) -> None:
@@ -396,9 +379,33 @@ class CommandProcessor:
 
     def _schedule_timeout_ack(self, pending: _PendingStateCommand) -> None:
         """Schedule async timeout ACK publishing on the event loop."""
+        self._schedule_ack(
+            pending,
+            status="failed",
+            error_code="state_timeout",
+            error_message=f"Timeout waiting for state '{pending.expected_state}'",
+            state="timeout",
+            details={
+                "expectedState": pending.expected_state,
+                "timeoutSeconds": pending.timeout_seconds,
+            },
+        )
+
+    def _schedule_ack(
+        self,
+        pending: _PendingStateCommand,
+        *,
+        status: str,
+        error_code: Optional[str],
+        error_message: Optional[str],
+        state: str,
+        details: Optional[Dict[str, Any]],
+    ) -> None:
+        """Schedule async ACK publishing for a pending command."""
         if self._loop is None:
             LOGGER.warning(
-                "Cannot send timeout ACK for %s: no event loop",
+                "Cannot send %s ACK for %s: no event loop",
+                status,
                 pending.command_id[:8],
             )
             return
@@ -408,23 +415,16 @@ class CommandProcessor:
                 await self._publish_ack(
                     pending.command_name,
                     pending.command_id,
-                    "failed",
+                    status,
                     stage="execution",
-                    error_code="state_timeout",
-                    error_message=f"Timeout waiting for state '{pending.expected_state}'",
+                    error_code=error_code,
+                    error_message=error_message,
                 )
-                self._record_command_state(
-                    pending.message,
-                    "timeout",
-                    details={
-                        "expectedState": pending.expected_state,
-                        "timeoutSeconds": pending.timeout_seconds,
-                    },
-                )
+                self._record_command_state(pending.message, state, details=details)
                 self._finish_inflight(pending.command_id)
             except Exception:
                 LOGGER.exception(
-                    "Error sending timeout ACK for %s", pending.command_id[:8]
+                    "Error sending %s ACK for %s", status, pending.command_id[:8]
                 )
 
         self._loop.call_soon(
