@@ -53,17 +53,44 @@ class StatusSelector:
         )
 
         phase = resolve_printer_state(state, context)
-        if (
-            phase == "Printing"
-            and isinstance(state, str)
-            and state.lower() in {"complete", "completed"}
-            and not session.has_active_job
-        ):
-            LOGGER.debug(
-                "Overriding phase to Completed for finished job (raw_state=%s)",
-                state,
+
+        # Override phase when job has terminated but print_stats.state lags behind.
+        # This handles the timing gap between notify_history_changed (which updates
+        # job_status) and print_stats.state updates from Moonraker.
+        if not session.has_active_job and phase == "Printing":
+            state_lower = state.lower() if isinstance(state, str) else ""
+            job_status_lower = (
+                session.job_status.lower()
+                if isinstance(session.job_status, str)
+                else ""
             )
-            phase = "Completed"
+
+            # Determine terminal phase from job_status or raw_state
+            completed_states = {"complete", "completed"}
+            cancelled_states = {"cancelled", "canceled"}
+            error_states = {"error"}
+
+            if state_lower in completed_states or job_status_lower in completed_states:
+                LOGGER.debug(
+                    "Overriding phase to Completed (raw_state=%s, job_status=%s)",
+                    state,
+                    session.job_status,
+                )
+                phase = "Completed"
+            elif state_lower in cancelled_states or job_status_lower in cancelled_states:
+                LOGGER.debug(
+                    "Overriding phase to Cancelled (raw_state=%s, job_status=%s)",
+                    state,
+                    session.job_status,
+                )
+                phase = "Cancelled"
+            elif state_lower in error_states or job_status_lower in error_states:
+                LOGGER.debug(
+                    "Overriding phase to Error (raw_state=%s, job_status=%s)",
+                    state,
+                    session.job_status,
+                )
+                phase = "Error"
 
         lifecycle: Dict[str, Any] = {
             "phase": phase,

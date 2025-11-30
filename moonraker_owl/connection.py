@@ -278,7 +278,10 @@ class ConnectionCoordinator:
                     LOGGER.exception("Reconnected callback failed")
         else:
             self._state = ConnectionState.DISCONNECTED
-            LOGGER.error("Failed to reconnect after all attempts")
+            LOGGER.error("Failed to reconnect after all attempts, will retry on next trigger")
+            # Note: We don't schedule automatic retry here.
+            # The TokenManager renewal loop will eventually succeed when the cloud
+            # comes back online, and _on_token_renewed will trigger a new reconnect.
 
     async def _connect_with_backoff(self) -> bool:
         """Attempt connection with exponential backoff.

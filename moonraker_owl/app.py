@@ -861,8 +861,11 @@ class MoonrakerOwlApp:
         """Callback invoked when TokenManager renews JWT token.
 
         Requests reconnection via ConnectionCoordinator with new credentials.
+        This should always trigger a reconnect attempt, even if MQTT is not ready,
+        because a fresh token might allow us to reconnect after the cloud service
+        comes back online.
         """
-        if self._connection_coordinator is not None and self._mqtt_ready:
+        if self._connection_coordinator is not None:
             LOGGER.info("JWT token renewed, requesting MQTT reconnection")
             self._connection_coordinator.request_reconnect(
                 ReconnectReason.TOKEN_RENEWED

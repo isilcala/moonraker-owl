@@ -429,6 +429,157 @@ def test_pause_then_cancel_clears_paused_state() -> None:
     assert session.has_active_job is False
 
 
+def test_completed_job_status_overrides_stale_printing_state() -> None:
+    """Test that job_status='completed' triggers Completed phase even when raw_state lags.
+
+    This addresses the timing gap where notify_history_changed arrives before
+    print_stats.state updates from 'printing' to 'complete'.
+    """
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+
+    observed_at = datetime.now(timezone.utc)
+
+    # Initial printing state
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "display_status": {"progress": 0.99},
+                    "virtual_sdcard": {"is_active": True, "progress": 0.99},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [
+                {
+                    "action": "added",
+                    "job": {"job_id": "0003EE", "filename": "benchy.gcode"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert status.get("printerStatus") == "Printing"
+    assert session.has_active_job is True
+
+    # Job finishes - notify_history_changed arrives BEFORE print_stats.state updates
+    # This simulates the timing gap
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [
+                {
+                    "action": "finished",
+                    "job": {
+                        "job_id": "0003EE",
+                        "filename": "benchy.gcode",
+                        "status": "completed",  # Job status is completed
+                    },
+                }
+            ],
+        }
+    )
+    # Note: print_stats.state is NOT updated to "complete" yet - this is the bug scenario
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    # Verify session detects job is no longer active via job_status
+    assert session.has_active_job is False
+    assert session.job_status == "completed"
+    # raw_state still shows "printing" due to timing lag
+    assert session.raw_state == "printing"
+
+    status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
+    assert status is not None
+    # Key assertion: printerStatus should be "Completed" not "Printing"
+    assert status.get("printerStatus") == "Completed"
+
+
+def test_cancelled_job_status_overrides_stale_printing_state() -> None:
+    """Test that job_status='cancelled' triggers Cancelled phase even when raw_state lags."""
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+
+    observed_at = datetime.now(timezone.utc)
+
+    # Initial printing state
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "virtual_sdcard": {"is_active": True, "progress": 0.5},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [
+                {
+                    "action": "added",
+                    "job": {"job_id": "0004FF", "filename": "test.gcode"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    assert session.has_active_job is True
+
+    # Job cancelled via notify_history_changed before print_stats updates
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [
+                {
+                    "action": "finished",
+                    "job": {
+                        "job_id": "0004FF",
+                        "filename": "test.gcode",
+                        "status": "cancelled",
+                    },
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    assert session.has_active_job is False
+    assert session.job_status == "cancelled"
+    assert session.raw_state == "printing"  # Still stale
+
+    status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
+    assert status is not None
+    assert status.get("printerStatus") == "Cancelled"
+
+
 @pytest.mark.asyncio
 async def test_publisher_emits_status_full_update() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
