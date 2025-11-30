@@ -325,3 +325,64 @@ def test_replay_stream_clears_job_after_completion() -> None:
     # Job info should be cleared when print ends
     job_info = status_payload.get("job")
     assert job_info is None or job_info == {}, "Job info should be cleared after print ends"
+
+
+def test_status_selector_emits_error_phase_when_klippy_shutdown() -> None:
+    """Test that StatusSelector outputs Error phase when klippy is shutdown.
+
+    This ensures the UI correctly displays error state when klippy shuts down,
+    even if Moonraker sends stale print_stats updates with 'standby' state.
+    """
+    clock = IncrementingClock(datetime(2025, 11, 30, 12, 0, tzinfo=timezone.utc))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+
+    # Start with a normal idle state
+    orchestrator.ingest({
+        "result": {
+            "status": {
+                "print_stats": {"state": "standby", "message": ""},
+                "webhooks": {"state": "ready"},
+            }
+        }
+    })
+
+    frames = orchestrator.build_payloads()
+    assert frames["status"].payload["printerStatus"] == "Idle"
+    assert frames["status"].payload["flags"]["isShutdown"] is False
+
+    # Simulate klippy shutdown
+    orchestrator.ingest({
+        "jsonrpc": "2.0",
+        "method": "notify_klippy_shutdown",
+        "params": [{"message": "MCU shutdown: Heater heater_bed exceeded maximum temp"}],
+    })
+
+    # Moonraker might send a stale print_stats update
+    orchestrator.ingest({
+        "jsonrpc": "2.0",
+        "method": "notify_print_stats_update",
+        "params": [{"state": "standby", "message": ""}],
+    })
+
+    frames = orchestrator.build_payloads()
+    status = frames["status"].payload
+
+    # Critical: phase should be Error, not Idle
+    assert status["printerStatus"] == "Error", (
+        "printerStatus should be Error when klippy is shutdown"
+    )
+    assert status["lifecycle"]["phase"] == "Error"
+    assert status["flags"]["isShutdown"] is True
+
+    # The shutdown message should be available
+    assert "MCU shutdown" in status.get("subStatus", "")
+    assert "MCU shutdown" in status["lifecycle"].get("reason", "")
+
+    # Verify events channel emits klippyShutdown
+    events = frames.get("events")
+    if events:
+        shutdown_events = [
+            e for e in events.payload.get("items", [])
+            if e.get("eventName") == "klippyShutdown"
+        ]
+        assert len(shutdown_events) == 1, "Should emit klippyShutdown event"

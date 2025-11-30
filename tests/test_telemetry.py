@@ -766,6 +766,13 @@ def test_state_store_marks_klippy_ready_after_shutdown() -> None:
 
 
 def test_state_store_retains_shutdown_until_ready_signal() -> None:
+    """Test that shutdown state is retained until explicit klippy_ready.
+
+    The simplified approach:
+    - webhooks.state and printer.is_shutdown track klippy connectivity
+    - print_stats reflects actual Moonraker data (no inference/override)
+    - Consumers should check printer.is_shutdown to determine if device is usable
+    """
     store = MoonrakerStateStore()
 
     store.ingest(
@@ -785,10 +792,13 @@ def test_state_store_retains_shutdown_until_ready_signal() -> None:
     )
 
     snapshot = store.as_dict()
+    # Klippy state correctly reflects shutdown
     assert snapshot.get("webhooks", {}).get("state") == "shutdown"
     assert snapshot.get("printer", {}).get("is_shutdown") is True
-    assert snapshot.get("print_stats", {}).get("state") == "error"
-    assert snapshot.get("print_stats", {}).get("message") == "Firmware restart"
+    # print_stats reflects actual Moonraker data, no override
+    # (consumers check printer.is_shutdown for device usability)
+    assert snapshot.get("print_stats", {}).get("state") == "standby"
+    assert snapshot.get("print_stats", {}).get("message") == ""
 
     store.ingest(
         {
@@ -844,6 +854,11 @@ def test_state_store_handles_notify_klippy_state_error() -> None:
 
 
 def test_state_store_export_restore_preserves_shutdown_state() -> None:
+    """Test that export/restore preserves klippy shutdown tracking.
+
+    The simplified approach tracks shutdown via printer.is_shutdown,
+    not by overriding print_stats.
+    """
     store = MoonrakerStateStore()
 
     store.ingest(
@@ -868,32 +883,17 @@ def test_state_store_export_restore_preserves_shutdown_state() -> None:
     )
 
     state = recovered.as_dict()
-    assert state.get("print_stats", {}).get("state") == "error"
-    assert state.get("print_stats", {}).get("message") == "Emergency stop"
+    # Shutdown state is preserved via printer.is_shutdown
+    assert state.get("printer", {}).get("is_shutdown") is True
+    assert state.get("webhooks", {}).get("state") == "shutdown"
+    # print_stats reflects actual Moonraker data, no override
+    assert state.get("print_stats", {}).get("state") == "standby"
+    assert state.get("print_stats", {}).get("message") == ""
 
 
-def test_state_store_prefers_gcode_shutdown_hint() -> None:
-    store = MoonrakerStateStore()
-
-    store.ingest(
-        {
-            "jsonrpc": "2.0",
-            "method": "notify_gcode_response",
-            "params": ["!! Emergency stop !!"],
-        }
-    )
-
-    store.ingest(
-        {
-            "jsonrpc": "2.0",
-            "method": "notify_klippy_shutdown",
-            "params": [{}],
-        }
-    )
-
-    snapshot = store.as_dict()
-    assert snapshot.get("print_stats", {}).get("state") == "error"
-    assert snapshot.get("print_stats", {}).get("message") == "Emergency stop"
+# NOTE: test_state_store_prefers_gcode_shutdown_hint was removed.
+# We no longer extract shutdown hints from gcode_response - we trust
+# explicit klippy notifications directly (moonraker-obico pattern).
 
 
 def test_state_store_handles_notify_klippy_state_mapping_sequence() -> None:

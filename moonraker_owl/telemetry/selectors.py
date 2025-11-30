@@ -40,9 +40,18 @@ class StatusSelector:
     ) -> Optional[Dict[str, Any]]:
         print_stats_snapshot = store.get("print_stats")
         display_status_snapshot = store.get("display_status")
+        printer_snapshot = store.get("printer")
         state = session.raw_state
         if state is None and print_stats_snapshot is not None:
             state = print_stats_snapshot.data.get("state")
+
+        # Check if klippy is in shutdown state
+        is_shutdown = False
+        shutdown_message: Optional[str] = None
+        if printer_snapshot is not None:
+            is_shutdown = printer_snapshot.data.get("is_shutdown", False)
+            if is_shutdown:
+                shutdown_message = printer_snapshot.data.get("state_message")
 
         context = PrinterContext(
             observed_at=observed_at,
@@ -54,10 +63,20 @@ class StatusSelector:
 
         phase = resolve_printer_state(state, context)
 
+        # Override phase to Error when klippy is shutdown.
+        # This ensures UI displays error state regardless of what print_stats.state
+        # says, since Moonraker may send stale print_stats updates after shutdown.
+        if is_shutdown:
+            LOGGER.debug(
+                "Overriding phase to Error due to klippy shutdown (message=%s)",
+                shutdown_message,
+            )
+            phase = "Error"
+
         # Override phase when job has terminated but print_stats.state lags behind.
         # This handles the timing gap between notify_history_changed (which updates
         # job_status) and print_stats.state updates from Moonraker.
-        if not session.has_active_job and phase == "Printing":
+        elif not session.has_active_job and phase == "Printing":
             state_lower = state.lower() if isinstance(state, str) else ""
             job_status_lower = (
                 session.job_status.lower()
@@ -99,7 +118,10 @@ class StatusSelector:
             "hasActiveJob": session.has_active_job,
         }
 
-        if session.message:
+        # Priority: shutdown message > session message
+        if is_shutdown and shutdown_message:
+            lifecycle["reason"] = shutdown_message
+        elif session.message:
             lifecycle["reason"] = session.message
 
         status: Dict[str, Any] = {
@@ -108,10 +130,14 @@ class StatusSelector:
             "flags": {
                 "watchWindowActive": False,
                 "hasActiveJob": session.has_active_job,
+                "isShutdown": is_shutdown,
             },
         }
 
-        if session.message:
+        # subStatus priority: shutdown message > session message > display message
+        if is_shutdown and shutdown_message:
+            status["subStatus"] = shutdown_message
+        elif session.message:
             status["subStatus"] = session.message
         elif display_status_snapshot is not None:
             candidate = display_status_snapshot.data.get("message")
