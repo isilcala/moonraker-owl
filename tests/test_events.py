@@ -559,6 +559,35 @@ class TestOrchestratorEventDetection:
         assert len(events) == 1
         assert events[0].event_name == EventName.PRINT_COMPLETED
 
+    def test_detect_print_completed_alternative_spelling(self) -> None:
+        """Print printing -> completed (with 'ed') generates printCompleted event."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set printing state
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "test.gcode",
+                        }
+                    }
+                }
+            }
+        )
+        orchestrator.events.harvest()
+
+        # Transition to completed (alternative spelling)
+        orchestrator.ingest(
+            {"result": {"status": {"print_stats": {"state": "completed"}}}}
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.PRINT_COMPLETED
+
     def test_detect_print_cancelled(self) -> None:
         """Print printing -> cancelled generates printCancelled event."""
         clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
@@ -663,6 +692,94 @@ class TestOrchestratorEventDetection:
 
         events = orchestrator.events.harvest()
         assert len(events) == 0
+
+    def test_detect_print_started_from_complete(self) -> None:
+        """Print complete -> printing generates printStarted event."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set complete state (previous print finished)
+        orchestrator.ingest(
+            {"result": {"status": {"print_stats": {"state": "complete"}}}}
+        )
+        orchestrator.events.harvest()
+
+        # Start new print
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "new_print.gcode",
+                        }
+                    }
+                }
+            }
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.PRINT_STARTED
+        assert "new_print.gcode" in events[0].message
+
+    def test_detect_print_started_from_cancelled(self) -> None:
+        """Print cancelled -> printing generates printStarted event."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set cancelled state
+        orchestrator.ingest(
+            {"result": {"status": {"print_stats": {"state": "cancelled"}}}}
+        )
+        orchestrator.events.harvest()
+
+        # Start new print
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "retry.gcode",
+                        }
+                    }
+                }
+            }
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.PRINT_STARTED
+
+    def test_detect_print_started_from_error(self) -> None:
+        """Print error -> printing generates printStarted event."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set error state
+        orchestrator.ingest(
+            {"result": {"status": {"print_stats": {"state": "error"}}}}
+        )
+        orchestrator.events.harvest()
+
+        # Start new print after recovery
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "recovered.gcode",
+                        }
+                    }
+                }
+            }
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.PRINT_STARTED
 
     def test_print_state_callback_invoked(self) -> None:
         """Print state callback is invoked on state change."""

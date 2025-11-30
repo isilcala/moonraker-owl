@@ -125,15 +125,20 @@ EVENT_METADATA: Dict[EventName, Dict[str, Any]] = {
 # Maps (previous_state, current_state) tuples to EventName
 # None as previous_state matches any unknown/initial state
 PRINT_STATE_TRANSITIONS: Dict[tuple[Optional[str], str], EventName] = {
-    # Starting a print
+    # Starting a print (from various idle states)
     (None, "printing"): EventName.PRINT_STARTED,
     ("standby", "printing"): EventName.PRINT_STARTED,
+    ("complete", "printing"): EventName.PRINT_STARTED,  # New print after completion
+    ("completed", "printing"): EventName.PRINT_STARTED,  # Alternative spelling
+    ("cancelled", "printing"): EventName.PRINT_STARTED,  # New print after cancel
+    ("error", "printing"): EventName.PRINT_STARTED,  # New print after error
     # Resuming from pause
     ("paused", "printing"): EventName.PRINT_RESUMED,
     # Pausing
     ("printing", "paused"): EventName.PRINT_PAUSED,
-    # Completing
+    # Completing (Klipper uses "complete", some versions may use "completed")
     ("printing", "complete"): EventName.PRINT_COMPLETED,
+    ("printing", "completed"): EventName.PRINT_COMPLETED,
     # Cancelling
     ("printing", "cancelled"): EventName.PRINT_CANCELLED,
     ("paused", "cancelled"): EventName.PRINT_CANCELLED,
