@@ -6,7 +6,7 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional
 
 from .state_store import MoonrakerStateStore, SectionSnapshot
 
@@ -15,34 +15,48 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class SessionInfo:
-    session_id: str
-    job_id: Optional[str]
+    """Represents the current print session state.
+
+    Design follows Obico's PrinterState pattern:
+    - session_id is None when no active job exists
+    - Progress fields only meaningful when has_active_job is True
+    - State determination follows Mainsail: print_stats.state -> idle_timeout.state -> Idle
+    """
+
+    # Core identification - None when no active job
+    session_id: Optional[str]
     job_name: Optional[str]
-    source_path: Optional[str]
-    message: Optional[str]
+
+    # State signals
+    raw_state: Optional[str]  # print_stats.state
+    idle_timeout_state: Optional[str]
+    job_status: Optional[str]  # from history_event (takes precedence for terminal states)
+    has_active_job: bool
+
+    # Progress (only meaningful when has_active_job=True)
     progress_percent: Optional[float]
     elapsed_seconds: Optional[int]
     remaining_seconds: Optional[int]
     layer_current: Optional[int]
     layer_total: Optional[int]
-    has_active_job: bool
-    raw_state: Optional[str]
-    idle_timeout_state: Optional[str]
+
+    # Special states
     timelapse_paused: bool
-    progress_trend: str
-    job_status: Optional[str]
+    message: Optional[str]
 
 
 class PrintSessionTracker:
-    """Derives stable session identifiers and job metadata."""
+    """Derives stable session identifiers and job metadata.
+
+    Design principles (aligned with Obico/Mainsail):
+    - Session ID is cleared when job ends (not latched)
+    - Active job detection is simple: print_stats.state in {printing, paused}
+    - Terminal states from history_event take precedence
+    """
 
     def __init__(self) -> None:
         self._current_session_id: Optional[str] = None
-        self._last_filename: Optional[str] = None
-        self._last_history_id: Optional[str] = None
-        self._last_job_id: Optional[str] = None
         self._last_debug_signature: Optional[tuple[Any, ...]] = None
-        self._last_progress_sample: Optional[Tuple[float, datetime]] = None
 
     def compute(self, store: MoonrakerStateStore) -> SessionInfo:
         print_stats = _coerce_section(store.get("print_stats"))
@@ -73,31 +87,26 @@ class PrintSessionTracker:
         sd_printing = bool(_as_bool(virtual_sdcard.get("is_printing")))
         sd_paused = bool(_as_bool(virtual_sdcard.get("is_paused")))
 
-        session_id = self._resolve_session_id(history_id, filename, job_id)
+        # Determine active job first - this affects session_id lifecycle
+        has_active_job = self._has_active_job(
+            raw_state=raw_state,
+            job_status=job_status,
+        )
+
+        session_id = self._resolve_session_id(
+            history_id=history_id,
+            filename=filename,
+            job_id=job_id,
+            has_active_job=has_active_job,
+        )
         progress_percent = _extract_progress_percent(
             display_status,
             virtual_sdcard,
-            history_event,
-            filename,
         )
         elapsed_seconds = _as_int(print_stats.get("print_duration"))
         remaining_seconds = _as_int(print_stats.get("print_duration_remaining"))
         layer_current, layer_total = _extract_layers(print_stats)
 
-        has_active_job = self._is_active_job(
-            raw_state=raw_state,
-            idle_state=idle_state,
-            job_status=job_status,
-            timelapse_paused=timelapse_paused,
-            sd_active=sd_active,
-            sd_printing=sd_printing,
-            sd_paused=sd_paused,
-        )
-
-        # Monotonic clamp removed after verifying parity with Mainsail’s progress feed.
-
-        progress_value = _as_float(progress_percent)
-        progress_trend = self._derive_progress_trend(progress_value, observed_at)
         message = _extract_message(display_status, print_stats)
         message = _normalise_message(
             message,
@@ -111,184 +120,97 @@ class PrintSessionTracker:
             signature = (
                 session_id,
                 raw_state,
-                history_id,
-                job_id,
-                filename,
-                progress_percent,
-                has_active_job,
-                message,
-                idle_state,
                 job_status,
-                timelapse_paused,
-                progress_trend,
-                sd_active,
-                sd_printing,
-                sd_paused,
+                has_active_job,
+                progress_percent,
+                message,
             )
             if signature != self._last_debug_signature:
                 LOGGER.debug(
-                    "Session resolved: session=%s raw_state=%s history_id=%s job_id=%s filename=%s progress=%s%% has_active_job=%s message=%s idle_state=%s job_status=%s timelapse_paused=%s progress_trend=%s sd_active=%s sd_printing=%s sd_paused=%s",
+                    "Session resolved: session=%s raw_state=%s job_status=%s has_active_job=%s progress=%s%% message=%s",
                     session_id,
                     raw_state,
-                    history_id,
-                    job_id,
-                    filename,
-                    progress_percent,
-                    has_active_job,
-                    message,
-                    idle_state,
                     job_status,
-                    timelapse_paused,
-                    progress_trend,
-                    sd_active,
-                    sd_printing,
-                    sd_paused,
+                    has_active_job,
+                    progress_percent,
+                    message,
                 )
-                if session_id == "offline":
-                    LOGGER.debug(
-                        "Session identifiers missing (offline fallback): history_id=%s job_id=%s filename=%s",
-                        history_id,
-                        job_id,
-                        filename,
-                    )
                 self._last_debug_signature = signature
 
         return SessionInfo(
             session_id=session_id,
-            job_id=job_id or history_id,
             job_name=filename,
-            source_path=filename,
-            message=message,
+            raw_state=raw_state,
+            idle_timeout_state=idle_state,
+            job_status=job_status,
+            has_active_job=has_active_job,
             progress_percent=progress_percent,
             elapsed_seconds=elapsed_seconds,
             remaining_seconds=remaining_seconds,
             layer_current=layer_current,
             layer_total=layer_total,
-            has_active_job=has_active_job,
-            raw_state=raw_state,
-            idle_timeout_state=idle_state,
             timelapse_paused=timelapse_paused,
-            progress_trend=progress_trend,
-            job_status=job_status,
+            message=message,
         )
 
     def _resolve_session_id(
         self,
+        *,
         history_id: Optional[str],
         filename: Optional[str],
         job_id: Optional[str],
-    ) -> str:
-        previous_session = self._current_session_id
+        has_active_job: bool,
+    ) -> Optional[str]:
+        """Resolve session ID based on active job state.
+
+        Key behavior: session_id is None when no active job exists.
+        This ensures UI clears job info when print ends (fixes stale job display).
+        """
+        # Clear session when job ends
+        if not has_active_job:
+            self._current_session_id = None
+            return None
+
+        # Generate new session ID if needed
         if history_id:
-            self._current_session_id = f"history-{history_id}"
+            new_id = f"history-{history_id}"
         elif job_id:
-            self._current_session_id = f"job-{job_id}"
+            new_id = f"job-{job_id}"
         elif filename:
             digest = hashlib.sha1(filename.encode("utf-8"), usedforsecurity=False)
-            self._current_session_id = digest.hexdigest()
-        elif not self._current_session_id:
-            self._current_session_id = "offline"
-
-        self._last_history_id = history_id or self._last_history_id
-        self._last_filename = filename or self._last_filename
-        self._last_job_id = job_id or self._last_job_id
-
-        if self._current_session_id != previous_session:
-            self._last_progress_sample = None
-
-        return self._current_session_id or "offline"
-
-    def _derive_progress_trend(
-        self,
-        progress_value: Optional[float],
-        observed_at: Optional[datetime],
-    ) -> str:
-        if progress_value is None or observed_at is None:
-            return "unknown"
-
-        last_sample = self._last_progress_sample
-        if last_sample is not None:
-            last_value, last_time = last_sample
-            delta_value = progress_value - last_value
-            delta_seconds = max((observed_at - last_time).total_seconds(), 0)
-
-            if delta_value > 0.05:
-                trend = "increasing"
-            elif delta_value < -0.05:
-                trend = "decreasing"
-            elif delta_seconds >= 5:
-                trend = "steady"
-            else:
-                trend = "unknown"
+            new_id = digest.hexdigest()
         else:
-            trend = "increasing" if progress_value > 0.0 else "steady"
+            # Active job but no identifiers - keep existing or generate placeholder
+            return self._current_session_id
 
-        self._last_progress_sample = (progress_value, observed_at)
-        return trend
+        self._current_session_id = new_id
+        return self._current_session_id
 
-    def _is_active_job(
+    def _has_active_job(
         self,
         *,
         raw_state: Optional[str],
-        idle_state: Optional[str],
-        job_status: Optional[str] = None,
-        timelapse_paused: bool = False,
-        sd_active: Optional[bool] = None,
-        sd_printing: Optional[bool] = None,
-        sd_paused: Optional[bool] = None,
+        job_status: Optional[str],
     ) -> bool:
-        raw_state = (raw_state or "unknown").lower()
-        idle_state = (idle_state or "unknown").lower()
-        job_status = (job_status or "unknown").lower()
-        job_status = job_status.replace("-", "_")
+        """Determine if there's an active print job.
 
-        sd_active = bool(sd_active)
-        sd_printing = bool(sd_printing)
-        sd_paused = bool(sd_paused)
+        Simplified logic aligned with Obico's has_active_job():
+        - Terminal states from history_event (job_status) take precedence
+        - Active states: printing, paused (from print_stats.state)
 
-        terminal_states = {
-            "complete",
-            "completed",
-            "cancelled",
-            "canceled",
-            "error",
-            "failed",
-            "aborted",
-        }
-        active_states = {"printing", "paused", "resuming", "cancelling", "pausing"}
-        active_job_statuses = {
-            "in_progress",
-            "printing",
-            "running",
-            "resuming",
-            "starting",
-        }
+        This replaces the previous 7-signal approach with a clean 2-signal check.
+        """
+        raw = (raw_state or "").lower()
+        job = (job_status or "").lower()
 
-        if job_status in terminal_states:
+        # Terminal states from history event take precedence
+        terminal_states = {"complete", "completed", "cancelled", "canceled", "error"}
+        if job in terminal_states:
             return False
 
-        if job_status in active_job_statuses:
-            return True
-
-        if raw_state in terminal_states:
-            return False
-
-        if raw_state in active_states:
-            return True
-
-        if sd_printing:
-            return True
-
-        if sd_active and not sd_paused:
-            return True
-
-        if idle_state in {"printing", "busy"}:
-            return True
-
-        if timelapse_paused:
-            return True
-
-        return False
+        # Active states from print_stats (aligned with Obico's ACTIVE_STATES)
+        active_states = {"printing", "paused"}
+        return raw in active_states
 
 
 @dataclass
@@ -351,39 +273,6 @@ def _extract_history_id(section: Mapping[str, Any]) -> Optional[str]:
             value = candidate.get(key)
             if value:
                 return str(value)
-    return None
-
-
-def _extract_history_metadata(
-    section: Mapping[str, Any],
-    filename: Optional[str],
-) -> Optional[tuple[int, int, int]]:
-    for candidate in _iter_candidate_sections(section):
-        job = candidate.get("job")
-        if not isinstance(job, Mapping):
-            continue
-
-        job_filename = job.get("filename")
-        if filename and isinstance(job_filename, str) and job_filename:
-            if job_filename.strip() != filename:
-                continue
-
-        metadata = job.get("metadata")
-        if not isinstance(metadata, Mapping):
-            continue
-
-        start_byte = _as_int(metadata.get("gcode_start_byte"))
-        end_byte = _as_int(metadata.get("gcode_end_byte"))
-        file_size = _as_int(metadata.get("size"))
-
-        if start_byte is None or end_byte is None or file_size is None:
-            continue
-
-        if end_byte <= start_byte or file_size <= 0:
-            continue
-
-        return start_byte, end_byte, file_size
-
     return None
 
 
@@ -498,25 +387,20 @@ def _normalise_message(
 def _extract_progress_percent(
     display_status: Mapping[str, Any],
     virtual_sdcard: Mapping[str, Any],
-    history_event: Mapping[str, Any],
-    filename: Optional[str],
 ) -> Optional[float]:
-    metadata = _extract_history_metadata(history_event, filename)
+    """Extract progress percentage from Moonraker state.
+
+    Simplified approach aligned with Mainsail's getPrintPercentByFilepositionAbsolute:
+    - Primary: display_status.progress (slicer-reported)
+    - Fallback: virtual_sdcard.progress (file position)
+
+    Removed the complex gcode_start_byte/gcode_end_byte calculation as it
+    requires metadata that may not always be available and adds complexity.
+    """
+    display_progress = _as_float(display_status.get("progress"))
     sd_progress = _as_float(virtual_sdcard.get("progress"))
 
-    if metadata is not None and sd_progress is not None:
-        start_byte, end_byte, file_size = metadata
-        span = end_byte - start_byte
-        if file_size and span > 0:
-            file_position = sd_progress * float(file_size)
-            relative = (file_position - float(start_byte)) / float(span)
-            if relative < 0:
-                relative = 0.0
-            elif relative > 1:
-                relative = 1.0
-            return relative * 100.0
-
-    display_progress = _as_float(display_status.get("progress"))
+    # Prefer display_status (slicer-reported) when available
     if display_progress is not None and sd_progress is not None:
         chosen = max(display_progress, sd_progress)
         return max(0.0, min(chosen * 100.0, 100.0))

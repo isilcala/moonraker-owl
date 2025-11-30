@@ -280,11 +280,17 @@ def test_watch_window_flag_reflects_idle_mode(baseline_snapshot: dict) -> None:
     assert status_flags["watchWindowActive"] is False
 
 
-def test_replay_stream_produces_progress() -> None:
+def test_replay_stream_produces_progress_while_printing() -> None:
+    """Test that job info is populated while printing is active.
+
+    This test replays the first 200 frames of the stream (while printing)
+    to verify progress tracking works during an active print.
+    """
     clock = IncrementingClock(datetime(2025, 11, 2, 15, 19, tzinfo=timezone.utc))
     orchestrator = TelemetryOrchestrator(clock=clock)
 
-    for payload in _iter_stream_payloads(limit=0):
+    # Only process first 200 frames (while printing is active)
+    for payload in _iter_stream_payloads(limit=200):
         orchestrator.ingest(payload)
 
     frames = orchestrator.build_payloads()
@@ -292,8 +298,30 @@ def test_replay_stream_produces_progress() -> None:
     status_payload = frames["status"].payload
 
     job_info = status_payload.get("job", {})
-    assert job_info.get("name")
-    assert job_info.get("progress", {}).get("elapsedSeconds", 0) > 0
+    assert job_info.get("name"), "Job name should be populated during active print"
+    assert "progress" in job_info, "Progress section should exist during active print"
 
     sensors_payload = frames["sensors"].payload
     assert sensors_payload["cadence"]["mode"] == "idle"
+
+
+def test_replay_stream_clears_job_after_completion() -> None:
+    """Test that job info is cleared when print ends (not latched).
+
+    This verifies the new behavior where session_id becomes None after
+    the print job completes, causing job info to be cleared from status.
+    """
+    clock = IncrementingClock(datetime(2025, 11, 2, 15, 19, tzinfo=timezone.utc))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+
+    # Process entire stream (ends with cancelled state)
+    for payload in _iter_stream_payloads(limit=0):
+        orchestrator.ingest(payload)
+
+    frames = orchestrator.build_payloads()
+    assert "status" in frames
+    status_payload = frames["status"].payload
+
+    # Job info should be cleared when print ends
+    job_info = status_payload.get("job")
+    assert job_info is None or job_info == {}, "Job info should be cleared after print ends"

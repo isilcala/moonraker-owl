@@ -2,40 +2,53 @@ from moonraker_owl.telemetry.state_store import MoonrakerStateStore
 from moonraker_owl.telemetry.trackers import PrintSessionTracker
 
 
-def test_active_job_without_session_when_raw_state_printing() -> None:
+def test_has_active_job_when_raw_state_printing() -> None:
+    """Test that printing state is detected as active job."""
     tracker = PrintSessionTracker()
 
-    result = tracker._is_active_job(
+    result = tracker._has_active_job(
         raw_state="printing",
-        idle_state=None,
-        timelapse_paused=False,
+        job_status=None,
     )
 
     assert result is True
 
 
-def test_inactive_without_session_when_terminal_state() -> None:
+def test_has_active_job_when_raw_state_paused() -> None:
+    """Test that paused state is detected as active job."""
     tracker = PrintSessionTracker()
 
-    result = tracker._is_active_job(
+    result = tracker._has_active_job(
+        raw_state="paused",
+        job_status=None,
+    )
+
+    assert result is True
+
+
+def test_no_active_job_when_terminal_state() -> None:
+    """Test that cancelled state is not an active job."""
+    tracker = PrintSessionTracker()
+
+    result = tracker._has_active_job(
         raw_state="cancelled",
-        idle_state=None,
-        timelapse_paused=False,
+        job_status=None,
     )
 
     assert result is False
 
 
-def test_idle_timeout_printing_marks_active() -> None:
+def test_no_active_job_when_job_status_terminal() -> None:
+    """Test that terminal job_status takes precedence over raw_state."""
     tracker = PrintSessionTracker()
 
-    result = tracker._is_active_job(
-        raw_state=None,
-        idle_state="printing",
-        timelapse_paused=False,
+    # Even if raw_state is printing, terminal job_status takes precedence
+    result = tracker._has_active_job(
+        raw_state="printing",
+        job_status="completed",
     )
 
-    assert result is True
+    assert result is False
 
 
 def test_history_event_nested_job_populates_session_identifiers() -> None:
@@ -75,47 +88,46 @@ def test_history_event_nested_job_populates_session_identifiers() -> None:
     session = tracker.compute(store)
 
     assert session.session_id == "job-0002A5"
-    assert session.job_id == "0002A5"
+    # job_id field removed - use session_id instead
     assert session.job_name == "sample.gcode"
     assert session.has_active_job is True
 
 
-def test_history_in_progress_overrides_cancelled_state() -> None:
+def test_session_cleared_when_print_ends() -> None:
+    """Test that session_id becomes None when job ends (not latched)."""
     tracker = PrintSessionTracker()
     store = MoonrakerStateStore()
 
+    # Start printing
     store.ingest(
         {
             "jsonrpc": "2.0",
             "method": "notify_status_update",
             "params": [
                 {
-                    "print_stats": {"state": "cancelled"},
-                    "virtual_sdcard": {"is_active": True},
-                }
-            ],
-        }
-    )
-
-    store.ingest(
-        {
-            "jsonrpc": "2.0",
-            "method": "notify_history_changed",
-            "params": [
-                {
-                    "action": "added",
-                    "job": {
-                        "job_id": "0003AA",
-                        "filename": "sample.gcode",
-                        "status": "in_progress",
-                    },
+                    "print_stats": {"state": "printing", "filename": "test.gcode"},
                 }
             ],
         }
     )
 
     session = tracker.compute(store)
-
-    assert session.raw_state == "cancelled"
-    assert session.job_status == "in_progress"
+    assert session.session_id is not None
     assert session.has_active_job is True
+
+    # Print completes
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "complete", "filename": "test.gcode"},
+                }
+            ],
+        }
+    )
+
+    session = tracker.compute(store)
+    assert session.session_id is None  # Key change: session clears when job ends
+    assert session.has_active_job is False

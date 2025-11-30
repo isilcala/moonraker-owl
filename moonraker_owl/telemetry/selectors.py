@@ -189,12 +189,11 @@ class StatusSelector:
                 state,
                 session.idle_timeout_state,
                 session.timelapse_paused,
-                session.progress_trend,
                 session.job_status,
             )
             if signature != self._last_debug_signature:
                 LOGGER.debug(
-                    "Overview lifecycle resolved: raw_state=%s phase=%s reason=%s session=%s has_active_job=%s is_heating=%s progress=%s%% elapsed=%s remaining=%s layers=%s/%s idle_timeout_state=%s timelapse_paused=%s progress_trend=%s job_status=%s",
+                    "Overview lifecycle resolved: raw_state=%s phase=%s reason=%s session=%s has_active_job=%s is_heating=%s progress=%s%% elapsed=%s remaining=%s layers=%s/%s idle_timeout_state=%s timelapse_paused=%s job_status=%s",
                     state,
                     phase,
                     lifecycle.get("reason"),
@@ -208,7 +207,6 @@ class StatusSelector:
                     session.layer_total,
                     session.idle_timeout_state,
                     session.timelapse_paused,
-                    session.progress_trend,
                     session.job_status,
                 )
                 self._last_debug_signature = signature
@@ -374,17 +372,22 @@ class EventsSelector:
 
 
 def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
+    """Build job payload for status channel.
+
+    Returns None when session_id is None (no active job).
+    This ensures UI clears job info when print ends.
+    """
     if not session.session_id:
         return None
 
     payload: Dict[str, Any] = {
         "sessionId": session.session_id,
-        "jobId": session.job_id or session.session_id,
+        "jobId": session.session_id,  # Use session_id as jobId
     }
 
     if session.job_name:
         payload["name"] = session.job_name
-        payload.setdefault("sourcePath", session.source_path or session.job_name)
+        payload["sourcePath"] = session.job_name
 
     if session.progress_percent is not None:
         payload["progressPercent"] = max(
