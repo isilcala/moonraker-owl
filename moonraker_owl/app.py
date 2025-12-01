@@ -154,12 +154,7 @@ class MoonrakerOwlApp:
         self._state_detail = detail
 
         message_detail = detail or state.value
-        LOGGER.info(
-            "Agent state transition %s -> %s (%s)",
-            previous.value,
-            state.value,
-            message_detail,
-        )
+        LOGGER.info("Agent: %s -> %s", previous.value, state.value)
         await self._health.set_agent_state(
             state.value,
             healthy=state == AgentState.ACTIVE,
@@ -589,10 +584,7 @@ class MoonrakerOwlApp:
         else:
             telemetry_ready = True
             self._telemetry_ready = True
-            LOGGER.info(
-                "Telemetry publisher started on topic %s",
-                telemetry.topic,
-            )
+            LOGGER.info("Telemetry publisher started")
             await self._health.update("telemetry", True, None)
             if not self._status_listener_registered:
                 try:
@@ -733,9 +725,7 @@ class MoonrakerOwlApp:
         This callback handles state transitions and component deactivation
         before reconnection is attempted.
         """
-        LOGGER.info(
-            "Connection lost (reason=%s), deactivating components", reason.value
-        )
+        LOGGER.info("MQTT connection lost: %s", reason.value)
 
         await self._transition_state(
             AgentState.RECOVERING,
@@ -848,7 +838,7 @@ class MoonrakerOwlApp:
         comes back online.
         """
         if self._connection_coordinator is not None:
-            LOGGER.info("JWT token renewed, requesting MQTT reconnection")
+            LOGGER.debug("Requesting MQTT reconnect after token renewal")
             self._connection_coordinator.request_reconnect(
                 ReconnectReason.TOKEN_RENEWED
             )

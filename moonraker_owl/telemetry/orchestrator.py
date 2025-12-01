@@ -74,6 +74,9 @@ class TelemetryOrchestrator:
         self._last_print_state: Optional[str] = None
         self._last_filename: Optional[str] = None
 
+        # Deduplication for job update logging
+        self._last_job_update_signature: Optional[tuple] = None
+
         # Callback for print state changes (used by CommandProcessor)
         self._on_print_state_changed: Optional[Callable[[str], None]] = None
 
@@ -106,6 +109,8 @@ class TelemetryOrchestrator:
         self._last_klippy_state = None
         self._last_print_state = None
         self._last_filename = None
+        # Deduplication for job update logging
+        self._last_job_update_signature: Optional[tuple] = None
 
     def ingest(self, payload: Dict[str, Any]) -> None:
         """Ingest Moonraker payload and detect events.
@@ -154,19 +159,26 @@ class TelemetryOrchestrator:
             forced.add("sensors")
         session = self.session_tracker.compute(self.store)
 
-        # Log job progress at INFO level for debugging print lifecycle
+        # Log job progress at DEBUG level (deduplicated by progress/layer/state changes)
         if session.has_active_job:
             progress_int = int(session.progress_percent) if session.progress_percent is not None else 0
-            layer_info = ""
-            if session.layer_current is not None and session.layer_total is not None:
-                layer_info = f" layer={session.layer_current}/{session.layer_total}"
-            LOGGER.info(
-                "JOB_UPDATE: progress=%d%%%s state=%s session=%s",
-                progress_int,
-                layer_info,
-                session.raw_state,
-                session.session_id[:8] if session.session_id else "none",
-            )
+            job_signature = (progress_int, session.layer_current, session.layer_total, session.raw_state, session.session_id)
+            if job_signature != self._last_job_update_signature:
+                self._last_job_update_signature = job_signature
+                if LOGGER.isEnabledFor(logging.DEBUG):
+                    layer_info = ""
+                    if session.layer_current is not None and session.layer_total is not None:
+                        layer_info = f" layer={session.layer_current}/{session.layer_total}"
+                    LOGGER.debug(
+                        "Job: %d%%%s state=%s session=%s",
+                        progress_int,
+                        layer_info,
+                        session.raw_state,
+                        session.session_id[:8] if session.session_id else "none",
+                    )
+        else:
+            # Clear signature when job ends
+            self._last_job_update_signature = None
 
         status_payload = self.status_selector.build(
             self.store,
@@ -337,8 +349,8 @@ class TelemetryOrchestrator:
         if filename:
             self._last_filename = filename
 
-        LOGGER.info(
-            "STATE_CHANGE: %s -> %s (file: %s)",
+        LOGGER.debug(
+            "Print state: %s -> %s (file=%s)",
             old_state,
             current_state,
             self._last_filename,

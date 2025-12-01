@@ -683,7 +683,7 @@ async def test_renewal_loop_error_retry_logic_exists(ed25519_keypair):
         assert "except Exception" in source
         assert "retry_interval = 300" in source
         assert "LOGGER.error" in source
-        assert "Will retry token renewal" in source
+        assert "Token renewal retry" in source
         
         # Start renewal loop to ensure it doesn't crash
         manager.start_renewal_loop()

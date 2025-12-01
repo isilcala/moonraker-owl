@@ -331,8 +331,8 @@ class TelemetryPublisher:
                 added_objects.append(sensor)
 
         if added_objects:
-            LOGGER.info(
-                "Discovered %d additional temperature objects: %s",
+            LOGGER.debug(
+                "Discovered %d temperature sensors: %s",
                 len(added_objects),
                 ", ".join(added_objects),
             )
@@ -448,8 +448,8 @@ class TelemetryPublisher:
 
         # Log poll groups for debugging
         for group in groups:
-            LOGGER.info(
-                "Configured poll group '%s': interval=%.1fs, objects=%s",
+            LOGGER.debug(
+                "Poll group '%s': interval=%.1fs objects=%s",
                 group.name,
                 group.interval,
                 list(group.objects.keys()),
@@ -778,10 +778,7 @@ class TelemetryPublisher:
         if current_time < expires_at:
             return
 
-        LOGGER.info(
-            "Telemetry watch window expired at %s; reverting to idle cadence",
-            expires_at.isoformat(),
-        )
+        LOGGER.debug("Watch window expired, reverting to idle")
         self.apply_sensors_rate(
             mode="idle",
             max_hz=self._idle_hz,
@@ -884,15 +881,12 @@ class TelemetryPublisher:
             watch_window_expires=expires_at,
         )
 
-        if LOGGER.isEnabledFor(logging.INFO):
+        if mode != previous_mode:
             LOGGER.info(
-                "Telemetry cadence change: mode=%s (prev=%s) max_hz=%.3f interval=%.2fs (prev=%.2fs) expires=%s",
-                mode,
+                "Telemetry mode: %s -> %s (interval=%.1fs)",
                 previous_mode,
-                max_hz,
+                mode,
                 interval,
-                previous_interval,
-                expires_at.isoformat() if expires_at else "<none>",
             )
 
         for channel in ("sensors", "status"):
@@ -1140,11 +1134,10 @@ class TelemetryPublisher:
                 return
             remaining_seconds = math.ceil(remaining)
 
-        LOGGER.info(
-            "Reapplying telemetry cadence request after restart: mode=%s max_hz=%.3f remaining=%s",
+        LOGGER.debug(
+            "Reapplying telemetry cadence: mode=%s remaining=%ss",
             request.mode,
-            request.max_hz,
-            f"{remaining_seconds}s" if remaining_seconds is not None else "indefinite",
+            remaining_seconds if remaining_seconds is not None else "indefinite",
         )
 
         self.apply_sensors_rate(
@@ -1309,7 +1302,7 @@ class TelemetryPublisher:
             if self._klippy_ready_applied and ready_signal:
                 return
             # On a Klippy reboot the websocket keeps running but loses subscriptions; refresh them lazily.
-            LOGGER.info("Detected Klippy ready; refreshing Moonraker subscriptions")
+            LOGGER.debug("Klippy ready, refreshing subscriptions")
             self._klippy_ready_applied = True
             self._schedule_resubscribe("klippy-ready")
         elif ready_signal:

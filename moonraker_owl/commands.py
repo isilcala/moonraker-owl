@@ -269,11 +269,10 @@ class CommandProcessor:
             if expected_state:
                 # Don't send 'completed' yet - wait for state change
                 self._begin_pending_state(command_name, message, expected_state)
-                LOGGER.info(
-                    "Command %s awaiting state '%s' (timeout: %.0fs)",
+                LOGGER.debug(
+                    "Command %s awaiting state '%s'",
                     message.command_id[:8],
                     expected_state,
-                    self._command_timeout_seconds,
                 )
             else:
                 # No state confirmation needed - complete immediately
@@ -351,8 +350,8 @@ class CommandProcessor:
         for cmd_id, pending in self._pending_state_commands.items():
             if pending.expected_state == normalized_state:
                 completed_ids.append(cmd_id)
-                LOGGER.info(
-                    "Command %s completed: state changed to '%s'",
+                LOGGER.debug(
+                    "Command %s: state -> '%s'",
                     cmd_id[:8],
                     new_state,
                 )
@@ -792,11 +791,10 @@ class CommandProcessor:
                 command_id=message.command_id,
             ) from exc
 
-        LOGGER.info(
-            "Set heater %s target to %.1f°C (command %s)",
+        LOGGER.debug(
+            "Heater %s -> %.1f°C",
             heater_normalized,
             target_temp,
-            message.command_id[:8],
         )
 
         return {
@@ -843,10 +841,9 @@ class CommandProcessor:
                 command_id=message.command_id,
             ) from exc
 
-        LOGGER.info(
-            "Turned off heater %s (command %s)",
+        LOGGER.debug(
+            "Heater %s off",
             heater_normalized,
-            message.command_id[:8],
         )
 
         return {
@@ -941,11 +938,10 @@ class CommandProcessor:
                 command_id=message.command_id,
             ) from exc
 
-        LOGGER.info(
-            "Set fan %s speed to %.0f%% (command %s)",
+        LOGGER.debug(
+            "Fan %s -> %.0f%%",
             fan_name,
             speed_value * 100,
-            message.command_id[:8],
         )
 
         return {

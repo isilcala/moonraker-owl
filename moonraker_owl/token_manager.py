@@ -128,12 +128,9 @@ class TokenManager:
 
     async def refresh_token_now(self) -> None:
         """Immediately refresh the JWT token (used for resilience on auth failures)."""
-        LOGGER.info("Refreshing JWT token immediately (on-demand)")
+        LOGGER.debug("Refreshing JWT token (on-demand)")
         self._current_token = await self.issue_token()
-        LOGGER.info(
-            "JWT token refreshed on-demand, expires at %s",
-            self._current_token.expires_at,
-        )
+        LOGGER.info("JWT token refreshed, expires %s", self._current_token.expires_at)
 
     def start_renewal_loop(
         self, on_renewed: Optional[asyncio.coroutine] = None
@@ -162,11 +159,9 @@ class TokenManager:
                 pass  # Normal timeout, proceed with renewal
 
             try:
-                LOGGER.info("Renewing JWT token")
+                LOGGER.debug("Renewing JWT token")
                 self._current_token = await self.issue_token()
-                LOGGER.info(
-                    "JWT token renewed, expires at %s", self._current_token.expires_at
-                )
+                LOGGER.info("JWT token renewed, expires %s", self._current_token.expires_at)
 
                 if on_renewed:
                     await on_renewed()
@@ -175,7 +170,7 @@ class TokenManager:
                 LOGGER.error("Token renewal failed: %s", exc, exc_info=True)
                 # On failure, retry after 5 minutes instead of full interval
                 retry_interval = 300
-                LOGGER.info("Will retry token renewal in %d seconds", retry_interval)
+                LOGGER.debug("Token renewal retry in %ds", retry_interval)
                 try:
                     await asyncio.wait_for(
                         self._stop_event.wait(), timeout=retry_interval

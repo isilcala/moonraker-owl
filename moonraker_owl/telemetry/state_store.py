@@ -187,10 +187,9 @@ class MoonrakerStateStore:
                 if isinstance(entry, Mapping) and "print_stats" in entry:
                     ps = entry["print_stats"]
                     if isinstance(ps, Mapping) and "state" in ps:
-                        LOGGER.info(
-                            "WS_NOTIFY: print_stats.state=%s (raw=%r)",
+                        LOGGER.debug(
+                            "WS: print_stats.state=%s",
                             ps.get("state"),
-                            {k: v for k, v in ps.items() if k != "info"},
                         )
                 self._ingest_status(entry, observed_at)
             return

@@ -289,12 +289,12 @@ class ConnectionCoordinator:
             attempt += 1
 
             try:
-                LOGGER.info("Connection attempt %d", attempt)
+                LOGGER.debug("MQTT connection attempt %d", attempt)
                 await self._mqtt_client.connect(
                     clean_start=False,
                     session_expiry=self._session_expiry,
                 )
-                LOGGER.info("Connection attempt %d succeeded", attempt)
+                LOGGER.debug("MQTT connection attempt %d succeeded", attempt)
                 return True
 
             except Exception as exc:

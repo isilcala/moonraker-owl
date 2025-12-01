@@ -113,19 +113,16 @@ class EventCollector:
         """
         if event.priority == EventPriority.P0_CRITICAL:
             self._p0_queue.append(event)
-            LOGGER.info(
-                "Recorded P0 event: %s (id=%s)",
+            LOGGER.debug(
+                "P0 event queued: %s",
                 event.event_name.value,
-                event.event_id[:8],
             )
         else:
             self._p1_queue.append(event)
-            LOGGER.info(
-                "EVENT_RECORDED: %s (id=%s, session=%s, msg='%s')",
+            LOGGER.debug(
+                "Event queued: %s (session=%s)",
                 event.event_name.value,
-                event.event_id[:8],
                 event.session_id[:8] if event.session_id else "none",
-                event.message[:50] if event.message else "",
             )
 
     def harvest(self) -> List[Event]:
