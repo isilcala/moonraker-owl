@@ -1,9 +1,30 @@
 """Telemetry event collection with priority queues and rate limiting.
 
 This module provides the EventCollector class which manages events with:
-- Priority queues: P0 (critical) and P1 (important) events
+- Priority queues: P0 (critical) and P1 (important) business events
 - Rate limiting: Token bucket algorithm for P1 events
-- Backward compatibility: Legacy command state events
+- System events: Command acknowledgement events (no rate limiting)
+
+Event Sources and Flow:
+-----------------------
+1. P0/P1 Business Events (printStarted, printPaused, klippyError, etc.):
+   - Recorded via record(Event) into priority queues (_p0_queue, _p1_queue)
+   - Retrieved via harvest() with token bucket rate limiting for P1
+   - P0 events bypass rate limiting entirely
+   - These are user-facing business events
+
+2. System Events (commandStateChanged):
+   - Recorded via record_command_state() into _pending list
+   - Retrieved via drain() without rate limiting
+   - These are Owl-specific system events for UI feedback (spinner, ack)
+   - Command frequency is naturally limited by user interaction
+
+Design Decision: Both event types share the same MQTT topic (events channel)
+but use different collection mechanisms due to their different rate limiting
+requirements. Consumers distinguish them by the eventName field.
+
+Note: The events channel bypasses the cadence controller entirely.
+Rate limiting is handled here in EventCollector, not at publish time.
 
 See ADR-0009 and event_types.py for event definitions.
 """
@@ -99,6 +120,13 @@ class EventCollector:
             )
         else:
             self._p1_queue.append(event)
+            LOGGER.info(
+                "EVENT_RECORDED: %s (id=%s, session=%s, msg='%s')",
+                event.event_name.value,
+                event.event_id[:8],
+                event.session_id[:8] if event.session_id else "none",
+                event.message[:50] if event.message else "",
+            )
 
     def harvest(self) -> List[Event]:
         """Harvest events for publishing, respecting rate limits.
@@ -121,6 +149,14 @@ class EventCollector:
         while self._p1_queue and self._try_acquire_token():
             events.append(self._p1_queue.popleft())
 
+        if events:
+            event_names = [e.event_name.value for e in events]
+            LOGGER.debug(
+                "EVENTS_HARVESTED: %d events [%s]",
+                len(events),
+                ", ".join(event_names),
+            )
+
         return events
 
     def record_command_state(
@@ -133,16 +169,21 @@ class EventCollector:
         session_id: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Record a command state change event (legacy interface).
+        """Record a command state change event (system event).
 
-        This method maintains backward compatibility with existing code
-        that records command state changes. These events go to the legacy
-        pending list and are drained separately.
+        Command ack events are Owl-specific system events used for UI feedback
+        (showing spinners, confirming command execution). They are NOT business
+        events and don't need rate limiting - command frequency is naturally
+        limited by user interaction.
+
+        These events use a separate collection path (drain()) from business
+        events (harvest()) to avoid interfering with the token bucket rate
+        limiting used for P0/P1 events.
 
         Args:
             command_id: Unique identifier of the command
             command_type: Type of command (e.g., "pause", "resume")
-            state: New state of the command
+            state: New state of the command (dispatched, accepted, completed, failed)
             occurred_at: When the state change occurred
             session_id: Associated print session ID
             details: Additional details about the state change
@@ -165,10 +206,13 @@ class EventCollector:
         self._pending.append(payload)
 
     def drain(self) -> List[Dict[str, Any]]:
-        """Drain legacy pending events (backward compatibility).
+        """Drain command ack events (system events).
+
+        These events don't go through rate limiting because command frequency
+        is naturally limited by user interaction.
 
         Returns:
-            List of legacy event dictionaries.
+            List of command state event dictionaries.
         """
         events = list(self._pending)
         self._pending.clear()

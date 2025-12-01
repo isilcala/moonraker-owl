@@ -912,6 +912,45 @@ def test_state_store_export_restore_preserves_shutdown_state() -> None:
 # explicit klippy notifications directly (moonraker-obico pattern).
 
 
+def test_state_store_print_state_normalizes_to_lowercase() -> None:
+    """Test that print_state property normalizes state to lowercase.
+    
+    This ensures consistent matching with PRINT_STATE_TRANSITIONS lookups,
+    which use lowercase keys like ('standby', 'printing').
+    """
+    store = MoonrakerStateStore()
+
+    # Test with various case variations that Moonraker might return
+    test_cases = [
+        ("standby", "standby"),
+        ("PRINTING", "printing"),
+        ("Paused", "paused"),
+        ("Complete", "complete"),
+        ("  Cancelled  ", "cancelled"),  # With whitespace
+        ("ERROR", "error"),
+    ]
+
+    for raw_state, expected in test_cases:
+        store.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_status_update",
+                "params": [{"print_stats": {"state": raw_state}}],
+            }
+        )
+        assert store.print_state == expected, f"Expected {expected!r} for input {raw_state!r}"
+
+    # Test None handling
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [{"print_stats": {"state": None}}],
+        }
+    )
+    assert store.print_state is None
+
+
 def test_state_store_handles_notify_klippy_state_mapping_sequence() -> None:
     store = MoonrakerStateStore()
 

@@ -387,6 +387,24 @@ class SensorsSelector:
 
 
 class EventsSelector:
+    """Selector for the events channel payload (command ack events).
+
+    This selector builds the events channel payload from command state events
+    (drained from EventCollector._pending). These are system events for UI
+    feedback, not user-facing business events.
+
+    Note: The cadence values (max_per_second, max_per_minute) are metadata
+    included in the payload for consumer information only.
+
+    Rate limiting strategy for events channel:
+    - Command ack events: No rate limiting (frequency limited by user interaction)
+    - P0/P1 business events: Token bucket in EventCollector.harvest()
+    - Events channel bypasses cadence controller entirely
+
+    Both event types are merged in TelemetryOrchestrator.build_payloads()
+    and share the same MQTT topic, distinguished by eventName field.
+    """
+
     def __init__(self, *, max_per_second: int = 1, max_per_minute: int = 20) -> None:
         self._max_per_second = max(0, max_per_second)
         self._max_per_minute = max(0, max_per_minute)

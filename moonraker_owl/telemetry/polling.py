@@ -30,11 +30,14 @@ class PollSpec:
         fields: Moonraker object names or "object.attribute" specs to fetch
         interval_seconds: Seconds between polling attempts
         initial_delay_seconds: Seconds to wait before first poll
+        force_poll: If True, poll even if objects are already subscribed via WebSocket.
+                   Use for critical state like print_stats that must stay synchronized.
     """
     name: str
     fields: Sequence[str]
     interval_seconds: float
     initial_delay_seconds: float = 0.0
+    force_poll: bool = False
 
 
 @dataclass
@@ -48,6 +51,25 @@ class _PollGroup:
 
 # Default polling specs for common Moonraker objects
 DEFAULT_POLL_SPECS: tuple[PollSpec, ...] = (
+    # NOTE: print-state-sync polling DISABLED for testing.
+    # We're verifying if the state normalization fix in state_store.py
+    # resolves the missed state transition issue without needing polling.
+    # Re-enable after confirming root cause.
+    #
+    # PollSpec(
+    #     name="print-state-sync",
+    #     fields=(
+    #         "print_stats.state",
+    #         "print_stats.filename",
+    #         "print_stats.message",
+    #         "print_stats.print_duration",
+    #         "virtual_sdcard.is_active",
+    #         "virtual_sdcard.progress",
+    #     ),
+    #     interval_seconds=15.0,
+    #     initial_delay_seconds=5.0,
+    #     force_poll=True,
+    # ),
     PollSpec(
         name="environment-sensors",
         fields=(

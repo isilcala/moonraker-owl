@@ -188,10 +188,9 @@ class TelemetryPublisher:
         self._idle_interval = _hz_to_interval(idle_hz) or 30.0
         self._watch_interval = _hz_to_interval(1.0) or 1.0
         self._sensors_interval = self._idle_interval
-        events_interval = None
-        if self._cadence.events_max_per_second > 0:
-            events_interval = 1.0 / float(self._cadence.events_max_per_second)
-        self._events_interval = events_interval
+        # Note: events channel does NOT use cadence controller.
+        # Rate limiting for events is handled by EventCollector's token bucket algorithm.
+        # See EventCollector.harvest() and RateLimitConfig in events.py.
         self._include_fields = _normalise_fields(config.include_fields)
         self._exclude_fields = _normalise_fields(config.exclude_fields)
         self._subscription_objects: dict[str, Optional[list[str]]] = (
@@ -411,11 +410,24 @@ class TelemetryPublisher:
 
         for spec in self._poll_specs:
             manifest = build_subscription_manifest(spec.fields, ())
-            filtered = {
-                key: value
-                for key, value in manifest.items()
-                if key and key not in subscribed
-            }
+            
+            # Check if this spec should force polling even for subscribed objects
+            force_poll = getattr(spec, 'force_poll', False)
+            
+            if force_poll:
+                # Include all objects from the manifest, even if already subscribed
+                filtered = {
+                    key: value
+                    for key, value in manifest.items()
+                    if key
+                }
+            else:
+                # Filter out already-subscribed objects (original behavior)
+                filtered = {
+                    key: value
+                    for key, value in manifest.items()
+                    if key and key not in subscribed
+                }
 
             if not filtered:
                 continue
@@ -432,6 +444,15 @@ class TelemetryPublisher:
                     interval=interval,
                     initial_delay=initial_delay,
                 )
+            )
+
+        # Log poll groups for debugging
+        for group in groups:
+            LOGGER.info(
+                "Configured poll group '%s': interval=%.1fs, objects=%s",
+                group.name,
+                group.interval,
+                list(group.objects.keys()),
             )
 
         return groups
@@ -649,38 +670,45 @@ class TelemetryPublisher:
             if channel in self._force_full_channels_after_reset:
                 frame.forced = True
 
-            override = overrides.get(channel)
-            override_forced = override.forced if override else False
-            override_respect_cadence = override.respect_cadence if override else False
-            force_due_to_reset = channel in self._force_full_channels_after_reset
+            # Events channel bypasses cadence controller entirely.
+            # It is purely event-driven with rate limiting handled by EventCollector.
+            if channel == "events":
+                # Always publish events immediately when present
+                pass
+            else:
+                # Status and sensors channels use cadence controller
+                override = overrides.get(channel)
+                override_forced = override.forced if override else False
+                override_respect_cadence = override.respect_cadence if override else False
+                force_due_to_reset = channel in self._force_full_channels_after_reset
 
-            decision = self._cadence_controller.evaluate(
-                channel,
-                frame.payload,
-                explicit_force=frame.forced or override_forced or force_due_to_reset,
-                respect_cadence=override_respect_cadence,
-                allow_force_publish=(channel == "sensors"),
-            )
+                decision = self._cadence_controller.evaluate(
+                    channel,
+                    frame.payload,
+                    explicit_force=frame.forced or override_forced or force_due_to_reset,
+                    respect_cadence=override_respect_cadence,
+                    allow_force_publish=(channel == "sensors"),
+                )
 
-            if not decision.should_publish:
-                if decision.delay_seconds is not None:
-                    deferred = True
-                    if min_delay is None or decision.delay_seconds < min_delay:
-                        min_delay = decision.delay_seconds
-                    pending_entry = self._pending_channels.get(channel)
-                    if pending_entry is None:
-                        pending_entry = _PendingChannel()
-                        self._pending_channels[channel] = pending_entry
-                    enforce_cadence = decision.reason in {"cadence", "forced-rate"}
-                    pending_entry.merge(
-                        forced=enforce_cadence,
-                        respect_cadence=enforce_cadence,
-                    )
-                else:
-                    self._pending_channels.pop(channel, None)
-                continue
+                if not decision.should_publish:
+                    if decision.delay_seconds is not None:
+                        deferred = True
+                        if min_delay is None or decision.delay_seconds < min_delay:
+                            min_delay = decision.delay_seconds
+                        pending_entry = self._pending_channels.get(channel)
+                        if pending_entry is None:
+                            pending_entry = _PendingChannel()
+                            self._pending_channels[channel] = pending_entry
+                        enforce_cadence = decision.reason in {"cadence", "forced-rate"}
+                        pending_entry.merge(
+                            forced=enforce_cadence,
+                            respect_cadence=enforce_cadence,
+                        )
+                    else:
+                        self._pending_channels.pop(channel, None)
+                    continue
 
-            self._pending_channels.pop(channel, None)
+                self._pending_channels.pop(channel, None)
 
             envelope = self._wrap_envelope(
                 channel,
@@ -900,9 +928,6 @@ class TelemetryPublisher:
             if self._sensors_force_publish_seconds and self._sensors_force_publish_seconds > 0
             else None
         )
-        events_interval = (
-            self._events_interval if self._events_interval and self._events_interval > 0 else None
-        )
 
         if "status" in self._channel_topics:
             self._cadence_controller.configure(
@@ -920,13 +945,8 @@ class TelemetryPublisher:
                 force_publish_seconds=sensors_force_publish,
             )
 
-        if "events" in self._channel_topics:
-            self._cadence_controller.configure(
-                "events",
-                interval=events_interval,
-                forced_interval=None,
-                force_publish_seconds=None,
-            )
+        # Note: events channel is NOT configured in cadence controller.
+        # It is purely event-driven with rate limiting handled by EventCollector.
 
     def record_command_state(
         self,

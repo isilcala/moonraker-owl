@@ -154,6 +154,20 @@ class TelemetryOrchestrator:
             forced.add("sensors")
         session = self.session_tracker.compute(self.store)
 
+        # Log job progress at INFO level for debugging print lifecycle
+        if session.has_active_job:
+            progress_int = int(session.progress_percent) if session.progress_percent is not None else 0
+            layer_info = ""
+            if session.layer_current is not None and session.layer_total is not None:
+                layer_info = f" layer={session.layer_current}/{session.layer_total}"
+            LOGGER.info(
+                "JOB_UPDATE: progress=%d%%%s state=%s session=%s",
+                progress_int,
+                layer_info,
+                session.raw_state,
+                session.session_id[:8] if session.session_id else "none",
+            )
+
         status_payload = self.status_selector.build(
             self.store,
             session,
@@ -206,7 +220,9 @@ class TelemetryOrchestrator:
                 forced="events" in forced,
             )
 
-        # Harvest alert events and add to events channel if any
+        # Harvest alert events (P0/P1 lifecycle) and add to events channel.
+        # Events channel bypasses cadence controller entirely - it is purely
+        # event-driven with rate limiting handled by EventCollector's token bucket.
         alert_events = self.events.harvest()
         if alert_events:
             alert_payload = self._build_alert_events_payload(alert_events)
@@ -222,7 +238,7 @@ class TelemetryOrchestrator:
                     payload=alert_payload,
                     session_id=session.session_id,
                     observed_at=observed_at,
-                    forced="events" in forced,
+                    forced=False,  # No need to force - events bypass cadence entirely
                 )
 
         return frames
@@ -311,7 +327,7 @@ class TelemetryOrchestrator:
             self._last_filename = filename
 
         LOGGER.info(
-            "Print state changed: %s -> %s (file: %s)",
+            "STATE_CHANGE: %s -> %s (file: %s)",
             old_state,
             current_state,
             self._last_filename,

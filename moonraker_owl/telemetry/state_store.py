@@ -113,13 +113,22 @@ class MoonrakerStateStore:
         """Get the current print state from print_stats section.
 
         Returns:
-            The current print state (e.g., 'standby', 'printing', 'paused',
-            'complete', 'cancelled', 'error') or None if not available.
+            The current print state normalized to lowercase
+            (e.g., 'standby', 'printing', 'paused', 'complete', 'cancelled', 'error')
+            or None if not available.
+            
+        Note:
+            Klipper officially uses lowercase states, but we normalize defensively
+            to ensure consistent matching with PRINT_STATE_TRANSITIONS lookups.
         """
         print_stats = self.get("print_stats")
         if print_stats is None:
             return None
-        return print_stats.data.get("state")
+        raw_state = print_stats.data.get("state")
+        if raw_state is None:
+            return None
+        # Normalize to lowercase for consistent PRINT_STATE_TRANSITIONS matching
+        return raw_state.strip().lower() if isinstance(raw_state, str) else None
 
     @property
     def print_filename(self) -> Optional[str]:
@@ -174,6 +183,15 @@ class MoonrakerStateStore:
     ) -> None:
         if method == "notify_status_update":
             for entry in _iter_dicts(params):
+                # Log print_stats updates at INFO level for debugging
+                if isinstance(entry, Mapping) and "print_stats" in entry:
+                    ps = entry["print_stats"]
+                    if isinstance(ps, Mapping) and "state" in ps:
+                        LOGGER.info(
+                            "WS_NOTIFY: print_stats.state=%s (raw=%r)",
+                            ps.get("state"),
+                            {k: v for k, v in ps.items() if k != "info"},
+                        )
                 self._ingest_status(entry, observed_at)
             return
 
