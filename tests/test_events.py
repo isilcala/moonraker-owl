@@ -21,9 +21,9 @@ from moonraker_owl.telemetry.orchestrator import TelemetryOrchestrator
 
 
 class FakeClock:
-    """Test clock that returns a fixed or incrementing time."""
+    """Test clock that returns a fixed or manually advanced time."""
 
-    def __init__(self, start: datetime, step: timedelta = timedelta(seconds=1)) -> None:
+    def __init__(self, start: datetime, step: timedelta = timedelta(seconds=0)) -> None:
         self._current = start
         self._step = step
 
@@ -31,6 +31,14 @@ class FakeClock:
         value = self._current
         self._current += self._step
         return value
+
+    def advance(self, seconds: float) -> None:
+        """Manually advance the clock by the specified seconds."""
+        self._current += timedelta(seconds=seconds)
+
+    def set(self, time: datetime) -> None:
+        """Set the clock to a specific time."""
+        self._current = time
 
 
 # =============================================================================
@@ -429,6 +437,70 @@ class TestOrchestratorEventDetection:
         assert len(events) == 1
         assert events[0].event_name == EventName.KLIPPY_DISCONNECTED
         assert events[0].data["previousState"] == "ready"
+
+    def test_detect_klippy_ready_from_error(self) -> None:
+        """Klippy error -> ready generates klippyReady event."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set error state first
+        orchestrator.ingest(
+            {"result": {"status": {"webhooks": {"state": "error"}}}}
+        )
+        orchestrator.events.harvest()  # Clear error event
+
+        # Transition to ready (recovery)
+        orchestrator.ingest(
+            {"result": {"status": {"webhooks": {"state": "ready"}}}}
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.KLIPPY_READY
+        assert events[0].data["previousState"] == "error"
+        assert events[0].message == "Klippy ready"
+
+    def test_detect_klippy_ready_from_shutdown(self) -> None:
+        """Klippy shutdown -> ready generates klippyReady event."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set shutdown state first
+        orchestrator.ingest(
+            {"result": {"status": {"webhooks": {"state": "shutdown"}}}}
+        )
+        orchestrator.events.harvest()  # Clear shutdown event
+
+        # Transition to ready (recovery)
+        orchestrator.ingest(
+            {"result": {"status": {"webhooks": {"state": "ready"}}}}
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.KLIPPY_READY
+        assert events[0].data["previousState"] == "shutdown"
+
+    def test_detect_klippy_ready_from_startup(self) -> None:
+        """Klippy startup -> ready generates klippyReady event."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set startup state first
+        orchestrator.ingest(
+            {"result": {"status": {"webhooks": {"state": "startup"}}}}
+        )
+        orchestrator.events.harvest()  # Clear any initial events
+
+        # Transition to ready
+        orchestrator.ingest(
+            {"result": {"status": {"webhooks": {"state": "ready"}}}}
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.KLIPPY_READY
+        assert events[0].data["previousState"] == "startup"
 
     def test_detect_print_started(self) -> None:
         """Print standby -> printing generates printStarted event."""

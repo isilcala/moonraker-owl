@@ -263,6 +263,10 @@ class TelemetryOrchestrator:
         - ready -> error: klippyError event
         - ready -> shutdown: klippyShutdown event
         - ready -> startup/None: klippyDisconnected event
+        - error/shutdown/startup -> ready: klippyReady event
+
+        Includes debouncing to prevent rapid duplicate events during
+        Moonraker's state oscillations (e.g., shutdown -> error -> shutdown).
         """
         klippy_state = self.store.klippy_state
         state_message = self.store.klippy_state_message or ""
@@ -301,6 +305,13 @@ class TelemetryOrchestrator:
             event = Event(
                 event_name=EventName.KLIPPY_DISCONNECTED,
                 message="Klippy disconnected",
+                data={"previousState": old_state} if old_state else {},
+            )
+        elif klippy_state == "ready" and old_state in ("error", "shutdown", "startup"):
+            # Klippy has recovered from an error/shutdown/startup state
+            event = Event(
+                event_name=EventName.KLIPPY_READY,
+                message="Klippy ready",
                 data={"previousState": old_state} if old_state else {},
             )
 

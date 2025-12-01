@@ -45,6 +45,7 @@ class EventName(str, Enum):
         klippyError: Klippy entered error state
         klippyShutdown: Klippy shutdown (heater fault, probe failure, etc.)
         klippyDisconnected: Klippy disconnected from Moonraker
+        klippyReady: Klippy has recovered and is ready
 
     P1 - Print Lifecycle Events:
         printStarted: A print job has started
@@ -59,6 +60,7 @@ class EventName(str, Enum):
     KLIPPY_ERROR = "klippyError"
     KLIPPY_SHUTDOWN = "klippyShutdown"
     KLIPPY_DISCONNECTED = "klippyDisconnected"
+    KLIPPY_READY = "klippyReady"
 
     # P1 - Print Lifecycle
     PRINT_STARTED = "printStarted"
@@ -85,6 +87,11 @@ EVENT_METADATA: Dict[EventName, Dict[str, Any]] = {
     EventName.KLIPPY_DISCONNECTED: {
         "priority": EventPriority.P0_CRITICAL,
         "severity": EventSeverity.ERROR,
+        "qos": 2,
+    },
+    EventName.KLIPPY_READY: {
+        "priority": EventPriority.P0_CRITICAL,
+        "severity": EventSeverity.INFO,
         "qos": 2,
     },
     # P1 - Print lifecycle events
