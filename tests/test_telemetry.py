@@ -608,11 +608,14 @@ async def test_publisher_emits_status_full_update() -> None:
     await asyncio.sleep(0.05)
     mqtt.messages.clear()
 
+    # Update both display_status and virtual_sdcard to trigger progress change
+    # (display_status.progress is the primary source for progress calculation)
     await moonraker.emit(
         {
             "method": "notify_status_update",
             "params": [
                 {
+                    "display_status": {"progress": 0.55},
                     "virtual_sdcard": {"progress": 0.55},
                 }
             ],

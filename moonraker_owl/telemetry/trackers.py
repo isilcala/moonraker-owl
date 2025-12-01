@@ -392,36 +392,53 @@ def _extract_progress_percent(
 ) -> Optional[float]:
     """Extract progress percentage from Moonraker state.
 
-    Simplified approach aligned with Mainsail's getPrintPercentByFilepositionAbsolute:
-    - Primary: display_status.progress (slicer-reported)
-    - Fallback: virtual_sdcard.progress (file position)
+    Strategy aligned with Mainsail's 'slicer' mode:
+    - Primary: display_status.progress (slicer-reported, knows actual print progress)
+    - Fallback: virtual_sdcard.progress (file position, less accurate during preheat)
 
-    Removed the complex gcode_start_byte/gcode_end_byte calculation as it
-    requires metadata that may not always be available and adds complexity.
+    Using display_status.progress as primary because:
+    - The slicer tracks actual extrusion progress, not just file reading
+    - During preheat, virtual_sdcard may advance while actual printing hasn't started
+    - Mainsail also prioritizes display_status when using 'slicer' mode
     """
     display_progress = _as_float(display_status.get("progress"))
     sd_progress = _as_float(virtual_sdcard.get("progress"))
 
-    # Prefer display_status (slicer-reported) when available
-    if display_progress is not None and sd_progress is not None:
-        chosen = max(display_progress, sd_progress)
-        return max(0.0, min(chosen * 100.0, 100.0))
-
+    # Prefer display_status (slicer-reported) - it knows actual print progress
     if display_progress is not None:
         return max(0.0, min(display_progress * 100.0, 100.0))
 
+    # Fallback to virtual_sdcard when display_status unavailable
     if sd_progress is not None:
         return max(0.0, min(sd_progress * 100.0, 100.0))
 
     return None
 
 
-def _extract_layers(section: Mapping[str, Any]) -> tuple[Optional[int], Optional[int]]:
-    layers = section.get("layer") or section.get("layers")
+def _extract_layers(print_stats: Mapping[str, Any]) -> tuple[Optional[int], Optional[int]]:
+    """Extract layer information from print_stats.
+
+    Moonraker stores layer info in print_stats.info as:
+    - current_layer: Current layer number (1-based)
+    - total_layer: Total number of layers
+
+    Falls back to legacy layer/layers structure for compatibility.
+    """
+    # Primary source: print_stats.info (Klipper native)
+    info = print_stats.get("info")
+    if isinstance(info, Mapping):
+        current = _as_int(info.get("current_layer"))
+        total = _as_int(info.get("total_layer"))
+        if current is not None or total is not None:
+            return current, total
+
+    # Fallback: legacy layer/layers structure
+    layers = print_stats.get("layer") or print_stats.get("layers")
     if isinstance(layers, Mapping):
         current = _as_int(layers.get("current"))
         total = _as_int(layers.get("total"))
         return current, total
+
     return None, None
 
 
