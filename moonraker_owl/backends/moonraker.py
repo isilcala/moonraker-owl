@@ -164,11 +164,17 @@ class MoonrakerBackend(PrinterBackend):
         Returns:
             CommandProcessor instance.
         """
+        from ..adapters.s3_upload import S3UploadClient
+
+        # Create S3 upload client for thumbnail/media uploads
+        s3_client = S3UploadClient()
+
         return CommandProcessor(
             config,
             self._client,
             mqtt_client,
             telemetry=telemetry,
+            s3_upload_client=s3_client,
         )
 
     # -------------------------------------------------------------------------

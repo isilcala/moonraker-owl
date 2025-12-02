@@ -796,6 +796,14 @@ class TelemetryPublisher:
         """
         return (self._current_mode, self._sensors_interval, self._watch_window_expires)
 
+    def get_current_print_filename(self) -> Optional[str]:
+        """Return the current print filename from the orchestrator's state store.
+
+        Returns:
+            The filename of the current/last print, or None if not available.
+        """
+        return self._orchestrator.store.print_filename
+
     def extend_watch_window(
         self,
         *,

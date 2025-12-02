@@ -8,12 +8,15 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Deque, Dict, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Deque, Dict, Optional, Protocol
 from urllib.parse import quote
 
 from .printer_command_names import PrinterCommandNames
 from .config import OwlConfig
 from .telemetry import TelemetryPublisher
+
+if TYPE_CHECKING:
+    from .adapters.s3_upload import S3UploadClient
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +62,34 @@ class MoonrakerCommandClient(Protocol):
 
         Returns:
             Dictionary with 'available_heaters' and 'available_sensors' lists.
+        """
+        ...
+
+    async def fetch_thumbnail(
+        self, relative_path: str, timeout: float = 30.0
+    ) -> Optional[bytes]:
+        """Fetch thumbnail image data from Moonraker file server.
+
+        Args:
+            relative_path: Relative path to the thumbnail.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            Raw image bytes if successful, None if not found.
+        """
+        ...
+
+    async def fetch_gcode_metadata(
+        self, filename: str, timeout: float = 10.0
+    ) -> Optional[dict]:
+        """Fetch GCode file metadata including thumbnail paths.
+
+        Args:
+            filename: The GCode filename.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            Metadata dictionary or None if not found.
         """
         ...
 
@@ -152,11 +183,13 @@ class CommandProcessor:
         moonraker: MoonrakerCommandClient,
         mqtt: MQTTCommandsClient,
         telemetry: Optional[TelemetryPublisher] = None,
+        s3_upload_client: Optional["S3UploadClient"] = None,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
         self._mqtt = mqtt
         self._telemetry = telemetry
+        self._s3_upload_client = s3_upload_client
 
         (
             self._tenant_id,
@@ -198,6 +231,13 @@ class CommandProcessor:
         finally:
             self._mqtt.set_message_handler(None)
             self._handler_registered = False
+
+        # Clean up S3 upload client
+        if self._s3_upload_client is not None:
+            try:
+                await self._s3_upload_client.close()
+            except Exception:  # pragma: no cover - defensive cleanup
+                pass
 
     async def _handle_message(self, topic: str, payload: bytes) -> None:
         command_name = _extract_command_name(topic, self._device_id)
@@ -560,6 +600,7 @@ class CommandProcessor:
         - heater:turn-off: Turn off a specific heater
         - fan:set-speed: Set fan speed
         - pause/resume/cancel: Print control actions
+        - upload:thumbnail: Upload print job thumbnail to S3
         """
         # Telemetry cadence control
         if message.command == PrinterCommandNames.SENSORS_SET_RATE:
@@ -574,6 +615,10 @@ class CommandProcessor:
         # Fan control commands
         if message.command == PrinterCommandNames.FAN_SET_SPEED:
             return await self._execute_fan_set_speed(message)
+
+        # Media upload commands
+        if message.command == PrinterCommandNames.UPLOAD_THUMBNAIL:
+            return await self._execute_upload_thumbnail(message)
 
         # Print control commands (pause, resume, cancel)
         if message.command in PrinterCommandNames.PRINT_CONTROL_COMMANDS:
@@ -949,6 +994,204 @@ class CommandProcessor:
             "fan": fan_name,
             "speed": speed_value,
         }
+
+    # -------------------------------------------------------------------------
+    # Media Upload Commands
+    # -------------------------------------------------------------------------
+
+    async def _execute_upload_thumbnail(self, message: CommandMessage) -> Dict[str, Any]:
+        """Upload print job thumbnail to S3 storage.
+
+        This command is triggered by PrinterService when a print starts and
+        the agent reported hasThumbnail=true. The command includes a presigned
+        S3 URL for direct upload.
+
+        Parameters:
+            printJobId (str): UUID of the print job in PrinterService
+            presignedUrl (str): S3 presigned PUT URL for upload
+            s3Key (str): The S3 object key for tracking
+            expiresAt (str): ISO 8601 timestamp when the URL expires
+
+        Workflow:
+            1. Get current print filename from telemetry state
+            2. Fetch GCode metadata from Moonraker to find thumbnail paths
+            3. Select the largest thumbnail available
+            4. Fetch thumbnail image data from Moonraker
+            5. Upload to S3 using presigned URL
+        """
+        if self._s3_upload_client is None:
+            raise CommandProcessingError(
+                "S3 upload client not configured",
+                code="upload_unavailable",
+                command_id=message.command_id,
+            )
+
+        params = message.parameters or {}
+
+        # Validate required parameters
+        presigned_url = params.get("presignedUrl")
+        if not presigned_url or not isinstance(presigned_url, str):
+            raise CommandProcessingError(
+                "presignedUrl parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        s3_key = params.get("s3Key")
+        if not s3_key or not isinstance(s3_key, str):
+            raise CommandProcessingError(
+                "s3Key parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        print_job_id = params.get("printJobId")
+        if not print_job_id:
+            raise CommandProcessingError(
+                "printJobId parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        # Check URL expiry
+        expires_at_str = params.get("expiresAt")
+        if expires_at_str:
+            expires_at = _parse_iso8601(expires_at_str)
+            if expires_at and expires_at < datetime.now(timezone.utc):
+                raise CommandProcessingError(
+                    "Presigned URL has expired",
+                    code="url_expired",
+                    command_id=message.command_id,
+                )
+
+        # Get current print filename from telemetry
+        filename = self._get_current_print_filename()
+        if not filename:
+            raise CommandProcessingError(
+                "No active print file - cannot determine thumbnail",
+                code="no_active_print",
+                command_id=message.command_id,
+            )
+
+        LOGGER.debug(
+            "Uploading thumbnail for job %s, file: %s",
+            print_job_id,
+            filename,
+        )
+
+        # Fetch GCode metadata to get thumbnail paths
+        try:
+            metadata = await self._moonraker.fetch_gcode_metadata(filename)
+        except asyncio.TimeoutError:
+            raise CommandProcessingError(
+                "Timeout fetching gcode metadata",
+                code="moonraker_timeout",
+                command_id=message.command_id,
+            )
+
+        if not metadata:
+            raise CommandProcessingError(
+                f"No metadata found for file: {filename}",
+                code="no_metadata",
+                command_id=message.command_id,
+            )
+
+        # Find the best thumbnail (largest resolution)
+        thumbnails = metadata.get("thumbnails", [])
+        if not thumbnails:
+            raise CommandProcessingError(
+                f"No thumbnails in gcode metadata for: {filename}",
+                code="no_thumbnails",
+                command_id=message.command_id,
+            )
+
+        # Sort by resolution (width * height) descending, pick largest
+        thumbnails_sorted = sorted(
+            thumbnails,
+            key=lambda t: t.get("width", 0) * t.get("height", 0),
+            reverse=True,
+        )
+        best_thumb = thumbnails_sorted[0]
+        thumb_path = best_thumb.get("relative_path")
+
+        if not thumb_path:
+            raise CommandProcessingError(
+                "Thumbnail entry missing relative_path",
+                code="invalid_thumbnail",
+                command_id=message.command_id,
+            )
+
+        LOGGER.debug(
+            "Selected thumbnail: %s (%dx%d)",
+            thumb_path,
+            best_thumb.get("width", 0),
+            best_thumb.get("height", 0),
+        )
+
+        # Fetch thumbnail image data from Moonraker
+        try:
+            thumb_data = await self._moonraker.fetch_thumbnail(thumb_path)
+        except asyncio.TimeoutError:
+            raise CommandProcessingError(
+                "Timeout fetching thumbnail image",
+                code="moonraker_timeout",
+                command_id=message.command_id,
+            )
+
+        if not thumb_data:
+            raise CommandProcessingError(
+                f"Thumbnail not found at path: {thumb_path}",
+                code="thumbnail_not_found",
+                command_id=message.command_id,
+            )
+
+        # Detect content type from filename
+        from .adapters.s3_upload import detect_content_type
+        content_type = detect_content_type(thumb_path)
+
+        # Upload to S3
+        result = await self._s3_upload_client.upload(
+            presigned_url=presigned_url,
+            data=thumb_data,
+            s3_key=s3_key,
+            content_type=content_type,
+        )
+
+        if not result.success:
+            raise CommandProcessingError(
+                f"S3 upload failed: {result.error_message}",
+                code=result.error_code or "upload_failed",
+                command_id=message.command_id,
+            )
+
+        LOGGER.info(
+            "Successfully uploaded thumbnail for job %s (%d bytes)",
+            print_job_id,
+            result.file_size_bytes or 0,
+        )
+
+        return {
+            "printJobId": print_job_id,
+            "s3Key": s3_key,
+            "fileSizeBytes": result.file_size_bytes,
+            "thumbnailPath": thumb_path,
+            "thumbnailSize": f"{best_thumb.get('width', 0)}x{best_thumb.get('height', 0)}",
+        }
+
+    def _get_current_print_filename(self) -> Optional[str]:
+        """Get the current print filename from telemetry state.
+
+        Returns the filename of the active or last print job.
+        """
+        if self._telemetry is None:
+            return None
+
+        # Access the orchestrator's state store via telemetry publisher
+        try:
+            return self._telemetry.get_current_print_filename()
+        except AttributeError:
+            # Telemetry publisher doesn't have this method yet
+            return None
 
     # -------------------------------------------------------------------------
     # Heater/Fan Discovery Helpers

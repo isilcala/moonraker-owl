@@ -246,6 +246,119 @@ class MoonrakerClient(PrinterAdapter):
             )
             raise
 
+    async def fetch_thumbnail(
+        self, relative_path: str, timeout: float = 30.0
+    ) -> Optional[bytes]:
+        """Fetch thumbnail image data from Moonraker file server.
+
+        Moonraker serves thumbnails via /server/files/{path} where the path
+        is the relative path from gcode_metadata.thumbnails[].relative_path.
+
+        Args:
+            relative_path: Relative path to the thumbnail (e.g., ".thumbs/model-32x32.png")
+            timeout: Request timeout in seconds (default: 30.0)
+
+        Returns:
+            Raw image bytes if successful, None if thumbnail not found.
+
+        Raises:
+            asyncio.TimeoutError: If request exceeds timeout.
+            RuntimeError: If fetch fails with non-404 error.
+        """
+        session = await self._ensure_session()
+
+        # URL encode the path but preserve slashes
+        from urllib.parse import quote
+        encoded_path = quote(relative_path, safe="/")
+        url = f"{self._base_url}/server/files/gcodes/{encoded_path}"
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.get(url, headers=self._headers) as response:
+                    if response.status == 404:
+                        LOGGER.debug("Thumbnail not found: %s", relative_path)
+                        return None
+                    if response.status >= 400:
+                        detail = await response.text()
+                        raise RuntimeError(
+                            f"Thumbnail fetch failed with status {response.status}: {detail.strip()}"
+                        )
+                    return await response.read()
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Thumbnail fetch timed out after %.1fs (path=%s)",
+                timeout,
+                relative_path,
+            )
+            raise
+
+    async def fetch_gcode_metadata(
+        self, filename: str, timeout: float = 10.0
+    ) -> Optional[dict]:
+        """Fetch GCode file metadata including thumbnail paths.
+
+        Args:
+            filename: The GCode filename (e.g., "model.gcode")
+            timeout: Request timeout in seconds (default: 10.0)
+
+        Returns:
+            Metadata dictionary containing thumbnails info, or None if not found.
+            Example: {
+                "filename": "model.gcode",
+                "thumbnails": [
+                    {"relative_path": ".thumbs/model-32x32.png", "width": 32, "height": 32},
+                    {"relative_path": ".thumbs/model-300x300.png", "width": 300, "height": 300}
+                ],
+                ...
+            }
+
+        Raises:
+            asyncio.TimeoutError: If request exceeds timeout.
+        """
+        session = await self._ensure_session()
+
+        from urllib.parse import quote
+        encoded_filename = quote(filename, safe="")
+        url = f"{self._base_url}/server/files/metadata?filename={encoded_filename}"
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.get(url, headers=self._headers) as response:
+                    if response.status == 404:
+                        LOGGER.debug("GCode metadata not found: %s", filename)
+                        return None
+                    if response.status >= 400:
+                        detail = await response.text()
+                        LOGGER.warning(
+                            "Failed to fetch gcode metadata for %s: %s",
+                            filename,
+                            detail[:200],
+                        )
+                        return None
+                    data = await response.json()
+                    return data.get("result")
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "GCode metadata fetch timed out after %.1fs (file=%s)",
+                timeout,
+                filename,
+            )
+            raise
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to parse gcode metadata for %s: %s",
+                filename,
+                exc,
+            )
+            return None
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "GCode execution timed out after %.1fs (script=%r)",
+                timeout,
+                script[:50] + "..." if len(script) > 50 else script,
+            )
+            raise
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

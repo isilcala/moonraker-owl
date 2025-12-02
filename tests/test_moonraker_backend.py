@@ -332,14 +332,19 @@ class TestFactoryMethods:
 
         with patch(
             "moonraker_owl.backends.moonraker.CommandProcessor"
-        ) as MockProcessor:
+        ) as MockProcessor, patch(
+            "moonraker_owl.adapters.s3_upload.S3UploadClient"
+        ) as MockS3Client:
+            mock_s3_instance = MockS3Client.return_value
             result = backend.create_command_processor(
                 mock_owl_config, mock_mqtt, mock_telemetry
             )
 
+            MockS3Client.assert_called_once()
             MockProcessor.assert_called_once_with(
                 mock_owl_config,
                 backend._client,
                 mock_mqtt,
                 telemetry=mock_telemetry,
+                s3_upload_client=mock_s3_instance,
             )
