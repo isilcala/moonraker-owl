@@ -10,10 +10,11 @@ from typing import Iterable, List, Optional
 from . import constants
 
 DEFAULT_TELEMETRY_FIELDS = [
-    "print_stats.state",
-    "print_stats.message",
-    "print_stats.filename",
-    "print_stats.info",
+    # Subscribe to entire print_stats object (null) to ensure we receive all state changes.
+    # Previously we subscribed to specific fields (state, message, filename, info) but
+    # Moonraker's optimization may omit unchanged fields. Using null subscription ensures
+    # we get all updates including state transitions.
+    "print_stats",
     "webhooks.state",
     "webhooks.state_message",
     "gcode_move.speed_factor",

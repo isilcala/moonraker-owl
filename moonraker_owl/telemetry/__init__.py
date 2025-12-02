@@ -386,7 +386,55 @@ class TelemetryPublisher:
         await self._enqueue(snapshot)
 
     async def _handle_moonraker_update(self, payload: Dict[str, Any]) -> None:
+        # Query-on-notification for print_stats (ADR-0003 pattern).
+        # Moonraker's notify_status_update omits print_stats.state changes,
+        # but notify_history_changed reliably indicates job status transitions.
+        # When a job starts (action:added), query print_stats to get full state.
+        #
+        # TEMPORARILY DISABLED: Testing if subscribing to entire print_stats object
+        # (instead of specific fields) resolves the state detection issue.
+        # If this works, _query_print_stats_on_job_start becomes a safety net only.
+        # await self._query_print_stats_on_job_start(payload)
         await self._enqueue(payload)
+
+    async def _query_print_stats_on_job_start(self, payload: Dict[str, Any]) -> None:
+        """Query print_stats when job starts to ensure state is captured.
+
+        Moonraker optimizes WebSocket notifications by omitting unchanged fields.
+        When a print starts, notify_history_changed arrives with action:added,
+        but print_stats.state may not be pushed via notify_status_update.
+
+        This implements the ADR-0003 query-on-notification pattern for print_stats,
+        similar to how heater targets are handled.
+        """
+        method = payload.get("method")
+        if method != "notify_history_changed":
+            return
+
+        params = payload.get("params")
+        if not isinstance(params, list) or not params:
+            return
+
+        entry = params[0] if isinstance(params[0], dict) else {}
+        action = entry.get("action")
+
+        # Only query on job start (action:added indicates new print)
+        if action != "added":
+            return
+
+        LOGGER.debug("Job started (action:added), querying print_stats for full state")
+
+        try:
+            # Query print_stats to get complete state including 'state' field
+            snapshot = await self._moonraker.fetch_printer_state(
+                {"print_stats": None}  # None = all fields
+            )
+            # Enqueue the queried state to update store with correct print_stats.state
+            await self._enqueue(snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.debug("Failed to query print_stats on job start: %s", exc)
 
     async def _enqueue(self, payload: Dict[str, Any]) -> None:
         if self._stop_event.is_set():
@@ -750,14 +798,17 @@ class TelemetryPublisher:
             self._orchestrator.sensors_selector.reset()
 
     async def _enrich_print_events(self, events_payload: Dict[str, Any]) -> None:
-        """Enrich printStarted events with hasThumbnail field.
+        """Enrich printStarted events with thumbnailBase64 field.
 
-        This method fetches GCode metadata to determine if a thumbnail exists.
-        Uses a short timeout to avoid blocking the telemetry pipeline.
+        This method fetches GCode metadata to find the thumbnail, fetches
+        the thumbnail image, and encodes it as Base64. The server will
+        upload to S3 and return a permanent URL.
 
         Args:
             events_payload: The events channel payload containing an "items" list.
         """
+        import base64
+
         # Events payload uses "items" key (see EventsSelector.build)
         events = events_payload.get("items")
         if not isinstance(events, list):
@@ -777,42 +828,84 @@ class TelemetryPublisher:
 
             filename = data.get("filename")
             if not filename:
-                data["hasThumbnail"] = False
                 continue
 
-            # Fetch metadata with timeout
+            # Fetch metadata with timeout to get thumbnail paths
             timeout_seconds = self._thumbnail_fetch_timeout_ms / 1000.0
             try:
                 metadata = await asyncio.wait_for(
                     self._moonraker.fetch_gcode_metadata(filename),
                     timeout=timeout_seconds,
                 )
-                has_thumbnail = False
-                if metadata:
-                    thumbnails = metadata.get("thumbnails", [])
-                    has_thumbnail = len(thumbnails) > 0
+                if not metadata:
+                    LOGGER.debug(
+                        "No metadata found for %s, skipping thumbnail",
+                        filename,
+                    )
+                    continue
 
-                data["hasThumbnail"] = has_thumbnail
-                LOGGER.info(
-                    "Enriched printStarted event: filename=%s, hasThumbnail=%s, thumbnails_count=%d",
-                    filename,
-                    has_thumbnail,
-                    len(thumbnails) if metadata else 0,
+                thumbnails = metadata.get("thumbnails", [])
+                if not thumbnails:
+                    LOGGER.debug(
+                        "No thumbnails in metadata for %s",
+                        filename,
+                    )
+                    continue
+
+                # Select the largest thumbnail (best quality)
+                thumbnails_sorted = sorted(
+                    thumbnails,
+                    key=lambda t: t.get("width", 0) * t.get("height", 0),
+                    reverse=True,
                 )
+                best_thumb = thumbnails_sorted[0]
+                thumb_path = best_thumb.get("relative_path")
+
+                if not thumb_path:
+                    LOGGER.debug(
+                        "Thumbnail entry missing relative_path for %s",
+                        filename,
+                    )
+                    continue
+
+                # Fetch thumbnail image data from Moonraker
+                thumb_data = await asyncio.wait_for(
+                    self._moonraker.fetch_thumbnail(thumb_path, gcode_filename=filename),
+                    timeout=timeout_seconds,
+                )
+
+                if not thumb_data:
+                    LOGGER.debug(
+                        "Thumbnail not found at path %s for %s",
+                        thumb_path,
+                        filename,
+                    )
+                    continue
+
+                # Encode as Base64 and add to event data
+                thumbnail_base64 = base64.b64encode(thumb_data).decode("ascii")
+                data["thumbnailBase64"] = thumbnail_base64
+
+                LOGGER.info(
+                    "Enriched printStarted event with thumbnail: filename=%s, size=%dx%d, bytes=%d",
+                    filename,
+                    best_thumb.get("width", 0),
+                    best_thumb.get("height", 0),
+                    len(thumb_data),
+                )
+
             except asyncio.TimeoutError:
                 LOGGER.debug(
-                    "Timeout fetching metadata for %s (timeout=%dms), defaulting hasThumbnail=False",
+                    "Timeout fetching thumbnail for %s (timeout=%dms)",
                     filename,
                     self._thumbnail_fetch_timeout_ms,
                 )
-                data["hasThumbnail"] = False
             except Exception as exc:
                 LOGGER.warning(
-                    "Error fetching metadata for %s: %s, defaulting hasThumbnail=False",
+                    "Error fetching thumbnail for %s: %s",
                     filename,
                     exc,
                 )
-                data["hasThumbnail"] = False
 
     def _prepare_heartbeat_payload(self) -> Optional[Dict[str, Any]]:
         if not self._should_emit_status_heartbeat():
@@ -1050,6 +1143,17 @@ class TelemetryPublisher:
                      or None to remove the callback.
         """
         self._orchestrator.set_print_state_callback(callback)
+
+    def set_thumbnail_url(self, url: Optional[str]) -> None:
+        """Set the thumbnail URL for the current print job.
+
+        Called by CommandProcessor when job:set-thumbnail-url command is received.
+        The URL will be included in subsequent status telemetry payloads.
+
+        Args:
+            url: The CDN URL for the thumbnail, or None to clear.
+        """
+        self._orchestrator.set_thumbnail_url(url)
 
     def _wrap_envelope(
         self,

@@ -61,6 +61,14 @@ class MoonrakerStateStore:
         result = payload.get("result") if isinstance(payload, Mapping) else None
         if isinstance(result, Mapping):
             status = result.get("status")
+            # Debug: log HTTP responses that contain print_stats
+            if isinstance(status, Mapping) and "print_stats" in status:
+                ps = status.get("print_stats", {})
+                LOGGER.debug(
+                    "HTTP response contains print_stats: state=%s keys=%s",
+                    ps.get("state") if isinstance(ps, Mapping) else None,
+                    list(ps.keys()) if isinstance(ps, Mapping) else [],
+                )
             self._ingest_status(status, observed_at)
 
         method = payload.get("method") if isinstance(payload, Mapping) else None
@@ -183,14 +191,23 @@ class MoonrakerStateStore:
     ) -> None:
         if method == "notify_status_update":
             for entry in _iter_dicts(params):
-                # Log print_stats updates at INFO level for debugging
+                # Log print_stats updates for debugging state transitions
                 if isinstance(entry, Mapping) and "print_stats" in entry:
                     ps = entry["print_stats"]
-                    if isinstance(ps, Mapping) and "state" in ps:
-                        LOGGER.debug(
-                            "WS: print_stats.state=%s",
-                            ps.get("state"),
-                        )
+                    if isinstance(ps, Mapping):
+                        # Log state changes at DEBUG level
+                        if "state" in ps:
+                            LOGGER.debug(
+                                "WS: print_stats.state=%s",
+                                ps.get("state"),
+                            )
+                        # Also log if print_stats update doesn't contain state
+                        # (this helps diagnose why state transitions might be missed)
+                        else:
+                            LOGGER.debug(
+                                "WS: print_stats update (no state field): keys=%s",
+                                list(ps.keys()),
+                            )
                 self._ingest_status(entry, observed_at)
             return
 
@@ -270,6 +287,18 @@ class MoonrakerStateStore:
             base = copy.deepcopy(incoming)
 
         if name == "print_stats":
+            # Debug: log what we received vs what we're storing
+            if "state" not in incoming and existing is not None:
+                old_state = existing.data.get("state")
+                new_state = base.get("state")
+                if old_state != new_state:
+                    LOGGER.warning(
+                        "print_stats state changed without receiving state field! "
+                        "incoming_keys=%s existing_state=%s new_state=%s",
+                        list(incoming.keys()),
+                        old_state,
+                        new_state,
+                    )
             self._log_print_state_transition(existing, base)
 
         snapshot = SectionSnapshot(

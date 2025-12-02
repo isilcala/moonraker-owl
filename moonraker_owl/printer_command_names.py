@@ -6,7 +6,7 @@ These names appear as the final segment of command topics:
 Command naming conventions:
 - Print control: Simple names (pause, resume, cancel)
 - Device control: {entity}:{action} (heater:set-target, fan:set-speed)
-- Media operations: {action}:{target} (upload:thumbnail, capture:frame)
+- Job control: job:{action} (job:set-thumbnail-url)
 - Telemetry control: sensors:{action} (sensors:set-rate)
 
 All names must match the regex: ^[a-z0-9._:-]{2,64}$
@@ -64,11 +64,15 @@ class PrinterCommandNames:
     """Set fan speed."""
 
     # -------------------------------------------------------------------------
-    # Media Upload Commands
+    # Job Control Commands
     # -------------------------------------------------------------------------
 
-    UPLOAD_THUMBNAIL = "upload:thumbnail"
-    """Upload print job thumbnail to cloud storage."""
+    JOB_SET_THUMBNAIL_URL = "job:set-thumbnail-url"
+    """Set the thumbnail URL for the current print job (received from server after upload)."""
+
+    # -------------------------------------------------------------------------
+    # Media Capture Commands
+    # -------------------------------------------------------------------------
 
     CAPTURE_FRAME = "capture:frame"
     """Capture and upload camera frame for AI detection."""

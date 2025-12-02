@@ -44,6 +44,9 @@ class SessionInfo:
     timelapse_paused: bool
     message: Optional[str]
 
+    # Cloud-assigned thumbnail URL (set via job:set-thumbnail-url command)
+    thumbnail_url: Optional[str] = None
+
 
 class PrintSessionTracker:
     """Derives stable session identifiers and job metadata.
@@ -57,6 +60,22 @@ class PrintSessionTracker:
     def __init__(self) -> None:
         self._current_session_id: Optional[str] = None
         self._last_debug_signature: Optional[tuple[Any, ...]] = None
+        # Cloud-assigned thumbnail URL for the current print job
+        self._current_thumbnail_url: Optional[str] = None
+
+    def set_thumbnail_url(self, url: Optional[str]) -> None:
+        """Set the thumbnail URL for the current print job.
+
+        Called by CommandProcessor when job:set-thumbnail-url command is received.
+        The URL is cleared when the job ends (session_id becomes None).
+        """
+        self._current_thumbnail_url = url
+        if url:
+            LOGGER.debug("Thumbnail URL set: %s", url)
+
+    def clear_thumbnail_url(self) -> None:
+        """Clear the thumbnail URL (e.g., when job ends)."""
+        self._current_thumbnail_url = None
 
     def compute(self, store: MoonrakerStateStore) -> SessionInfo:
         print_stats = _coerce_section(store.get("print_stats"))
@@ -139,6 +158,12 @@ class PrintSessionTracker:
                 )
                 self._last_debug_signature = signature
 
+        # Clear thumbnail URL when job ends
+        thumbnail_url = self._current_thumbnail_url if has_active_job else None
+        if not has_active_job and self._current_thumbnail_url:
+            self._current_thumbnail_url = None
+            LOGGER.debug("Cleared thumbnail URL (job ended)")
+
         return SessionInfo(
             session_id=session_id,
             job_name=filename,
@@ -153,6 +178,7 @@ class PrintSessionTracker:
             layer_total=layer_total,
             timelapse_paused=timelapse_paused,
             message=message,
+            thumbnail_url=thumbnail_url,
         )
 
     def _resolve_session_id(

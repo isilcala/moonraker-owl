@@ -2391,3 +2391,113 @@ async def test_raw_payload_included_when_configured():
     assert any(sensor.get("channel") == "extruder" for sensor in sensors)
 
     await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_query_print_stats_on_job_start_adr0003():
+    """Verify that print_stats is queried when notify_history_changed with action:added arrives.
+
+    This tests the ADR-0003 query-on-notification pattern for print_stats.
+    Moonraker's WebSocket optimization may omit print_stats.state from notify_status_update,
+    so we must query via HTTP when a job starts to capture the full state.
+    """
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {"temperature": 200.0, "target": 200.0},
+                "print_stats": {"state": "printing", "filename": "test.gcode"},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=10.0)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    # Clear initial query log
+    moonraker.query_log.clear()
+
+    # Simulate notify_history_changed with action:added (job start)
+    job_start_notification = {
+        "method": "notify_history_changed",
+        "params": [
+            {
+                "action": "added",
+                "job": {
+                    "job_id": "000123",
+                    "filename": "test.gcode",
+                    "status": "in_progress",
+                },
+            }
+        ],
+    }
+
+    await moonraker.emit(job_start_notification)
+    await asyncio.sleep(0.1)
+
+    # Verify that print_stats was queried via HTTP (ADR-0003 pattern)
+    print_stats_queries = [
+        q for q in moonraker.query_log if q and "print_stats" in q
+    ]
+    assert print_stats_queries, (
+        "Expected HTTP query for print_stats on job start (ADR-0003 pattern). "
+        f"Query log: {moonraker.query_log}"
+    )
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_no_query_on_job_finished():
+    """Verify that print_stats is NOT queried for finished jobs (only for job start)."""
+    initial_state = {
+        "result": {
+            "status": {
+                "extruder": {"temperature": 200.0, "target": 0.0},
+                "print_stats": {"state": "standby", "filename": ""},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=10.0)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    # Clear initial query log
+    moonraker.query_log.clear()
+
+    # Simulate notify_history_changed with action:finished (job complete)
+    job_finished_notification = {
+        "method": "notify_history_changed",
+        "params": [
+            {
+                "action": "finished",
+                "job": {
+                    "job_id": "000123",
+                    "filename": "test.gcode",
+                    "status": "completed",
+                },
+            }
+        ],
+    }
+
+    await moonraker.emit(job_finished_notification)
+    await asyncio.sleep(0.1)
+
+    # Verify that print_stats was NOT queried (no need on job finish)
+    print_stats_queries = [
+        q for q in moonraker.query_log if q and "print_stats" in q
+    ]
+    assert not print_stats_queries, (
+        f"Did not expect HTTP query for print_stats on job finish. Query log: {moonraker.query_log}"
+    )
+
+    await publisher.stop()
