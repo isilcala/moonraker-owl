@@ -953,3 +953,306 @@ class TestOrchestratorEventDetection:
         # Should get a printStarted because _last_print_state was reset to None
         assert len(events) == 1
         assert events[0].event_name == EventName.PRINT_STARTED
+
+    def test_detect_print_completed_via_job_status(self) -> None:
+        """Print completion detected via job_status when print_stats.state lags.
+
+        This tests the scenario where:
+        1. A print is running (print_stats.state = 'printing')
+        2. notify_history_changed arrives with job.status = 'completed'
+        3. print_stats.state still shows 'printing' (timing lag)
+        4. We should generate printCompleted event based on job_status
+        """
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set printing state
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "test.gcode",
+                            "print_duration": 3600,
+                        }
+                    }
+                }
+            }
+        )
+        orchestrator.events.harvest()  # Clear printStarted event
+
+        # Job finishes via notify_history_changed, but print_stats.state still 'printing'
+        # This is the timing gap scenario
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_history_changed",
+                "params": [
+                    {
+                        "action": "finished",
+                        "job": {
+                            "job_id": "0001AB",
+                            "filename": "test.gcode",
+                            "status": "completed",
+                        },
+                    }
+                ],
+            }
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.PRINT_COMPLETED
+
+    def test_detect_print_completed_full_flow(self) -> None:
+        """Print completion detected via full flow with action:added then action:finished.
+        
+        This tests the exact production scenario where:
+        1. action:added arrives (no status field)
+        2. print_stats.state = 'printing' (job is running)
+        3. action:finished arrives with status = 'completed'
+        4. We should generate printCompleted event
+        """
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Step 1: Print starts - action:added with NO status field (like production)
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_history_changed",
+                "params": [
+                    {
+                        "action": "added",
+                        "job": {
+                            "job_id": "0001AB",
+                            "filename": "test.gcode",
+                            # Note: NO "status" field here!
+                        },
+                    }
+                ],
+            }
+        )
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "test.gcode",
+                            "print_duration": 100,
+                        }
+                    }
+                }
+            }
+        )
+        
+        initial_events = orchestrator.events.harvest()
+        # Should have printStarted event
+        assert len(initial_events) == 1
+        assert initial_events[0].event_name == EventName.PRINT_STARTED
+
+        # Step 2: Print finishes - action:finished with status = 'completed'
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_history_changed",
+                "params": [
+                    {
+                        "action": "finished",
+                        "job": {
+                            "job_id": "0001AB",
+                            "filename": "test.gcode",
+                            "status": "completed",
+                        },
+                    }
+                ],
+            }
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.PRINT_COMPLETED
+
+    def test_second_print_after_completion(self) -> None:
+        """Second print should work correctly after first print completes.
+        
+        BUG REPRODUCTION: After first print completes, history_event retains
+        status=completed. When second print starts with action:added (no status),
+        deep_merge keeps the old status=completed, causing:
+        1. job_status=completed instead of None during second print
+        2. No printCompleted event when second print finishes (status unchanged)
+        """
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # ========== FIRST PRINT ==========
+        # action:added for first print
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_history_changed",
+                "params": [
+                    {
+                        "action": "added",
+                        "job": {"job_id": "0001", "filename": "first.gcode"},
+                    }
+                ],
+            }
+        )
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "first.gcode",
+                        }
+                    }
+                }
+            }
+        )
+        orchestrator.events.harvest()  # Clear printStarted
+
+        # action:finished for first print
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_history_changed",
+                "params": [
+                    {
+                        "action": "finished",
+                        "job": {
+                            "job_id": "0001",
+                            "filename": "first.gcode",
+                            "status": "completed",
+                        },
+                    }
+                ],
+            }
+        )
+        first_complete_events = orchestrator.events.harvest()
+        assert len(first_complete_events) == 1
+        assert first_complete_events[0].event_name == EventName.PRINT_COMPLETED
+
+        # Simulate print_stats.state transitioning to complete after job finishes
+        # This happens when Moonraker confirms the print is done
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "complete",
+                            "filename": "first.gcode",
+                        }
+                    }
+                }
+            }
+        )
+        # No new events expected from state change alone
+        orchestrator.events.harvest()
+
+        # ========== SECOND PRINT ==========
+        # action:added for second print (NO status field!)
+        # The fix ensures status is cleared when action changes
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_history_changed",
+                "params": [
+                    {
+                        "action": "added",
+                        "job": {"job_id": "0002", "filename": "second.gcode"},
+                    }
+                ],
+            }
+        )
+        # print_stats.state transitions from complete -> printing
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "second.gcode",
+                        }
+                    }
+                }
+            }
+        )
+        second_start_events = orchestrator.events.harvest()
+        assert len(second_start_events) == 1
+        assert second_start_events[0].event_name == EventName.PRINT_STARTED
+
+        # action:finished for second print
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_history_changed",
+                "params": [
+                    {
+                        "action": "finished",
+                        "job": {
+                            "job_id": "0002",
+                            "filename": "second.gcode",
+                            "status": "completed",
+                        },
+                    }
+                ],
+            }
+        )
+
+        # This is where the bug manifests:
+        # If history_event retains status=completed from first print,
+        # job_status=completed throughout second print,
+        # so status:completed -> status:completed is no change, no event!
+        second_complete_events = orchestrator.events.harvest()
+        assert len(second_complete_events) == 1, (
+            "Should generate printCompleted for second print! "
+            "If this fails, history_event merge is keeping stale status."
+        )
+        assert second_complete_events[0].event_name == EventName.PRINT_COMPLETED
+
+    def test_detect_print_cancelled_via_job_status(self) -> None:
+        """Print cancellation detected via job_status when print_stats.state lags."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Set printing state
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "test.gcode",
+                        }
+                    }
+                }
+            }
+        )
+        orchestrator.events.harvest()
+
+        # Job cancelled via notify_history_changed
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_history_changed",
+                "params": [
+                    {
+                        "action": "finished",
+                        "job": {
+                            "job_id": "0001AB",
+                            "filename": "test.gcode",
+                            "status": "cancelled",
+                        },
+                    }
+                ],
+            }
+        )
+
+        events = orchestrator.events.harvest()
+        assert len(events) == 1
+        assert events[0].event_name == EventName.PRINT_CANCELLED
+

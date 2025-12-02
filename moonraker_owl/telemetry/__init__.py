@@ -756,9 +756,10 @@ class TelemetryPublisher:
         Uses a short timeout to avoid blocking the telemetry pipeline.
 
         Args:
-            events_payload: The events channel payload containing an "events" list.
+            events_payload: The events channel payload containing an "items" list.
         """
-        events = events_payload.get("events")
+        # Events payload uses "items" key (see EventsSelector.build)
+        events = events_payload.get("items")
         if not isinstance(events, list):
             return
 
@@ -792,10 +793,11 @@ class TelemetryPublisher:
                     has_thumbnail = len(thumbnails) > 0
 
                 data["hasThumbnail"] = has_thumbnail
-                LOGGER.debug(
-                    "Enriched printStarted event: filename=%s, hasThumbnail=%s",
+                LOGGER.info(
+                    "Enriched printStarted event: filename=%s, hasThumbnail=%s, thumbnails_count=%d",
                     filename,
                     has_thumbnail,
+                    len(thumbnails) if metadata else 0,
                 )
             except asyncio.TimeoutError:
                 LOGGER.debug(

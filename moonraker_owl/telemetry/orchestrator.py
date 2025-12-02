@@ -73,6 +73,8 @@ class TelemetryOrchestrator:
         self._last_klippy_state: Optional[str] = None
         self._last_print_state: Optional[str] = None
         self._last_filename: Optional[str] = None
+        self._last_session_id: Optional[str] = None  # Track session for new-job detection
+        self._last_job_status: Optional[str] = None  # Track job_status for terminal events
 
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
@@ -109,6 +111,8 @@ class TelemetryOrchestrator:
         self._last_klippy_state = None
         self._last_print_state = None
         self._last_filename = None
+        self._last_session_id = None
+        self._last_job_status = None
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
         # Note: _on_print_state_changed is preserved
@@ -334,21 +338,58 @@ class TelemetryOrchestrator:
     def _detect_print_state_change(self) -> None:
         """Detect print state transitions and record P1 events.
 
-        Monitors print_stats.state for transitions defined in
-        PRINT_STATE_TRANSITIONS mapping.
+        Detection sources (in order of priority):
+        1. job_status transitions to terminal states (completed/cancelled/error)
+           - This is the most reliable source since history_event is updated
+             even when print_stats.state doesn't transition properly
+        2. print_stats.state transitions defined in PRINT_STATE_TRANSITIONS
+
+        Aligned with Mainsail's approach: use print_stats.state for print lifecycle,
+        use history_event only for terminal status confirmation.
         """
         current_state = self.store.print_state
         filename = self.store.print_filename
 
+        # Track filename for events
+        if filename:
+            self._last_filename = filename
+
+        # Compute session info (includes job_status from history_event)
+        session = self.session_tracker.compute(self.store)
+        current_session_id = session.session_id
+        current_job_status = (
+            session.job_status.lower()
+            if isinstance(session.job_status, str)
+            else None
+        )
+
+        # === Priority 1: Detect terminal events via job_status ===
+        # This catches cases where print_stats.state stays 'printing' but
+        # the job has actually ended (history_event updates first)
+        terminal_event = self._detect_job_status_terminal(
+            current_job_status, session
+        )
+        if terminal_event:
+            self._last_job_status = current_job_status
+            self._last_print_state = current_state
+            if current_session_id:
+                self._last_session_id = current_session_id
+            return
+
+        # Update job_status tracking
+        self._last_job_status = current_job_status
+
+        # Update session tracking
+        if current_session_id:
+            self._last_session_id = current_session_id
+
+        # === Priority 2: Standard print_stats.state-based detection ===
+        # Aligned with Mainsail: only use print_stats.state transitions
         if current_state == self._last_print_state:
             return
 
         old_state = self._last_print_state
         self._last_print_state = current_state
-
-        # Track filename for events
-        if filename:
-            self._last_filename = filename
 
         LOGGER.debug(
             "Print state: %s -> %s (file=%s)",
@@ -369,9 +410,6 @@ class TelemetryOrchestrator:
         if not event_name:
             return
 
-        # Get current session info for context
-        session = self.session_tracker.compute(self.store)
-
         # Build event with context data
         event = Event(
             event_name=event_name,
@@ -381,6 +419,81 @@ class TelemetryOrchestrator:
         )
 
         self.events.record(event)
+
+    def _detect_job_status_terminal(
+        self,
+        current_job_status: Optional[str],
+        session: "SessionInfo",
+    ) -> bool:
+        """Detect terminal events via job_status transition.
+
+        This is the primary detection method for print completion since
+        history_event.status updates reliably even when print_stats.state
+        doesn't transition as expected.
+
+        Args:
+            current_job_status: Current job_status from history_event (lowercase)
+            session: Current session info
+
+        Returns:
+            True if a terminal event was detected and recorded
+        """
+        if not current_job_status:
+            return False
+
+        # Skip if job_status hasn't changed
+        if current_job_status == self._last_job_status:
+            return False
+
+        LOGGER.debug(
+            "job_status transition: %s -> %s",
+            self._last_job_status,
+            current_job_status,
+        )
+
+        # Map job_status to event names
+        job_status_events = {
+            "completed": EventName.PRINT_COMPLETED,
+            "complete": EventName.PRINT_COMPLETED,
+            "cancelled": EventName.PRINT_CANCELLED,
+            "canceled": EventName.PRINT_CANCELLED,
+            "error": EventName.PRINT_FAILED,
+        }
+
+        event_name = job_status_events.get(current_job_status)
+        if not event_name:
+            return False
+
+        # Only emit if we were previously in an active state or unknown (None)
+        # None -> terminal is valid (first completion after agent start or during active print)
+        active_states = {"in_progress", "printing", "paused"}
+        was_active = self._last_job_status in active_states
+
+        if not was_active and self._last_job_status is not None:
+            # If we weren't in an active state, skip (e.g., startup recovery)
+            LOGGER.debug(
+                "Skipping terminal event: was_active=%s, last_job_status=%s",
+                was_active,
+                self._last_job_status,
+            )
+            return False
+
+        LOGGER.info(
+            "Print terminal event detected via job_status: %s -> %s (file=%s)",
+            self._last_job_status,
+            current_job_status,
+            self._last_filename,
+        )
+
+        event = Event(
+            event_name=event_name,
+            message=self._build_print_event_message(event_name),
+            session_id=session.session_id,
+            data=self._build_print_event_data(event_name, session),
+        )
+        self.events.record(event)
+        return True
+
 
     def _build_print_event_message(self, event_name: EventName) -> str:
         """Build human-readable event message."""

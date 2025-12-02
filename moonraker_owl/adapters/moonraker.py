@@ -247,15 +247,27 @@ class MoonrakerClient(PrinterAdapter):
             raise
 
     async def fetch_thumbnail(
-        self, relative_path: str, timeout: float = 30.0
+        self,
+        relative_path: str,
+        gcode_filename: Optional[str] = None,
+        timeout: float = 30.0,
     ) -> Optional[bytes]:
         """Fetch thumbnail image data from Moonraker file server.
 
-        Moonraker serves thumbnails via /server/files/{path} where the path
-        is the relative path from gcode_metadata.thumbnails[].relative_path.
+        Moonraker serves thumbnails via /server/files/gcodes/{path} where the path
+        is the relative path from gcode_metadata.thumbnails[].relative_path,
+        prefixed with the gcode file's subdirectory if any.
+
+        For example:
+            - gcode_filename: "4N/model.gcode"
+            - relative_path: ".thumbs/model-300x300.png"
+            - full_path: "4N/.thumbs/model-300x300.png"
+
+        This matches Mainsail's thumbnail URL construction logic.
 
         Args:
             relative_path: Relative path to the thumbnail (e.g., ".thumbs/model-32x32.png")
+            gcode_filename: The gcode filename, used to extract subdirectory prefix.
             timeout: Request timeout in seconds (default: 30.0)
 
         Returns:
@@ -267,16 +279,25 @@ class MoonrakerClient(PrinterAdapter):
         """
         session = await self._ensure_session()
 
+        # Extract subdirectory from gcode filename if present (Mainsail pattern)
+        # For "4N/model.gcode", subdirectory is "4N"
+        # For "model.gcode", subdirectory is None
+        full_path = relative_path
+        if gcode_filename and "/" in gcode_filename:
+            subdirectory = gcode_filename.rsplit("/", 1)[0]
+            full_path = f"{subdirectory}/{relative_path}"
+
         # URL encode the path but preserve slashes
         from urllib.parse import quote
-        encoded_path = quote(relative_path, safe="/")
+
+        encoded_path = quote(full_path, safe="/")
         url = f"{self._base_url}/server/files/gcodes/{encoded_path}"
 
         try:
             async with asyncio.timeout(timeout):
                 async with session.get(url, headers=self._headers) as response:
                     if response.status == 404:
-                        LOGGER.debug("Thumbnail not found: %s", relative_path)
+                        LOGGER.debug("Thumbnail not found: %s (url=%s)", full_path, url)
                         return None
                     if response.status >= 400:
                         detail = await response.text()
@@ -288,7 +309,7 @@ class MoonrakerClient(PrinterAdapter):
             LOGGER.warning(
                 "Thumbnail fetch timed out after %.1fs (path=%s)",
                 timeout,
-                relative_path,
+                full_path,
             )
             raise
 

@@ -243,7 +243,11 @@ class MoonrakerStateStore:
         if method == "notify_history_changed":
             for entry in _iter_dicts(params):
                 if isinstance(entry, Mapping):
-                    self._store_section("history_event", entry, observed_at)
+                    # history_event should REPLACE not merge when action changes
+                    # This is critical: action:added has no status field, but
+                    # action:finished has status. If we merge, status from previous
+                    # print would persist into the next print's action:added event.
+                    self._store_history_event(entry, observed_at)
             return
 
         for entry in _iter_dicts(params):
@@ -274,6 +278,60 @@ class MoonrakerStateStore:
             data=base,
         )
         self._sections[name] = snapshot
+        self._latest_observed_at = observed_at
+
+    def _store_history_event(
+        self, event: Mapping[str, Any], observed_at: datetime
+    ) -> None:
+        """Store history_event with proper replacement semantics.
+
+        Unlike other sections that use deep_merge, history_event from
+        notify_history_changed should REPLACE the job data when action changes.
+
+        Key insight from Mainsail:
+        - action:added = new print started (no status field)
+        - action:finished = print ended (has status: completed/cancelled/error)
+
+        If we deep_merge, the status from a previous print's action:finished
+        would persist into the next print's action:added, causing:
+        1. job_status=completed instead of None during new print
+        2. No printCompleted event when new print finishes
+
+        The fix: Replace the entire history_event when a new action arrives,
+        rather than merging. This ensures status is cleared when action:added
+        arrives for a new print.
+        """
+        incoming = dict(event)
+        existing = self._sections.get("history_event")
+
+        # Always replace when action changes (different event type)
+        if existing is not None:
+            old_action = existing.data.get("action")
+            new_action = incoming.get("action")
+            if old_action != new_action:
+                # Action changed (e.g., finished -> added), replace entirely
+                LOGGER.debug(
+                    "history_event action changed: %s -> %s, replacing",
+                    old_action,
+                    new_action,
+                )
+                base = copy.deepcopy(incoming)
+            else:
+                # Same action type, merge to accumulate updates
+                baseline_dict = dict(existing.data)
+                base: Dict[str, Any] = copy.deepcopy(baseline_dict)
+                deep_merge(base, incoming)
+                if base == baseline_dict:
+                    return
+        else:
+            base = copy.deepcopy(incoming)
+
+        snapshot = SectionSnapshot(
+            name="history_event",
+            observed_at=observed_at,
+            data=base,
+        )
+        self._sections["history_event"] = snapshot
         self._latest_observed_at = observed_at
 
     def _log_print_state_transition(

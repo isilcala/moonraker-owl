@@ -66,12 +66,16 @@ class MoonrakerCommandClient(Protocol):
         ...
 
     async def fetch_thumbnail(
-        self, relative_path: str, timeout: float = 30.0
+        self,
+        relative_path: str,
+        gcode_filename: Optional[str] = None,
+        timeout: float = 30.0,
     ) -> Optional[bytes]:
         """Fetch thumbnail image data from Moonraker file server.
 
         Args:
             relative_path: Relative path to the thumbnail.
+            gcode_filename: The gcode filename, used to extract subdirectory prefix.
             timeout: Request timeout in seconds.
 
         Returns:
@@ -243,6 +247,11 @@ class CommandProcessor:
         command_name = _extract_command_name(topic, self._device_id)
         if not command_name:
             return
+
+        LOGGER.info(
+            "Received command on topic %s: command=%s, payload_size=%d",
+            topic, command_name, len(payload)
+        )
 
         try:
             message = _parse_command(payload, command_name)
@@ -1073,8 +1082,8 @@ class CommandProcessor:
                 command_id=message.command_id,
             )
 
-        LOGGER.debug(
-            "Uploading thumbnail for job %s, file: %s",
+        LOGGER.info(
+            "Starting thumbnail upload for job %s, file: %s",
             print_job_id,
             filename,
         )
@@ -1129,8 +1138,13 @@ class CommandProcessor:
         )
 
         # Fetch thumbnail image data from Moonraker
+        # Pass gcode filename to construct correct path (Mainsail pattern:
+        # for "4N/model.gcode", thumbnail ".thumbs/model-300x300.png" is at
+        # "4N/.thumbs/model-300x300.png")
         try:
-            thumb_data = await self._moonraker.fetch_thumbnail(thumb_path)
+            thumb_data = await self._moonraker.fetch_thumbnail(
+                thumb_path, gcode_filename=filename
+            )
         except asyncio.TimeoutError:
             raise CommandProcessingError(
                 "Timeout fetching thumbnail image",

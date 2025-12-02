@@ -175,3 +175,131 @@ async def test_execute_gcode_raises_on_failure(moonraker_gcode_server):
         await client.execute_gcode("INVALID_COMMAND")
 
     await client.aclose()
+
+
+# --- Thumbnail path construction tests ---
+
+
+@pytest_asyncio.fixture
+async def moonraker_thumbnail_server(unused_tcp_port_factory):
+    """Server fixture that handles thumbnail file requests."""
+    requested_paths: list[str] = []
+
+    async def files_handler(request: web.Request):
+        # Extract the path after /server/files/gcodes/
+        full_path = request.path
+        requested_paths.append(full_path)
+        # Return dummy image data
+        return web.Response(body=b"FAKE_IMAGE_DATA", content_type="image/png")
+
+    app = web.Application()
+    # Match any path under /server/files/gcodes/
+    app.router.add_get("/server/files/gcodes/{path:.*}", files_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = unused_tcp_port_factory()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+
+    class _Server:
+        def __init__(self, server_port: int):
+            self._port = server_port
+
+        def make_url(self, path: str = "/") -> str:
+            if not path.startswith("/"):
+                path = "/" + path
+            return f"http://127.0.0.1:{self._port}{path}"
+
+        @property
+        def paths(self) -> list[str]:
+            return requested_paths
+
+        def clear(self) -> None:
+            requested_paths.clear()
+
+    try:
+        yield _Server(port)
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_fetch_thumbnail_root_file_uses_relative_path(moonraker_thumbnail_server):
+    """Test that thumbnails for root-level gcode files use only the relative path."""
+    base_url = str(moonraker_thumbnail_server.make_url("/"))
+    config = MoonrakerConfig(url=base_url, api_key="")
+    client = MoonrakerClient(config)
+
+    # For root-level file "model.gcode", thumbnail should be at ".thumbs/model-300x300.png"
+    result = await client.fetch_thumbnail(
+        relative_path=".thumbs/model-300x300.png",
+        gcode_filename="model.gcode",
+    )
+    await client.aclose()
+
+    assert result == b"FAKE_IMAGE_DATA"
+    assert len(moonraker_thumbnail_server.paths) == 1
+    assert moonraker_thumbnail_server.paths[0] == "/server/files/gcodes/.thumbs/model-300x300.png"
+
+
+@pytest.mark.asyncio
+async def test_fetch_thumbnail_subdirectory_prepends_path(moonraker_thumbnail_server):
+    """Test that thumbnails for subdirectory gcode files include the subdirectory prefix.
+    
+    This follows Mainsail's pattern: for "4N/model.gcode", thumbnail 
+    ".thumbs/model-300x300.png" is at "4N/.thumbs/model-300x300.png".
+    """
+    base_url = str(moonraker_thumbnail_server.make_url("/"))
+    config = MoonrakerConfig(url=base_url, api_key="")
+    client = MoonrakerClient(config)
+
+    # For "4N/model.gcode", thumbnail should be at "4N/.thumbs/model-300x300.png"
+    result = await client.fetch_thumbnail(
+        relative_path=".thumbs/model-300x300.png",
+        gcode_filename="4N/model.gcode",
+    )
+    await client.aclose()
+
+    assert result == b"FAKE_IMAGE_DATA"
+    assert len(moonraker_thumbnail_server.paths) == 1
+    assert moonraker_thumbnail_server.paths[0] == "/server/files/gcodes/4N/.thumbs/model-300x300.png"
+
+
+@pytest.mark.asyncio
+async def test_fetch_thumbnail_nested_subdirectory(moonraker_thumbnail_server):
+    """Test thumbnail path for deeply nested subdirectories."""
+    base_url = str(moonraker_thumbnail_server.make_url("/"))
+    config = MoonrakerConfig(url=base_url, api_key="")
+    client = MoonrakerClient(config)
+
+    # For "folder/subfolder/model.gcode", thumbnail should be at 
+    # "folder/subfolder/.thumbs/model-300x300.png"
+    result = await client.fetch_thumbnail(
+        relative_path=".thumbs/model-300x300.png",
+        gcode_filename="folder/subfolder/model.gcode",
+    )
+    await client.aclose()
+
+    assert result == b"FAKE_IMAGE_DATA"
+    assert len(moonraker_thumbnail_server.paths) == 1
+    assert moonraker_thumbnail_server.paths[0] == "/server/files/gcodes/folder/subfolder/.thumbs/model-300x300.png"
+
+
+@pytest.mark.asyncio
+async def test_fetch_thumbnail_without_filename_uses_relative_path_only(moonraker_thumbnail_server):
+    """Test backward compatibility: when no gcode_filename is provided, use relative_path as-is."""
+    base_url = str(moonraker_thumbnail_server.make_url("/"))
+    config = MoonrakerConfig(url=base_url, api_key="")
+    client = MoonrakerClient(config)
+
+    result = await client.fetch_thumbnail(
+        relative_path=".thumbs/model-300x300.png",
+        # No gcode_filename provided
+    )
+    await client.aclose()
+
+    assert result == b"FAKE_IMAGE_DATA"
+    assert len(moonraker_thumbnail_server.paths) == 1
+    assert moonraker_thumbnail_server.paths[0] == "/server/files/gcodes/.thumbs/model-300x300.png"
