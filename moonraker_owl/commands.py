@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Deque, Dict, Optional, Protocol
 from urllib.parse import quote
 
+from .printer_command_names import PrinterCommandNames
 from .config import OwlConfig
 from .telemetry import TelemetryPublisher
 
@@ -136,9 +137,9 @@ class _PendingStateCommand:
 # Commands that require state confirmation before sending 'completed' ACK
 # Maps command name to expected print_stats.state value
 COMMAND_EXPECTED_STATES: Dict[str, str] = {
-    "pause": "paused",
-    "resume": "printing",
-    "cancel": "cancelled",
+    PrinterCommandNames.PAUSE: "paused",
+    PrinterCommandNames.RESUME: "printing",
+    PrinterCommandNames.CANCEL: "cancelled",
 }
 
 
@@ -561,21 +562,21 @@ class CommandProcessor:
         - pause/resume/cancel: Print control actions
         """
         # Telemetry cadence control
-        if message.command == "sensors:set-rate":
+        if message.command == PrinterCommandNames.SENSORS_SET_RATE:
             return self._execute_sensors_set_rate(message)
 
         # Heater control commands
-        if message.command == "heater:set-target":
+        if message.command == PrinterCommandNames.HEATER_SET_TARGET:
             return await self._execute_heater_set_target(message)
-        if message.command == "heater:turn-off":
+        if message.command == PrinterCommandNames.HEATER_TURN_OFF:
             return await self._execute_heater_turn_off(message)
 
         # Fan control commands
-        if message.command == "fan:set-speed":
+        if message.command == PrinterCommandNames.FAN_SET_SPEED:
             return await self._execute_fan_set_speed(message)
 
         # Print control commands (pause, resume, cancel)
-        if message.command in {"pause", "resume", "cancel"}:
+        if message.command in PrinterCommandNames.PRINT_CONTROL_COMMANDS:
             try:
                 await self._moonraker.execute_print_action(message.command)
             except ValueError as exc:
