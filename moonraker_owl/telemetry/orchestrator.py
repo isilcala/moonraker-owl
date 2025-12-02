@@ -105,12 +105,13 @@ class TelemetryOrchestrator:
         self._sensors_mode = "idle"
         self._sensors_max_hz = 0.033
         self._watch_window_expires = None
-        # Reset state tracking but preserve callback
+        # Reset state tracking but preserve callbacks
         self._last_klippy_state = None
         self._last_print_state = None
         self._last_filename = None
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
+        # Note: _on_print_state_changed is preserved
 
     def ingest(self, payload: Dict[str, Any]) -> None:
         """Ingest Moonraker payload and detect events.
@@ -410,6 +411,7 @@ class TelemetryOrchestrator:
         if event_name == EventName.PRINT_STARTED:
             if session.remaining_seconds is not None:
                 base_data["estimatedDuration"] = session.remaining_seconds
+            # Note: hasThumbnail is added by TelemetryPublisher after async metadata fetch
             return base_data
 
         if event_name == EventName.PRINT_COMPLETED:

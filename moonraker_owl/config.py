@@ -45,6 +45,7 @@ class TelemetryCadenceConfig:
     sensors_force_publish_seconds: float = 300.0  # Maximum seconds without sensor publish before forcing one
     events_max_per_second: int = 1
     events_max_per_minute: int = 20
+    thumbnail_fetch_timeout_ms: int = 200  # Timeout for fetching GCode metadata for hasThumbnail
 
 
 @dataclass(slots=True)
@@ -162,6 +163,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "sensors_force_publish_seconds": "300",
                 "events_max_per_second": "1",
                 "events_max_per_minute": "20",
+                "thumbnail_fetch_timeout_ms": "200",
             },
             "logging": {
                 "level": "INFO",
@@ -283,6 +285,11 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             "telemetry_cadence",
             "events_max_per_minute",
             fallback=cadence_defaults.events_max_per_minute,
+        ),
+        thumbnail_fetch_timeout_ms=parser.getint(
+            "telemetry_cadence",
+            "thumbnail_fetch_timeout_ms",
+            fallback=cadence_defaults.thumbnail_fetch_timeout_ms,
         ),
     )
 

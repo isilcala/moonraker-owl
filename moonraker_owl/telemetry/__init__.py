@@ -241,6 +241,9 @@ class TelemetryPublisher:
             watch_window_expires=None,
         )
 
+        # Timeout for fetching GCode metadata when enriching printStarted events
+        self._thumbnail_fetch_timeout_ms = self._cadence.thumbnail_fetch_timeout_ms
+
         # Emit an initial cadence log to capture baseline configuration.
         self.apply_sensors_rate(
             mode="idle",
@@ -574,7 +577,7 @@ class TelemetryPublisher:
                 continue
 
             try:
-                self._process_payload(
+                await self._process_payload(
                     pending,
                     overrides=pending_overrides,
                 )
@@ -603,13 +606,14 @@ class TelemetryPublisher:
 
         return merged
 
-    def _process_payload(
+    async def _process_payload(
         self,
         payload: Dict[str, Any],
         *,
         overrides: Optional[Dict[str, _PendingChannel]] = None,
     ) -> None:
         self._maybe_expire_watch_window()
+
         self._orchestrator.ingest(payload)
         listener_snapshot = copy.deepcopy(payload)
         aggregated_status = self._orchestrator.store.as_dict()
@@ -673,8 +677,8 @@ class TelemetryPublisher:
             # Events channel bypasses cadence controller entirely.
             # It is purely event-driven with rate limiting handled by EventCollector.
             if channel == "events":
-                # Always publish events immediately when present
-                pass
+                # Enrich printStarted events with hasThumbnail before publishing
+                await self._enrich_print_events(frame.payload)
             else:
                 # Status and sensors channels use cadence controller
                 override = overrides.get(channel)
@@ -744,6 +748,69 @@ class TelemetryPublisher:
         if not self._bootstrapped and skipped_pre_bootstrap:
             self._orchestrator.status_selector.reset()
             self._orchestrator.sensors_selector.reset()
+
+    async def _enrich_print_events(self, events_payload: Dict[str, Any]) -> None:
+        """Enrich printStarted events with hasThumbnail field.
+
+        This method fetches GCode metadata to determine if a thumbnail exists.
+        Uses a short timeout to avoid blocking the telemetry pipeline.
+
+        Args:
+            events_payload: The events channel payload containing an "events" list.
+        """
+        events = events_payload.get("events")
+        if not isinstance(events, list):
+            return
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+
+            event_name = event.get("eventName")
+            if event_name != "printStarted":
+                continue
+
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+
+            filename = data.get("filename")
+            if not filename:
+                data["hasThumbnail"] = False
+                continue
+
+            # Fetch metadata with timeout
+            timeout_seconds = self._thumbnail_fetch_timeout_ms / 1000.0
+            try:
+                metadata = await asyncio.wait_for(
+                    self._moonraker.fetch_gcode_metadata(filename),
+                    timeout=timeout_seconds,
+                )
+                has_thumbnail = False
+                if metadata:
+                    thumbnails = metadata.get("thumbnails", [])
+                    has_thumbnail = len(thumbnails) > 0
+
+                data["hasThumbnail"] = has_thumbnail
+                LOGGER.debug(
+                    "Enriched printStarted event: filename=%s, hasThumbnail=%s",
+                    filename,
+                    has_thumbnail,
+                )
+            except asyncio.TimeoutError:
+                LOGGER.debug(
+                    "Timeout fetching metadata for %s (timeout=%dms), defaulting hasThumbnail=False",
+                    filename,
+                    self._thumbnail_fetch_timeout_ms,
+                )
+                data["hasThumbnail"] = False
+            except Exception as exc:
+                LOGGER.warning(
+                    "Error fetching metadata for %s: %s, defaulting hasThumbnail=False",
+                    filename,
+                    exc,
+                )
+                data["hasThumbnail"] = False
 
     def _prepare_heartbeat_payload(self) -> Optional[Dict[str, Any]]:
         if not self._should_emit_status_heartbeat():
@@ -1191,7 +1258,7 @@ class TelemetryPublisher:
 
         snapshot = self._orchestrator.store.export_state()
         try:
-            self._process_payload(
+            await self._process_payload(
                 status_payload,
                 overrides={
                     "status": _PendingChannel(
