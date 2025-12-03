@@ -222,7 +222,8 @@ class TelemetryPublisher:
         self._last_klippy_ready_query_time: float = 0.0
         self._klippy_ready_query_cooldown: float = 0.5  # 500ms cooldown
 
-        self._last_status_publish_time = 0.0
+        # Track last known printer status for determining heartbeat interval
+        # (Printing/Paused use shorter interval than Idle)
         self._last_status_status = "Idle"
         self._last_payload_snapshot: Optional[Dict[str, Any]] = None
         self._status_idle_interval = self._cadence.status_idle_interval_seconds
@@ -637,26 +638,43 @@ class TelemetryPublisher:
                     self._pending_channels.clear()
                     self._cancel_pending_timer()
                 else:
-                    heartbeat_payload = self._prepare_heartbeat_payload()
-                    if heartbeat_payload is not None:
-                        pending = heartbeat_payload
+                    # Check if any channel needs a heartbeat
+                    heartbeat_channels = self._cadence_controller.get_channels_needing_heartbeat()
+                    if heartbeat_channels and self._last_payload_snapshot is not None:
+                        # Use the last known payload for heartbeat
+                        pending = copy.deepcopy(self._last_payload_snapshot)
                         pending_overrides = {
-                            "status": _PendingChannel(forced=True)
+                            channel: _PendingChannel(forced=True)
+                            for channel in heartbeat_channels
                         }
                     else:
-                        await self._event.wait()
+                        # Wait for events or heartbeat timeout
+                        heartbeat_delay = self._cadence_controller.get_next_heartbeat_delay()
+                        try:
+                            if heartbeat_delay is not None and heartbeat_delay > 0:
+                                await asyncio.wait_for(
+                                    self._event.wait(),
+                                    timeout=heartbeat_delay
+                                )
+                            else:
+                                await self._event.wait()
+                        except asyncio.TimeoutError:
+                            # Heartbeat timeout - check again at top of loop
+                            continue
                         self._event.clear()
                         pending = self._gather_payloads()
                         pending_overrides = {}
                         if pending is None:
                             continue
             else:
-                heartbeat_payload = self._prepare_heartbeat_payload()
-                if heartbeat_payload is not None:
-                    pending = heartbeat_payload
-                    pending_overrides = {
-                        "status": _PendingChannel(forced=True)
-                    }
+                # Check if heartbeat is due while we have pending data
+                heartbeat_channels = self._cadence_controller.get_channels_needing_heartbeat()
+                if heartbeat_channels:
+                    for channel in heartbeat_channels:
+                        if channel not in pending_overrides:
+                            pending_overrides[channel] = _PendingChannel(forced=True)
+                        else:
+                            pending_overrides[channel].forced = True
 
             while not self._stop_event.is_set():
                 now = loop.time()
@@ -836,13 +854,17 @@ class TelemetryPublisher:
                     if isinstance(state_value, str):
                         normalized_state = state_value.strip()
                         if normalized_state:
+                            old_status = self._last_status_status
                             self._last_status_status = state_value
-                            self._last_status_publish_time = now_monotonic
                             state_lower = normalized_state.lower()
                             if state_lower == "error":
                                 self._status_error_snapshot_active = True
                             elif self._status_error_snapshot_active:
                                 self._status_error_snapshot_active = False
+                            # If printer state changed (e.g., Idle -> Printing), 
+                            # refresh the channel schedule to update max_interval
+                            if old_status != state_value:
+                                self._refresh_channel_schedules()
 
             # Agent never uses retained messages - Nexus snapshot provides authority
             self._publish(channel, topic, envelope, retain=False)
@@ -966,27 +988,6 @@ class TelemetryPublisher:
                     filename,
                     exc,
                 )
-
-    def _prepare_heartbeat_payload(self) -> Optional[Dict[str, Any]]:
-        if not self._should_emit_status_heartbeat():
-            return None
-
-        if self._last_payload_snapshot is None:
-            return None
-
-        return copy.deepcopy(self._last_payload_snapshot)
-
-    def _should_emit_status_heartbeat(self) -> bool:
-        if self._last_status_publish_time == 0.0:
-            return False
-
-        interval = (
-            self._status_active_interval
-            if self._last_status_status in {"Printing", "Paused"}
-            else self._status_idle_interval
-        )
-
-        return time.monotonic() - self._last_status_publish_time >= interval
 
     def _maybe_expire_watch_window(self, *, now: Optional[datetime] = None) -> None:
         if self._current_mode == "idle":
@@ -1133,7 +1134,6 @@ class TelemetryPublisher:
         return expires_at
 
     def _refresh_channel_schedules(self) -> None:
-        status_interval: Optional[float] = None
         sensors_interval = (
             self._sensors_interval if self._sensors_interval and self._sensors_interval > 0 else None
         )
@@ -1153,10 +1153,19 @@ class TelemetryPublisher:
             else None
         )
 
+        # Status channel uses max_interval for heartbeat guarantee.
+        # The interval varies based on printer state (active=15s, idle=60s).
+        # We use the current printer state to determine the appropriate max_interval.
         if "status" in self._channel_topics:
+            status_max_interval = (
+                self._status_active_interval
+                if self._last_status_status in {"Printing", "Paused"}
+                else self._status_idle_interval
+            )
             self._cadence_controller.configure(
                 "status",
-                interval=status_interval,
+                interval=None,  # No minimum interval for status
+                max_interval=status_max_interval,
                 forced_interval=None,
                 force_publish_seconds=None,
             )
@@ -1165,6 +1174,7 @@ class TelemetryPublisher:
             self._cadence_controller.configure(
                 "sensors",
                 interval=sensors_interval,
+                max_interval=None,  # Sensors uses force_publish_seconds instead
                 forced_interval=sensors_forced_interval,
                 force_publish_seconds=sensors_force_publish,
             )
@@ -1329,7 +1339,6 @@ class TelemetryPublisher:
         self._pending_payload = None
         self._pending_channels.clear()
         self._last_payload_snapshot = None
-        self._last_status_publish_time = 0.0
         self._last_status_status = "Idle"
         self._status_error_snapshot_active = False
         self._last_printer_state = None

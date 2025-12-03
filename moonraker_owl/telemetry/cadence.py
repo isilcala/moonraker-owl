@@ -35,14 +35,21 @@ class ChannelSchedule:
     """Configuration for a single channel's cadence behavior.
     
     Attributes:
-        interval: Minimum seconds between regular publishes (None = no limit)
+        interval: Minimum seconds between regular publishes (None = no limit).
+            This is the "rate limit" - prevents publishing too fast.
+        max_interval: Maximum seconds between publishes (None = no heartbeat).
+            This is the "heartbeat guarantee" - ensures periodic updates even
+            when payload is unchanged. When elapsed time exceeds this value,
+            a publish is forced regardless of deduplication.
         forced_interval: Minimum seconds between forced publishes (None = no limit)
-        force_publish_seconds: Maximum seconds without publish before forcing one (None = disabled)
-            This ensures UI clients receive periodic updates even when payload is unchanged.
+        force_publish_seconds: Maximum seconds without publish before forcing one (None = disabled).
+            Similar to max_interval but only triggers when allow_force_publish=True.
+            Deprecated: prefer max_interval for clearer semantics.
     """
     interval: Optional[float]
-    forced_interval: Optional[float]
-    force_publish_seconds: Optional[float]
+    max_interval: Optional[float] = None
+    forced_interval: Optional[float] = None
+    force_publish_seconds: Optional[float] = None
 
 
 @dataclass
@@ -130,6 +137,7 @@ class ChannelCadenceController:
         channel: str,
         *,
         interval: Optional[float] = None,
+        max_interval: Optional[float] = None,
         forced_interval: Optional[float] = None,
         force_publish_seconds: Optional[float] = None,
     ) -> None:
@@ -137,12 +145,16 @@ class ChannelCadenceController:
         
         Args:
             channel: Channel name (e.g., "status", "sensors", "events")
-            interval: Minimum seconds between regular publishes
+            interval: Minimum seconds between regular publishes (rate limit)
+            max_interval: Maximum seconds between publishes (heartbeat guarantee).
+                When elapsed time exceeds this, forces a publish even if payload unchanged.
             forced_interval: Minimum seconds between forced publishes
-            force_publish_seconds: Maximum seconds without publish before forcing
+            force_publish_seconds: Maximum seconds without publish before forcing.
+                Similar to max_interval but only triggers with allow_force_publish=True.
         """
         self._schedules[channel] = ChannelSchedule(
             interval=interval if interval and interval > 0 else None,
+            max_interval=max_interval if max_interval and max_interval > 0 else None,
             forced_interval=forced_interval if forced_interval and forced_interval > 0 else None,
             force_publish_seconds=force_publish_seconds if force_publish_seconds and force_publish_seconds > 0 else None,
         )
@@ -204,9 +216,20 @@ class ChannelCadenceController:
         state = self._state.setdefault(channel, ChannelRuntimeState())
         now = self._monotonic()
 
-        # Check force-publish timer - force publish if too long since last publish
-        # This ensures UI clients receive periodic updates for liveness indication
-        forced_for_dedup = explicit_force
+        # Check max_interval (heartbeat guarantee) - always force publish when exceeded
+        # This is the primary mechanism for ensuring periodic updates
+        heartbeat_due = False
+        if schedule.max_interval:
+            if state.last_publish == 0.0:
+                heartbeat_due = True
+            else:
+                elapsed = now - state.last_publish
+                if elapsed >= schedule.max_interval:
+                    heartbeat_due = True
+
+        # Check force-publish timer (legacy, prefer max_interval for new code)
+        # Only triggers when allow_force_publish=True
+        forced_for_dedup = explicit_force or heartbeat_due
         if allow_force_publish and schedule.force_publish_seconds:
             if state.last_publish == 0.0:
                 forced_for_dedup = True
@@ -273,3 +296,60 @@ class ChannelCadenceController:
         state.last_publish = self._monotonic()
         if payload_hash is not None:
             state.hash = payload_hash
+
+    def get_next_heartbeat_delay(self) -> Optional[float]:
+        """Calculate seconds until the next heartbeat is due for any channel.
+        
+        This allows the main loop to schedule a timer for proactive heartbeat
+        checking, rather than relying solely on external events to trigger checks.
+        
+        Returns:
+            Seconds until next heartbeat due, or None if no channels have max_interval.
+        """
+        now = self._monotonic()
+        min_delay: Optional[float] = None
+        
+        for channel, schedule in self._schedules.items():
+            if schedule.max_interval is None:
+                continue
+            
+            state = self._state.get(channel)
+            if state is None or state.last_publish == 0.0:
+                # Never published - heartbeat due immediately
+                return 0.0
+            
+            elapsed = now - state.last_publish
+            remaining = schedule.max_interval - elapsed
+            
+            if remaining <= 0:
+                # Already overdue
+                return 0.0
+            
+            if min_delay is None or remaining < min_delay:
+                min_delay = remaining
+        
+        return min_delay
+
+    def get_channels_needing_heartbeat(self) -> list[str]:
+        """Get list of channels that currently need a heartbeat publish.
+        
+        Returns:
+            List of channel names where max_interval has been exceeded.
+        """
+        now = self._monotonic()
+        result: list[str] = []
+        
+        for channel, schedule in self._schedules.items():
+            if schedule.max_interval is None:
+                continue
+            
+            state = self._state.get(channel)
+            if state is None or state.last_publish == 0.0:
+                result.append(channel)
+                continue
+            
+            elapsed = now - state.last_publish
+            if elapsed >= schedule.max_interval:
+                result.append(channel)
+        
+        return result
