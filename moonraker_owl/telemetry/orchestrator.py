@@ -75,6 +75,7 @@ class TelemetryOrchestrator:
         self._last_filename: Optional[str] = None
         self._last_session_id: Optional[str] = None  # Track session for new-job detection
         self._last_job_status: Optional[str] = None  # Track job_status for terminal events
+        self._terminal_event_emitted: bool = False  # Prevent duplicate terminal events
 
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
@@ -113,6 +114,7 @@ class TelemetryOrchestrator:
         self._last_filename = None
         self._last_session_id = None
         self._last_job_status = None
+        self._terminal_event_emitted = False
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
         # Note: _on_print_state_changed is preserved
@@ -410,6 +412,45 @@ class TelemetryOrchestrator:
         if not event_name:
             return
 
+        # === Guard: Don't emit PRINT_STARTED/PRINT_RESUMED during klippy shutdown ===
+        # When klippy is shutdown/error, Moonraker may return stale print_stats.state
+        # (e.g., "printing") from HTTP queries, but this is not a real state change.
+        # Only allow terminal events (PRINT_FAILED) during shutdown.
+        klippy_state = self.store.klippy_state
+        is_klippy_down = klippy_state in ("shutdown", "error")
+        is_start_or_resume = event_name in {
+            EventName.PRINT_STARTED,
+            EventName.PRINT_RESUMED,
+        }
+        if is_klippy_down and is_start_or_resume:
+            LOGGER.debug(
+                "Ignoring %s event during klippy %s state",
+                event_name.value,
+                klippy_state,
+            )
+            return
+
+        # Check if this is a terminal event and if we've already emitted one
+        # This prevents duplicate events when both print_stats.state and
+        # history_event.job.status transition to terminal states
+        is_terminal = event_name in {
+            EventName.PRINT_COMPLETED,
+            EventName.PRINT_CANCELLED,
+            EventName.PRINT_FAILED,
+        }
+        if is_terminal:
+            if self._terminal_event_emitted:
+                LOGGER.debug(
+                    "Skipping duplicate terminal event %s (already emitted)",
+                    event_name.value,
+                )
+                return
+            # Mark terminal event as emitted
+            self._terminal_event_emitted = True
+        elif event_name == EventName.PRINT_STARTED:
+            # Reset terminal event flag when a new print starts
+            self._terminal_event_emitted = False
+
         # Build event with context data
         event = Event(
             event_name=event_name,
@@ -464,6 +505,16 @@ class TelemetryOrchestrator:
         if not event_name:
             return False
 
+        # Check if we've already emitted a terminal event
+        # This prevents duplicate events when both print_stats.state and
+        # history_event.job.status transition to terminal states
+        if self._terminal_event_emitted:
+            LOGGER.debug(
+                "Skipping duplicate terminal event %s (already emitted via job_status)",
+                event_name.value,
+            )
+            return False
+
         # Only emit if we were previously in an active state or unknown (None)
         # None -> terminal is valid (first completion after agent start or during active print)
         active_states = {"in_progress", "printing", "paused"}
@@ -484,6 +535,9 @@ class TelemetryOrchestrator:
             current_job_status,
             self._last_filename,
         )
+
+        # Mark terminal event as emitted
+        self._terminal_event_emitted = True
 
         event = Event(
             event_name=event_name,

@@ -224,7 +224,11 @@ class MoonrakerStateStore:
         if method == "notify_klippy_ready":
             detail = _extract_notification_detail(params) or "Klippy ready"
             LOGGER.debug("Received notify_klippy_ready: %s", detail)
-            self._mark_ready(detail, observed_at, reset_print_stats=True)
+            # Don't reset print_stats here - let the HTTP query refresh it.
+            # Resetting to 'standby' causes spurious printStarted events when
+            # recovering from emergency stop (the job may still be active).
+            # The TelemetryPublisher will query Moonraker for actual state.
+            self._mark_ready(detail, observed_at, reset_print_stats=False)
             return
 
         if method == "notify_klippy_state":
@@ -243,7 +247,9 @@ class MoonrakerStateStore:
                 return
 
             if normalized_state == "ready":
-                self._mark_ready(detail or "Klippy ready", observed_at, reset_print_stats=True)
+                # Don't reset print_stats here - let the HTTP query refresh it.
+                # See comment above for notify_klippy_ready.
+                self._mark_ready(detail or "Klippy ready", observed_at, reset_print_stats=False)
                 return
 
         if method == "notify_print_stats_update":

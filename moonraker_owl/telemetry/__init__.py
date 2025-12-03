@@ -218,6 +218,9 @@ class TelemetryPublisher:
         # Cache the last listener state we logged so debug output only fires on transitions.
         self._last_listener_state: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = None
         self._klippy_ready_applied = False
+        # Debounce klippy ready queries to prevent rapid-fire during emergency recovery
+        self._last_klippy_ready_query_time: float = 0.0
+        self._klippy_ready_query_cooldown: float = 0.5  # 500ms cooldown
 
         self._last_status_publish_time = 0.0
         self._last_status_status = "Idle"
@@ -387,14 +390,17 @@ class TelemetryPublisher:
 
     async def _handle_moonraker_update(self, payload: Dict[str, Any]) -> None:
         # Query-on-notification for print_stats (ADR-0003 pattern).
-        # Moonraker's notify_status_update omits print_stats.state changes,
-        # but notify_history_changed reliably indicates job status transitions.
-        # When a job starts (action:added), query print_stats to get full state.
-        #
-        # TEMPORARILY DISABLED: Testing if subscribing to entire print_stats object
-        # (instead of specific fields) resolves the state detection issue.
-        # If this works, _query_print_stats_on_job_start becomes a safety net only.
-        # await self._query_print_stats_on_job_start(payload)
+        # Moonraker's notify_status_update does NOT reliably push state changes.
+        # Testing confirmed that Moonraker sometimes omits state=printing entirely,
+        # jumping directly from standby to error. The notify_history_changed event
+        # (action:added) is the only reliable indicator of print start.
+        await self._query_print_stats_on_job_start(payload)
+        
+        # Query print_stats on klippy ready to get actual state after recovery.
+        # The state_store does NOT reset print_stats to standby (to avoid spurious
+        # printStarted events), so we must query to refresh the actual state.
+        await self._query_print_stats_on_klippy_ready(payload)
+        
         await self._enqueue(payload)
 
     async def _query_print_stats_on_job_start(self, payload: Dict[str, Any]) -> None:
@@ -435,6 +441,60 @@ class TelemetryPublisher:
             raise
         except Exception as exc:
             LOGGER.debug("Failed to query print_stats on job start: %s", exc)
+
+    async def _query_print_stats_on_klippy_ready(self, payload: Dict[str, Any]) -> None:
+        """Query print_stats when klippy becomes ready to get actual state.
+
+        After klippy ready (e.g., emergency stop recovery), we must query for
+        the actual print_stats.state rather than inferring it. The state_store
+        does NOT reset print_stats to 'standby' on klippy ready to avoid
+        causing spurious printStarted events when recovering from emergency stop.
+
+        This ensures we get the actual state:
+        - If print was cancelled/errored: we'll get 'error' or 'cancelled'
+        - If printer is idle: we'll get 'standby'
+
+        Includes debouncing to prevent rapid-fire queries during emergency
+        recovery when multiple klippy ready events may arrive in quick succession.
+        """
+        method = payload.get("method")
+        if not isinstance(method, str):
+            return
+
+        normalized_method = method.strip().lower()
+        if normalized_method not in {"notify_klippy_ready", "notify_klippy_state"}:
+            return
+
+        # For notify_klippy_state, only query if state is "ready"
+        if normalized_method == "notify_klippy_state":
+            params = payload.get("params")
+            if isinstance(params, list) and params:
+                state = params[0] if isinstance(params[0], str) else None
+                if not state or state.lower() != "ready":
+                    return
+
+        # Debounce: skip if we've queried recently
+        current_time = time.monotonic()
+        if current_time - self._last_klippy_ready_query_time < self._klippy_ready_query_cooldown:
+            LOGGER.debug(
+                "Skipping klippy ready query (within %.0fms cooldown)",
+                self._klippy_ready_query_cooldown * 1000,
+            )
+            return
+
+        self._last_klippy_ready_query_time = current_time
+        LOGGER.debug("Klippy ready, querying print_stats for actual state")
+
+        try:
+            # Query print_stats and history to get complete state
+            snapshot = await self._moonraker.fetch_printer_state(
+                {"print_stats": None, "webhooks": None}
+            )
+            await self._enqueue(snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.debug("Failed to query print_stats on klippy ready: %s", exc)
 
     async def _enqueue(self, payload: Dict[str, Any]) -> None:
         if self._stop_event.is_set():
@@ -1486,6 +1546,9 @@ class TelemetryPublisher:
             LOGGER.debug("Klippy ready, refreshing subscriptions")
             self._klippy_ready_applied = True
             self._schedule_resubscribe("klippy-ready")
+            # Force immediate status publish so UI updates from "Offline" to "Ready"
+            # without waiting for cadence controller throttle to expire.
+            self._force_full_channels_after_reset.add("status")
         elif ready_signal:
             self._klippy_ready_applied = False
 

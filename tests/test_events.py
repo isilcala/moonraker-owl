@@ -1256,3 +1256,167 @@ class TestOrchestratorEventDetection:
         assert len(events) == 1
         assert events[0].event_name == EventName.PRINT_CANCELLED
 
+    def test_emergency_stop_recovery_no_extra_events(self) -> None:
+        """Emergency stop recovery should NOT produce extra print events.
+
+        Scenario:
+        1. Print is running (printing)
+        2. User triggers emergency stop -> klippy shutdown
+        3. User runs FIRMWARE_RESTART -> klippy ready
+        4. Moonraker reports print_stats.state = standby (or error)
+        
+        Expected events:
+        - klippyShutdown (step 2)
+        - printFailed (step 2, printing -> error transition)
+        - klippyReady (step 3)
+        
+        NOT expected:
+        - Extra printStarted or printFailed events during recovery
+        """
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Step 1: Print is running
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "ready"},
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "test.gcode",
+                        },
+                    }
+                }
+            }
+        )
+        initial_events = orchestrator.events.harvest()
+        assert len(initial_events) == 1
+        assert initial_events[0].event_name == EventName.PRINT_STARTED
+
+        # Step 2: Emergency stop - klippy shutdown
+        # The state_store sets print_stats.state = error internally
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_klippy_shutdown",
+                "params": [{"message": "Emergency stop triggered"}],
+            }
+        )
+        shutdown_events = orchestrator.events.harvest()
+        
+        # Should have klippyShutdown and printFailed
+        event_names = {e.event_name for e in shutdown_events}
+        assert EventName.KLIPPY_SHUTDOWN in event_names
+        assert EventName.PRINT_FAILED in event_names
+        assert len(shutdown_events) == 2
+
+        # Step 3: User runs FIRMWARE_RESTART -> klippy ready
+        # First notify_klippy_state might arrive
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_klippy_state",
+                "params": ["ready"],
+            }
+        )
+        
+        # Then the HTTP query result arrives (simulating TelemetryPublisher behavior)
+        # Moonraker reports standby after recovery
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "ready"},
+                        "print_stats": {
+                            "state": "standby",
+                            "filename": "",
+                        },
+                    }
+                }
+            }
+        )
+        
+        recovery_events = orchestrator.events.harvest()
+        
+        # Should ONLY have klippyReady, NO extra print events
+        event_names = {e.event_name for e in recovery_events}
+        assert EventName.KLIPPY_READY in event_names, (
+            "Should have klippyReady event"
+        )
+        # CRITICAL: No extra print events during recovery
+        assert EventName.PRINT_STARTED not in event_names, (
+            "Should NOT have spurious printStarted during recovery! "
+            f"Got events: {[e.event_name.value for e in recovery_events]}"
+        )
+        assert len(recovery_events) == 1, (
+            f"Should only have klippyReady, got: {[e.event_name.value for e in recovery_events]}"
+        )
+
+    def test_no_print_started_during_klippy_shutdown(self) -> None:
+        """During klippy shutdown, stale print_stats should NOT trigger printStarted.
+        
+        BUG REPRODUCTION: When klippy is shutdown, Moonraker's HTTP API may return
+        stale print_stats.state="printing" (frozen at shutdown time). This should
+        NOT be interpreted as a new print starting.
+        
+        Real sequence from logs:
+        1. klippy shutdown (emergency stop)
+        2. Moonraker HTTP returns print_stats.state=printing (stale)
+        3. State transition: error -> printing
+        4. BUG: printStarted event emitted!
+        """
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+        
+        # Step 1: Initial state - printing
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "ready"},
+                        "print_stats": {
+                            "state": "printing",
+                            "filename": "test.gcode",
+                        },
+                    }
+                }
+            }
+        )
+        orchestrator.events.harvest()  # Clear printStarted
+        
+        # Step 2: Klippy shutdown (emergency stop)
+        orchestrator.ingest(
+            {
+                "jsonrpc": "2.0",
+                "method": "notify_klippy_shutdown",
+                "params": [{"message": "Emergency stop"}],
+            }
+        )
+        shutdown_events = orchestrator.events.harvest()
+        assert any(e.event_name == EventName.KLIPPY_SHUTDOWN for e in shutdown_events)
+        
+        # Step 3: While klippy is still shutdown, Moonraker HTTP returns "printing"
+        # This simulates the bug scenario where print_stats.state is stale
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "shutdown"},  # Klippy is down
+                        "print_stats": {
+                            "state": "printing",  # Stale state!
+                            "filename": "test.gcode",
+                        },
+                    }
+                }
+            }
+        )
+        
+        stale_events = orchestrator.events.harvest()
+        
+        # CRITICAL: No printStarted should be emitted during shutdown
+        assert not any(e.event_name == EventName.PRINT_STARTED for e in stale_events), (
+            "Should NOT emit printStarted from stale state during klippy shutdown! "
+            f"Got events: {[e.event_name.value for e in stale_events]}"
+        )
+

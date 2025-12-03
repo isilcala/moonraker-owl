@@ -758,6 +758,13 @@ def test_state_store_marks_klippy_shutdown() -> None:
 
 
 def test_state_store_marks_klippy_ready_after_shutdown() -> None:
+    """Test that klippy ready clears shutdown but does NOT reset print_stats.
+
+    After klippy ready, print_stats retains its state from the shutdown phase.
+    The TelemetryPublisher is responsible for querying Moonraker for the actual
+    print_stats state (ADR-0003 pattern). This avoids spurious printStarted
+    events when recovering from emergency stop.
+    """
     store = MoonrakerStateStore()
 
     store.ingest(
@@ -777,11 +784,14 @@ def test_state_store_marks_klippy_ready_after_shutdown() -> None:
     )
 
     snapshot = store.as_dict()
+    # Klippy state is correctly marked as ready
     assert snapshot.get("webhooks", {}).get("state") == "ready"
     assert snapshot.get("printer", {}).get("state") == "ready"
     assert snapshot.get("printer", {}).get("is_shutdown") is False
-    assert snapshot.get("print_stats", {}).get("state") == "standby"
-    assert snapshot.get("print_stats", {}).get("message") == ""
+    # print_stats is NOT reset - it retains the shutdown-phase state.
+    # TelemetryPublisher queries Moonraker for actual state on klippy ready.
+    assert snapshot.get("print_stats", {}).get("state") == "error"
+    assert snapshot.get("print_stats", {}).get("message") == "Emergency stop"
 
 
 def test_state_store_retains_shutdown_until_ready_signal() -> None:
@@ -835,6 +845,12 @@ def test_state_store_retains_shutdown_until_ready_signal() -> None:
 
 
 def test_state_store_handles_notify_klippy_state_ready() -> None:
+    """Test that notify_klippy_state ready does NOT reset print_stats.
+
+    When klippy becomes ready via notify_klippy_state, we update webhooks and
+    printer sections but do NOT reset print_stats. The TelemetryPublisher
+    queries Moonraker for actual print_stats state (ADR-0003 pattern).
+    """
     store = MoonrakerStateStore()
 
     store.ingest(
@@ -852,7 +868,8 @@ def test_state_store_handles_notify_klippy_state_ready() -> None:
     )
     assert snapshot.get("printer", {}).get("state") == "ready"
     assert snapshot.get("printer", {}).get("is_shutdown") is False
-    assert snapshot.get("print_stats", {}).get("state") == "standby"
+    # print_stats is NOT set - TelemetryPublisher queries for actual state
+    assert snapshot.get("print_stats", {}).get("state") is None
 
 
 def test_state_store_handles_notify_klippy_state_error() -> None:
@@ -1937,6 +1954,84 @@ async def test_resubscribe_triggered_after_notify_klippy_state_ready() -> None:
     assert (
         moonraker.resubscribe_calls == first_calls
     ), "Duplicate ready notifications should not reschedule resubscribe"
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_channel_forced_after_klippy_ready() -> None:
+    """Status channel should be force-published after klippy ready.
+
+    This ensures the UI updates from 'Offline' to operational state immediately
+    without waiting for cadence controller throttle to expire.
+    """
+    initial_state = {
+        "result": {
+            "status": {
+                "webhooks": {"state": "shutdown"},
+                "printer": {"state": "shutdown", "is_shutdown": True},
+                "print_stats": {"state": "error", "message": "Emergency stop"},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    # Use slow rate to ensure force is needed
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    # Clear initial messages
+    mqtt.messages.clear()
+
+    # Update state to ready (Moonraker returns standby for print_stats after recovery)
+    ready_state = {
+        "result": {
+            "status": {
+                "webhooks": {"state": "ready"},
+                "printer": {"state": "ready", "is_shutdown": False},
+                "print_stats": {"state": "standby"},
+            }
+        }
+    }
+    moonraker.update_state(ready_state)
+
+    # Emit klippy ready notification
+    await moonraker.emit({"method": "notify_klippy_ready", "params": None})
+    await asyncio.sleep(0.15)  # Wait for resubscribe and prime_initial_state
+
+    # Find status channel messages
+    status_messages = [
+        msg for msg in mqtt.messages if "/status" in msg["topic"]
+    ]
+
+    # Should have at least one status message after klippy ready
+    assert len(status_messages) >= 1, (
+        f"Expected at least 1 status message after klippy ready, "
+        f"got {len(status_messages)}. All messages: {[m['topic'] for m in mqtt.messages]}"
+    )
+
+    # The status message should reflect operational state (Idle, not Error)
+    last_status_msg = status_messages[-1]
+    last_status = json.loads(last_status_msg["payload"])
+    status_body = last_status.get("status", {})
+    printer_status = status_body.get("printerStatus", "")
+    
+    # After klippy ready with print_stats.state=standby, printerStatus should be "Idle"
+    # (not "Error" which was the previous state)
+    assert printer_status.lower() in {"idle", "ready"}, (
+        f"Expected printerStatus='Idle' or 'Ready' after klippy recovery, got '{printer_status}'"
+    )
+    
+    # Verify isShutdown flag is cleared
+    flags = status_body.get("flags", {})
+    assert flags.get("isShutdown") is False, (
+        f"Expected isShutdown=False after recovery, got {flags.get('isShutdown')}"
+    )
 
     await publisher.stop()
 
