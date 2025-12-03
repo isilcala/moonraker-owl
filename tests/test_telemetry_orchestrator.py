@@ -449,3 +449,27 @@ def test_sensors_dedup_ignores_watch_window_expiry_changes(baseline_snapshot: di
     assert "sensors" in frames4, (
         "Sensors should be emitted when sensor values change"
     )
+
+
+def test_set_thumbnail_url_delegates_to_session_tracker() -> None:
+    """Verify that set_thumbnail_url delegates to session_tracker.
+    
+    This is a regression test for a bug where TelemetryOrchestrator was missing
+    the set_thumbnail_url method, causing AttributeError when the command
+    processor tried to set the thumbnail URL for a print job.
+    """
+    orchestrator = TelemetryOrchestrator()
+    
+    # Verify the method exists and works
+    assert hasattr(orchestrator, 'set_thumbnail_url'), "Orchestrator must have set_thumbnail_url"
+    
+    # Set a thumbnail URL
+    test_url = "http://minio.local:9000/owl/print-jobs/tenant/job/thumbnail.png"
+    orchestrator.set_thumbnail_url(test_url)
+    
+    # Verify it was delegated to session_tracker
+    assert orchestrator.session_tracker._current_thumbnail_url == test_url
+    
+    # Clear the URL
+    orchestrator.set_thumbnail_url(None)
+    assert orchestrator.session_tracker._current_thumbnail_url is None

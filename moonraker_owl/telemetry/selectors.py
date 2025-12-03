@@ -23,13 +23,11 @@ class StatusSelector:
         self._last_contract_hash: Optional[str] = None
         self._last_updated: Optional[datetime] = None
         self._last_emitted_at: Optional[datetime] = None
-        self._last_debug_signature: Optional[tuple[Any, ...]] = None
 
     def reset(self) -> None:
         self._last_contract_hash = None
         self._last_updated = None
         self._last_emitted_at = None
-        self._last_debug_signature = None
 
     def build(
         self,
@@ -67,10 +65,6 @@ class StatusSelector:
         # This ensures UI displays error state regardless of what print_stats.state
         # says, since Moonraker may send stale print_stats updates after shutdown.
         if is_shutdown:
-            LOGGER.debug(
-                "Overriding phase to Error due to klippy shutdown (message=%s)",
-                shutdown_message,
-            )
             phase = "Error"
 
         # Override phase when job has terminated but print_stats.state lags behind.
@@ -90,25 +84,10 @@ class StatusSelector:
             error_states = {"error"}
 
             if state_lower in completed_states or job_status_lower in completed_states:
-                LOGGER.debug(
-                    "Overriding phase to Completed (raw_state=%s, job_status=%s)",
-                    state,
-                    session.job_status,
-                )
                 phase = "Completed"
             elif state_lower in cancelled_states or job_status_lower in cancelled_states:
-                LOGGER.debug(
-                    "Overriding phase to Cancelled (raw_state=%s, job_status=%s)",
-                    state,
-                    session.job_status,
-                )
                 phase = "Cancelled"
             elif state_lower in error_states or job_status_lower in error_states:
-                LOGGER.debug(
-                    "Overriding phase to Error (raw_state=%s, job_status=%s)",
-                    state,
-                    session.job_status,
-                )
                 phase = "Error"
 
         lifecycle: Dict[str, Any] = {
@@ -199,43 +178,6 @@ class StatusSelector:
 
         status["lastUpdatedUtc"] = last_updated.replace(microsecond=0).isoformat()
         self._last_emitted_at = observed_at
-
-        if LOGGER.isEnabledFor(logging.DEBUG):
-            signature = (
-                phase,
-                lifecycle.get("reason"),
-                session.session_id,
-                session.has_active_job,
-                session.progress_percent,
-                session.elapsed_seconds,
-                session.remaining_seconds,
-                session.layer_current,
-                session.layer_total,
-                heater_monitor.is_actively_heating(),
-                state,
-                session.idle_timeout_state,
-                session.timelapse_paused,
-                session.job_status,
-            )
-            if signature != self._last_debug_signature:
-                LOGGER.debug(
-                    "Overview lifecycle resolved: raw_state=%s phase=%s reason=%s session=%s has_active_job=%s is_heating=%s progress=%s%% elapsed=%s remaining=%s layers=%s/%s idle_timeout_state=%s timelapse_paused=%s job_status=%s",
-                    state,
-                    phase,
-                    lifecycle.get("reason"),
-                    session.session_id,
-                    session.has_active_job,
-                    heater_monitor.is_actively_heating(),
-                    session.progress_percent,
-                    session.elapsed_seconds,
-                    session.remaining_seconds,
-                    session.layer_current,
-                    session.layer_total,
-                    session.idle_timeout_state,
-                    session.timelapse_paused,
-                    session.job_status,
-                )
-                self._last_debug_signature = signature
 
         return status
 

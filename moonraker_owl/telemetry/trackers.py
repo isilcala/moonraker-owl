@@ -59,7 +59,6 @@ class PrintSessionTracker:
 
     def __init__(self) -> None:
         self._current_session_id: Optional[str] = None
-        self._last_debug_signature: Optional[tuple[Any, ...]] = None
         # Cloud-assigned thumbnail URL for the current print job
         self._current_thumbnail_url: Optional[str] = None
 
@@ -134,29 +133,6 @@ class PrintSessionTracker:
             job_status=job_status,
             has_active_job=has_active_job,
         )
-
-        if LOGGER.isEnabledFor(logging.DEBUG):
-            # Floor progress to integer for deduplication (matches UI display logic)
-            progress_floored = int(progress_percent) if progress_percent is not None else None
-            signature = (
-                session_id,
-                raw_state,
-                job_status,
-                has_active_job,
-                progress_floored,
-                message,
-            )
-            if signature != self._last_debug_signature:
-                LOGGER.debug(
-                    "Session resolved: session=%s raw_state=%s job_status=%s has_active_job=%s progress=%s%% message=%s",
-                    session_id,
-                    raw_state,
-                    job_status,
-                    has_active_job,
-                    progress_floored,
-                    message,
-                )
-                self._last_debug_signature = signature
 
         # Clear thumbnail URL when job ends
         thumbnail_url = self._current_thumbnail_url if has_active_job else None

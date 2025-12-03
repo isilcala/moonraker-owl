@@ -96,6 +96,17 @@ class TelemetryOrchestrator:
         """
         self._on_print_state_changed = callback
 
+    def set_thumbnail_url(self, url: Optional[str]) -> None:
+        """Set the thumbnail URL for the current print job.
+
+        Delegates to the session tracker which manages the URL lifecycle.
+        The URL is automatically cleared when the job ends.
+
+        Args:
+            url: The CDN URL for the thumbnail, or None to clear.
+        """
+        self.session_tracker.set_thumbnail_url(url)
+
     def reset(self, *, snapshot: Optional[MoonrakerStoreState] = None) -> None:
         self.store = MoonrakerStateStore(clock=self._clock)
         if snapshot is not None:
@@ -393,13 +404,6 @@ class TelemetryOrchestrator:
         old_state = self._last_print_state
         self._last_print_state = current_state
 
-        LOGGER.debug(
-            "Print state: %s -> %s (file=%s)",
-            old_state,
-            current_state,
-            self._last_filename,
-        )
-
         # Notify command processor of state change
         if self._on_print_state_changed and current_state:
             try:
@@ -423,11 +427,6 @@ class TelemetryOrchestrator:
             EventName.PRINT_RESUMED,
         }
         if is_klippy_down and is_start_or_resume:
-            LOGGER.debug(
-                "Ignoring %s event during klippy %s state",
-                event_name.value,
-                klippy_state,
-            )
             return
 
         # Check if this is a terminal event and if we've already emitted one
@@ -440,10 +439,6 @@ class TelemetryOrchestrator:
         }
         if is_terminal:
             if self._terminal_event_emitted:
-                LOGGER.debug(
-                    "Skipping duplicate terminal event %s (already emitted)",
-                    event_name.value,
-                )
                 return
             # Mark terminal event as emitted
             self._terminal_event_emitted = True
@@ -486,12 +481,6 @@ class TelemetryOrchestrator:
         if current_job_status == self._last_job_status:
             return False
 
-        LOGGER.debug(
-            "job_status transition: %s -> %s",
-            self._last_job_status,
-            current_job_status,
-        )
-
         # Map job_status to event names
         job_status_events = {
             "completed": EventName.PRINT_COMPLETED,
@@ -509,10 +498,6 @@ class TelemetryOrchestrator:
         # This prevents duplicate events when both print_stats.state and
         # history_event.job.status transition to terminal states
         if self._terminal_event_emitted:
-            LOGGER.debug(
-                "Skipping duplicate terminal event %s (already emitted via job_status)",
-                event_name.value,
-            )
             return False
 
         # Only emit if we were previously in an active state or unknown (None)
@@ -522,11 +507,6 @@ class TelemetryOrchestrator:
 
         if not was_active and self._last_job_status is not None:
             # If we weren't in an active state, skip (e.g., startup recovery)
-            LOGGER.debug(
-                "Skipping terminal event: was_active=%s, last_job_status=%s",
-                was_active,
-                self._last_job_status,
-            )
             return False
 
         LOGGER.info(
