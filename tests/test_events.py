@@ -132,7 +132,7 @@ class TestEventTypes:
         result = event.to_dict()
 
         assert result["eventId"] == "test-event-id"
-        assert result["eventName"] == "printStarted"
+        assert result["eventName"] == "print:started"
         assert result["severity"] == "info"
         assert result["message"] == "Print started: test.gcode"
         assert result["occurredAtUtc"] == "2025-11-30T10:00:00Z"
@@ -317,7 +317,7 @@ class TestEventCollector:
         events = collector.drain()
 
         assert len(events) == 1
-        assert events[0]["eventName"] == "commandStateChanged"
+        assert events[0]["eventName"] == "system:command-state"
         assert events[0]["data"]["commandId"] == "cmd-123"
         assert events[0]["data"]["commandType"] == "pause"
         assert events[0]["data"]["state"] == "completed"

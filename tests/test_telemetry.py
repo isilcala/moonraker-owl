@@ -672,7 +672,7 @@ async def test_publisher_emits_events_channel() -> None:
     items = events_body.get("items")
     assert isinstance(items, list) and items, "Expected contract events"
     entry = items[0]
-    assert entry.get("eventName") == "commandStateChanged"
+    assert entry.get("eventName") == "system:command-state"
     data = entry.get("data")
     assert isinstance(data, dict)
     assert data.get("state") == "completed"

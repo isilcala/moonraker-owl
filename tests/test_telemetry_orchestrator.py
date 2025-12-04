@@ -186,13 +186,13 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
 
     events_frame = frames["events"]
     events = events_frame.payload
-    # Events include both the command state change and a printStarted event
+    # Events include both the command state change and a print:started event
     # (triggered by the print_stats.state=printing in the baseline snapshot)
     assert len(events["items"]) >= 1
-    command_events = [e for e in events["items"] if e["eventName"] == "commandStateChanged"]
+    command_events = [e for e in events["items"] if e["eventName"] == "system:command-state"]
     assert len(command_events) == 1
     event = command_events[0]
-    assert event["eventName"] == "commandStateChanged"
+    assert event["eventName"] == "system:command-state"
     assert event["data"]["state"] == "completed"
 
     frames_second = orchestrator.build_payloads()
@@ -378,14 +378,14 @@ def test_status_selector_emits_error_phase_when_klippy_shutdown() -> None:
     assert "MCU shutdown" in status.get("subStatus", "")
     assert "MCU shutdown" in status["lifecycle"].get("reason", "")
 
-    # Verify events channel emits klippyShutdown
+    # Verify events channel emits klippy:shutdown
     events = frames.get("events")
     if events:
         shutdown_events = [
             e for e in events.payload.get("items", [])
-            if e.get("eventName") == "klippyShutdown"
+            if e.get("eventName") == "klippy:shutdown"
         ]
-        assert len(shutdown_events) == 1, "Should emit klippyShutdown event"
+        assert len(shutdown_events) == 1, "Should emit klippy:shutdown event"
 
 
 def test_sensors_dedup_ignores_watch_window_expiry_changes(baseline_snapshot: dict) -> None:

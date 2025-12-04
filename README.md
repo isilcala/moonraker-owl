@@ -66,7 +66,7 @@ The `telemetry/` package handles all MQTT telemetry publishing:
 - Subscribes to `owl/printers/{deviceId}/commands/#`
 - Executes Moonraker actions (pause/resume/cancel)
 - Tracks state-based command completion for accurate ACKs
-- Handles `sensors:set-rate` for telemetry cadence control
+- Handles `control:set-telemetry-rate` for telemetry cadence control
 
 ### Connection Management
 

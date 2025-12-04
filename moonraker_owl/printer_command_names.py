@@ -3,11 +3,11 @@
 These names appear as the final segment of command topics:
     owl/printers/{deviceId}/commands/{commandName}
 
-Command naming conventions:
-- Print control: Simple names (pause, resume, cancel)
-- Device control: {entity}:{action} (heater:set-target, fan:set-speed)
-- Job control: job:{action} (job:set-thumbnail-url)
-- Telemetry control: sensors:{action} (sensors:set-rate)
+Command naming conventions (ADR-0013):
+- User commands: {domain}:{action} (print:pause, heater:set-target)
+- System sync: sync:{type} (sync:job-thumbnail) - fire-and-forget
+- System control: control:{type} (control:set-telemetry-rate) - requires ACK
+- System tasks: task:{type} (task:upload-thumbnail) - requires result
 
 All names must match the regex: ^[a-z0-9._:-]{2,64}$
 
@@ -21,33 +21,33 @@ class PrinterCommandNames:
     """Printer command name constants matching C# PrinterCommandNames.cs."""
 
     # -------------------------------------------------------------------------
-    # Print Control Commands
+    # Print Control Commands (user-triggered)
     # -------------------------------------------------------------------------
 
-    PAUSE = "pause"
+    PAUSE = "print:pause"
     """Pause the current print job."""
 
-    RESUME = "resume"
+    RESUME = "print:resume"
     """Resume a paused print job."""
 
-    CANCEL = "cancel"
+    CANCEL = "print:cancel"
     """Cancel the current print job."""
 
-    EMERGENCY_STOP = "emergency-stop"
+    EMERGENCY_STOP = "print:emergency-stop"
     """Emergency stop - immediately halt all printer operations."""
 
-    FIRMWARE_RESTART = "firmware-restart"
+    FIRMWARE_RESTART = "print:firmware-restart"
     """Restart the Klipper firmware."""
 
     # -------------------------------------------------------------------------
-    # Telemetry Control Commands
+    # System Control Commands (cloud-triggered, requires ACK)
     # -------------------------------------------------------------------------
 
-    SENSORS_SET_RATE = "sensors:set-rate"
+    SET_TELEMETRY_RATE = "control:set-telemetry-rate"
     """Set telemetry sensors reporting rate (watch window)."""
 
     # -------------------------------------------------------------------------
-    # Heater Control Commands
+    # Heater Control Commands (user-triggered)
     # -------------------------------------------------------------------------
 
     HEATER_SET_TARGET = "heater:set-target"
@@ -57,25 +57,28 @@ class PrinterCommandNames:
     """Turn off a heater (set target to 0)."""
 
     # -------------------------------------------------------------------------
-    # Fan Control Commands
+    # Fan Control Commands (user-triggered)
     # -------------------------------------------------------------------------
 
     FAN_SET_SPEED = "fan:set-speed"
     """Set fan speed."""
 
     # -------------------------------------------------------------------------
-    # Job Control Commands
+    # System Sync Commands (cloud-triggered, fire-and-forget)
     # -------------------------------------------------------------------------
 
-    JOB_SET_THUMBNAIL_URL = "job:set-thumbnail-url"
-    """Set the thumbnail URL for the current print job (received from server after upload)."""
+    SYNC_JOB_THUMBNAIL = "sync:job-thumbnail"
+    """Sync the thumbnail URL for the current print job."""
 
     # -------------------------------------------------------------------------
-    # Media Capture Commands
+    # System Task Commands (cloud-triggered, requires result)
     # -------------------------------------------------------------------------
 
-    CAPTURE_FRAME = "capture:frame"
-    """Capture and upload camera frame for AI detection."""
+    UPLOAD_THUMBNAIL = "task:upload-thumbnail"
+    """Upload print job thumbnail to presigned URL."""
+
+    CAPTURE_IMAGE = "task:capture-image"
+    """Capture and upload camera frame to presigned URL."""
 
     # -------------------------------------------------------------------------
     # Command Sets

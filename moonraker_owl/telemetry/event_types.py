@@ -6,7 +6,11 @@ significant state changes to the cloud. Events are categorized by priority:
 - P0 (Critical): Infrastructure failures requiring immediate attention
 - P1 (Important): Print lifecycle events for user awareness
 
-See ADR-0009 for design rationale.
+Event naming convention (ADR-0013): {domain}:{event}
+- klippy:error, klippy:shutdown, klippy:disconnected, klippy:ready
+- print:started, print:completed, print:failed, print:cancelled, etc.
+
+See ADR-0009 for original design rationale.
 """
 
 from __future__ import annotations
@@ -39,36 +43,36 @@ class EventSeverity(str, Enum):
 
 
 class EventName(str, Enum):
-    """Standard event names.
+    """Standard event names using {domain}:{event} pattern (ADR-0013).
 
     P0 - Infrastructure Events:
-        klippyError: Klippy entered error state
-        klippyShutdown: Klippy shutdown (heater fault, probe failure, etc.)
-        klippyDisconnected: Klippy disconnected from Moonraker
-        klippyReady: Klippy has recovered and is ready
+        klippy:error: Klippy entered error state
+        klippy:shutdown: Klippy shutdown (heater fault, probe failure, etc.)
+        klippy:disconnected: Klippy disconnected from Moonraker
+        klippy:ready: Klippy has recovered and is ready
 
     P1 - Print Lifecycle Events:
-        printStarted: A print job has started
-        printCompleted: A print job completed successfully
-        printFailed: A print job failed due to an error
-        printCancelled: A print job was cancelled
-        printPaused: A print job was paused
-        printResumed: A print job was resumed from pause
+        print:started: A print job has started
+        print:completed: A print job completed successfully
+        print:failed: A print job failed due to an error
+        print:cancelled: A print job was cancelled
+        print:paused: A print job was paused
+        print:resumed: A print job was resumed from pause
     """
 
     # P0 - Infrastructure
-    KLIPPY_ERROR = "klippyError"
-    KLIPPY_SHUTDOWN = "klippyShutdown"
-    KLIPPY_DISCONNECTED = "klippyDisconnected"
-    KLIPPY_READY = "klippyReady"
+    KLIPPY_ERROR = "klippy:error"
+    KLIPPY_SHUTDOWN = "klippy:shutdown"
+    KLIPPY_DISCONNECTED = "klippy:disconnected"
+    KLIPPY_READY = "klippy:ready"
 
     # P1 - Print Lifecycle
-    PRINT_STARTED = "printStarted"
-    PRINT_COMPLETED = "printCompleted"
-    PRINT_FAILED = "printFailed"
-    PRINT_CANCELLED = "printCancelled"
-    PRINT_PAUSED = "printPaused"
-    PRINT_RESUMED = "printResumed"
+    PRINT_STARTED = "print:started"
+    PRINT_COMPLETED = "print:completed"
+    PRINT_FAILED = "print:failed"
+    PRINT_CANCELLED = "print:cancelled"
+    PRINT_PAUSED = "print:paused"
+    PRINT_RESUMED = "print:resumed"
 
 
 # Event metadata registry - maps event names to their properties

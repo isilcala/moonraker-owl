@@ -591,17 +591,19 @@ class CommandProcessor:
     async def _execute(self, message: CommandMessage) -> Optional[Dict[str, Any]]:
         """Execute a command and return result details.
 
-        Commands are dispatched based on their name:
-        - sensors:set-rate: Configure telemetry cadence
+        Commands are dispatched based on their name (ADR-0013 naming):
+        - control:set-telemetry-rate: Configure telemetry cadence
         - heater:set-target: Set heater target temperature
         - heater:turn-off: Turn off a specific heater
         - fan:set-speed: Set fan speed
-        - pause/resume/cancel: Print control actions
-        - job:set-thumbnail-url: Set thumbnail URL for current print job
+        - print:pause/resume/cancel: Print control actions
+        - sync:job-thumbnail: Set thumbnail URL for current print job
+        - task:upload-thumbnail: Upload thumbnail to presigned URL
+        - task:capture-image: Capture and upload camera frame
         """
-        # Telemetry cadence control
-        if message.command == PrinterCommandNames.SENSORS_SET_RATE:
-            return self._execute_sensors_set_rate(message)
+        # System control commands
+        if message.command == PrinterCommandNames.SET_TELEMETRY_RATE:
+            return self._execute_set_telemetry_rate(message)
 
         # Heater control commands
         if message.command == PrinterCommandNames.HEATER_SET_TARGET:
@@ -613,14 +615,21 @@ class CommandProcessor:
         if message.command == PrinterCommandNames.FAN_SET_SPEED:
             return await self._execute_fan_set_speed(message)
 
-        # Job control commands
-        if message.command == PrinterCommandNames.JOB_SET_THUMBNAIL_URL:
-            return self._execute_job_set_thumbnail_url(message)
+        # System sync commands
+        if message.command == PrinterCommandNames.SYNC_JOB_THUMBNAIL:
+            return self._execute_sync_job_thumbnail(message)
 
         # Print control commands (pause, resume, cancel)
-        if message.command in PrinterCommandNames.PRINT_CONTROL_COMMANDS:
+        # Map command name to Moonraker action (print:pause -> pause)
+        command_to_action = {
+            PrinterCommandNames.PAUSE: "pause",
+            PrinterCommandNames.RESUME: "resume",
+            PrinterCommandNames.CANCEL: "cancel",
+        }
+        if message.command in command_to_action:
+            moonraker_action = command_to_action[message.command]
             try:
-                await self._moonraker.execute_print_action(message.command)
+                await self._moonraker.execute_print_action(moonraker_action)
             except ValueError as exc:
                 raise CommandProcessingError(
                     str(exc), code="unsupported_command", command_id=message.command_id
@@ -640,7 +649,8 @@ class CommandProcessor:
             command_id=message.command_id,
         )
 
-    def _execute_sensors_set_rate(self, message: CommandMessage) -> Dict[str, Any]:
+    def _execute_set_telemetry_rate(self, message: CommandMessage) -> Dict[str, Any]:
+        """Handle control:set-telemetry-rate command."""
         if self._telemetry is None:
             raise CommandProcessingError(
                 "Telemetry publisher unavailable",
@@ -756,11 +766,11 @@ class CommandProcessor:
         return details
 
     # -------------------------------------------------------------------------
-    # Job Control Commands
+    # System Sync Commands
     # -------------------------------------------------------------------------
 
-    def _execute_job_set_thumbnail_url(self, message: CommandMessage) -> Dict[str, Any]:
-        """Set the thumbnail URL for the current print job.
+    def _execute_sync_job_thumbnail(self, message: CommandMessage) -> Dict[str, Any]:
+        """Handle sync:job-thumbnail command.
 
         This command is sent by the server after it uploads the thumbnail to S3.
         The URL is stored and included in subsequent status telemetry payloads.

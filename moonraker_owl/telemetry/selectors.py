@@ -409,7 +409,7 @@ def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
     if session.message:
         payload["message"] = session.message
 
-    # Include thumbnail URL if set by server via job:set-thumbnail-url command
+    # Include thumbnail URL if set by server via sync:job-thumbnail command
     if session.thumbnail_url:
         payload["thumbnailUrl"] = session.thumbnail_url
 

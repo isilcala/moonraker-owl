@@ -1227,7 +1227,7 @@ class TelemetryPublisher:
     def set_thumbnail_url(self, url: Optional[str]) -> None:
         """Set the thumbnail URL for the current print job.
 
-        Called by CommandProcessor when job:set-thumbnail-url command is received.
+        Called by CommandProcessor when sync:job-thumbnail command is received.
         The URL will be included in subsequent status telemetry payloads.
 
         Args:

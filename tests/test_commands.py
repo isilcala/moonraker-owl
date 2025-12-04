@@ -206,11 +206,11 @@ async def test_command_processor_executes_action_and_sends_ack(config):
 
     message = {
         "commandId": "cmd-1",
-        "action": "pause",
+        "command": "print:pause",
         "payload": {},
     }
 
-    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
 
     assert moonraker.actions == ["pause"]
 
@@ -220,7 +220,7 @@ async def test_command_processor_executes_action_and_sends_ack(config):
     assert len(mqtt.published) == 1
     topic, payload, qos, retain = mqtt.published[0]
     accepted = json.loads(payload.decode("utf-8"))
-    assert topic == "owl/printers/device-123/acks/pause"
+    assert topic == "owl/printers/device-123/acks/print%3Apause"
     assert accepted["status"] == "accepted"
     assert accepted["commandId"] == "cmd-1"
     assert accepted["stage"] == "dispatch"
@@ -241,7 +241,7 @@ async def test_command_processor_executes_action_and_sends_ack(config):
     assert len(mqtt.published) == 2
     topic, payload, qos, retain = mqtt.published[1]
     completed = json.loads(payload.decode("utf-8"))
-    assert topic == "owl/printers/device-123/acks/pause"
+    assert topic == "owl/printers/device-123/acks/print%3Apause"
     assert completed["status"] == "completed"
     assert completed["stage"] == "execution"
     assert completed["commandId"] == "cmd-1"
@@ -299,7 +299,7 @@ async def test_command_processor_rejects_invalid_payload(config):
     if mqtt.handler is None:
         pytest.fail("handler not registered")
 
-    result = mqtt.handler("owl/printers/device-123/commands/pause", b"not json")
+    result = mqtt.handler("owl/printers/device-123/commands/print:pause", b"not json")
     if hasattr(result, "__await__"):
         await result
 
@@ -322,11 +322,11 @@ async def test_command_processor_rejects_invalid_parameters(config):
 
     message = {
         "commandId": "cmd-3",
-        "command": "pause",
+        "command": "print:pause",
         "parameters": "not-an-object",
     }
 
-    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
 
     assert len(mqtt.published) == 1
     payload = json.loads(mqtt.published[0][1].decode("utf-8"))
@@ -343,8 +343,8 @@ async def test_command_processor_abandons_inflight_on_stop(config):
     telemetry = FakeTelemetry()
     processor = CommandProcessor(config, FakeMoonraker(), mqtt, telemetry=telemetry)
 
-    message = CommandMessage(command_id="cmd-abandon", command="pause", parameters={})
-    processor._begin_inflight("pause", message)  # type: ignore[attr-defined]
+    message = CommandMessage(command_id="cmd-abandon", command="print:pause", parameters={})
+    processor._begin_inflight("print:pause", message)  # type: ignore[attr-defined]
     assert processor.pending_count == 1
 
     await processor.abandon_inflight("reconnecting")
@@ -353,7 +353,7 @@ async def test_command_processor_abandons_inflight_on_stop(config):
     assert len(mqtt.published) == 1
     topic, payload, qos, retain = mqtt.published[0]
     abandoned = json.loads(payload.decode("utf-8"))
-    assert topic == "owl/printers/device-123/acks/pause"
+    assert topic == "owl/printers/device-123/acks/print%3Apause"
     assert abandoned["status"] == "failed"
     assert abandoned["stage"] == "execution"
     assert abandoned["reason"]["code"] == "agent_restart"
@@ -379,11 +379,11 @@ async def test_command_processor_replays_cached_ack_for_duplicate(config):
 
     message = {
         "commandId": "cmd-dup",
-        "action": "pause",
+        "command": "print:pause",
         "payload": {},
     }
 
-    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
     # Only accepted ack sent initially for state-based commands
     assert len(mqtt.published) == 1
     assert moonraker.actions == ["pause"]
@@ -397,12 +397,12 @@ async def test_command_processor_replays_cached_ack_for_duplicate(config):
     assert len(mqtt.published) == 2
 
     # Replay of same command should use cached completed ack
-    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
 
     assert len(mqtt.published) == 3
     topic, payload, qos, retain = mqtt.published[-1]
     replay = json.loads(payload.decode("utf-8"))
-    assert topic == "owl/printers/device-123/acks/pause"
+    assert topic == "owl/printers/device-123/acks/print%3Apause"
     assert replay["status"] == "completed"
     assert replay["stage"] == "execution"
     assert replay["commandId"] == "cmd-dup"
@@ -429,7 +429,7 @@ async def test_command_processor_handles_sensors_set_rate(config):
 
     message = {
         "commandId": "cmd-sensors",
-        "command": "sensors:set-rate",
+        "command": "control:set-telemetry-rate",
         "parameters": {
             "mode": "watch",
             "maxHz": 5.0,
@@ -439,7 +439,7 @@ async def test_command_processor_handles_sensors_set_rate(config):
     }
 
     await mqtt.emit(
-        "owl/printers/device-123/commands/sensors:set-rate",
+        "owl/printers/device-123/commands/control:set-telemetry-rate",
         message,
     )
 
@@ -453,7 +453,7 @@ async def test_command_processor_handles_sensors_set_rate(config):
     completed_records = [r for r in telemetry.records if r["state"] == "completed"]
     assert completed_records
     completed = completed_records[-1]
-    assert completed["command_type"] == "sensors:set-rate"
+    assert completed["command_type"] == "control:set-telemetry-rate"
     details = completed["details"]
     assert details is not None
     assert details["mode"] == "watch"
@@ -463,13 +463,13 @@ async def test_command_processor_handles_sensors_set_rate(config):
 
     assert len(mqtt.published) == 2
     first_topic, first_payload, _, _ = mqtt.published[0]
-    assert first_topic == "owl/printers/device-123/acks/sensors%3Aset-rate"
+    assert first_topic == "owl/printers/device-123/acks/control%3Aset-telemetry-rate"
     first_ack = json.loads(first_payload.decode("utf-8"))
     assert first_ack["status"] == "accepted"
     assert first_ack["stage"] == "dispatch"
 
     second_topic, second_payload, _, _ = mqtt.published[1]
-    assert second_topic == "owl/printers/device-123/acks/sensors%3Aset-rate"
+    assert second_topic == "owl/printers/device-123/acks/control%3Aset-telemetry-rate"
     second_ack = json.loads(second_payload.decode("utf-8"))
     assert second_ack["status"] == "completed"
     assert second_ack["stage"] == "execution"
@@ -495,7 +495,7 @@ async def test_sensors_set_rate_deduplication_extends_watch_window(config):
     # First command: sets watch mode at 1 Hz
     first_message = {
         "commandId": "cmd-1",
-        "command": "sensors:set-rate",
+        "command": "control:set-telemetry-rate",
         "parameters": {
             "mode": "watch",
             "maxHz": 1.0,
@@ -503,7 +503,7 @@ async def test_sensors_set_rate_deduplication_extends_watch_window(config):
             "issuedAt": "2025-01-01T12:00:00Z",
         },
     }
-    await mqtt.emit("owl/printers/device-123/commands/sensors:set-rate", first_message)
+    await mqtt.emit("owl/printers/device-123/commands/control:set-telemetry-rate", first_message)
 
     assert len(telemetry.applied) == 1
     assert len(telemetry.extended) == 0
@@ -511,7 +511,7 @@ async def test_sensors_set_rate_deduplication_extends_watch_window(config):
     # Second command: same mode and interval, should extend only
     second_message = {
         "commandId": "cmd-2",
-        "command": "sensors:set-rate",
+        "command": "control:set-telemetry-rate",
         "parameters": {
             "mode": "watch",
             "maxHz": 1.0,
@@ -519,7 +519,7 @@ async def test_sensors_set_rate_deduplication_extends_watch_window(config):
             "issuedAt": "2025-01-01T12:01:00Z",
         },
     }
-    await mqtt.emit("owl/printers/device-123/commands/sensors:set-rate", second_message)
+    await mqtt.emit("owl/printers/device-123/commands/control:set-telemetry-rate", second_message)
 
     # Should NOT call apply_sensors_rate again, only extend_watch_window
     assert len(telemetry.applied) == 1
@@ -547,10 +547,10 @@ async def test_sensors_set_rate_different_mode_triggers_full_apply(config):
 
     # First: set watch mode
     await mqtt.emit(
-        "owl/printers/device-123/commands/sensors:set-rate",
+        "owl/printers/device-123/commands/control:set-telemetry-rate",
         {
             "commandId": "cmd-1",
-            "command": "sensors:set-rate",
+            "command": "control:set-telemetry-rate",
             "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
         },
     )
@@ -558,10 +558,10 @@ async def test_sensors_set_rate_different_mode_triggers_full_apply(config):
 
     # Second: change to idle mode - should trigger full apply
     await mqtt.emit(
-        "owl/printers/device-123/commands/sensors:set-rate",
+        "owl/printers/device-123/commands/control:set-telemetry-rate",
         {
             "commandId": "cmd-2",
-            "command": "sensors:set-rate",
+            "command": "control:set-telemetry-rate",
             "parameters": {"mode": "idle", "maxHz": 0.033},
         },
     )
@@ -587,10 +587,10 @@ async def test_sensors_set_rate_different_hz_triggers_full_apply(config):
 
     # First: watch at 1 Hz
     await mqtt.emit(
-        "owl/printers/device-123/commands/sensors:set-rate",
+        "owl/printers/device-123/commands/control:set-telemetry-rate",
         {
             "commandId": "cmd-1",
-            "command": "sensors:set-rate",
+            "command": "control:set-telemetry-rate",
             "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
         },
     )
@@ -598,10 +598,10 @@ async def test_sensors_set_rate_different_hz_triggers_full_apply(config):
 
     # Second: watch at 2 Hz - different rate, should full apply
     await mqtt.emit(
-        "owl/printers/device-123/commands/sensors:set-rate",
+        "owl/printers/device-123/commands/control:set-telemetry-rate",
         {
             "commandId": "cmd-2",
-            "command": "sensors:set-rate",
+            "command": "control:set-telemetry-rate",
             "parameters": {"mode": "watch", "maxHz": 2.0, "durationSeconds": 120},
         },
     )
@@ -630,7 +630,7 @@ async def test_sensors_set_rate_clock_skew_correction(config):
     # So when server says "expires in 120s from now", we should adjust
     message = {
         "commandId": "cmd-clock",
-        "command": "sensors:set-rate",
+        "command": "control:set-telemetry-rate",
         "parameters": {
             "mode": "watch",
             "maxHz": 1.0,
@@ -641,7 +641,7 @@ async def test_sensors_set_rate_clock_skew_correction(config):
         },
     }
 
-    await mqtt.emit("owl/printers/device-123/commands/sensors:set-rate", message)
+    await mqtt.emit("owl/printers/device-123/commands/control:set-telemetry-rate", message)
 
     assert len(telemetry.applied) == 1
     apply_args = telemetry.applied[0]
@@ -691,11 +691,11 @@ async def test_state_based_completion_resume_command(config):
 
     message = {
         "commandId": "cmd-resume",
-        "action": "resume",
+        "command": "print:resume",
         "payload": {},
     }
 
-    await mqtt.emit("owl/printers/device-123/commands/resume", message)
+    await mqtt.emit("owl/printers/device-123/commands/print:resume", message)
 
     # Only accepted ack sent initially
     assert len(mqtt.published) == 1
@@ -725,11 +725,11 @@ async def test_state_based_completion_cancel_command(config):
 
     message = {
         "commandId": "cmd-cancel",
-        "action": "cancel",
+        "command": "print:cancel",
         "payload": {},
     }
 
-    await mqtt.emit("owl/printers/device-123/commands/cancel", message)
+    await mqtt.emit("owl/printers/device-123/commands/print:cancel", message)
 
     # Only accepted ack sent initially
     assert len(mqtt.published) == 1
@@ -757,11 +757,11 @@ async def test_state_change_wrong_state_does_not_complete(config):
 
     message = {
         "commandId": "cmd-pause",
-        "action": "pause",
+        "command": "print:pause",
         "payload": {},
     }
 
-    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
     assert len(mqtt.published) == 1
 
     # Wrong state - should not trigger completion
@@ -792,13 +792,13 @@ async def test_pending_command_count(config):
     assert processor.pending_state_count == 0
 
     # Send pause command - should be pending
-    message = {"commandId": "cmd-1", "action": "pause", "payload": {}}
-    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    message = {"commandId": "cmd-1", "command": "print:pause", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
     assert processor.pending_state_count == 1
 
     # Send another pause command - should also be pending
-    message2 = {"commandId": "cmd-2", "action": "resume", "payload": {}}
-    await mqtt.emit("owl/printers/device-123/commands/resume", message2)
+    message2 = {"commandId": "cmd-2", "command": "print:resume", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/print:resume", message2)
     assert processor.pending_state_count == 2
 
     # Complete one
@@ -818,8 +818,8 @@ async def test_state_change_case_insensitive(config):
 
     await processor.start()
 
-    message = {"commandId": "cmd-1", "action": "pause", "payload": {}}
-    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    message = {"commandId": "cmd-1", "command": "print:pause", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
     assert len(mqtt.published) == 1
 
     # State with different case should still match
@@ -843,10 +843,10 @@ async def test_multiple_commands_same_expected_state(config):
     await processor.start()
 
     # Send two pause commands
-    msg1 = {"commandId": "cmd-1", "action": "pause", "payload": {}}
-    msg2 = {"commandId": "cmd-2", "action": "pause", "payload": {}}
-    await mqtt.emit("owl/printers/device-123/commands/pause", msg1)
-    await mqtt.emit("owl/printers/device-123/commands/pause", msg2)
+    msg1 = {"commandId": "cmd-1", "command": "print:pause", "payload": {}}
+    msg2 = {"commandId": "cmd-2", "command": "print:pause", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", msg1)
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", msg2)
 
     # 2 accepted acks
     assert len(mqtt.published) == 2
@@ -873,8 +873,8 @@ async def test_abandon_pending_commands_on_stop(config):
 
     await processor.start()
 
-    message = {"commandId": "cmd-1", "action": "pause", "payload": {}}
-    await mqtt.emit("owl/printers/device-123/commands/pause", message)
+    message = {"commandId": "cmd-1", "command": "print:pause", "payload": {}}
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
     assert processor.pending_state_count == 1
 
     # Stop should abandon pending commands
@@ -1264,3 +1264,9 @@ async def test_fan_set_speed_requires_parameters(config):
     assert failed["reason"]["code"] == "invalid_parameters"
 
     await processor.stop()
+
+
+
+
+
+

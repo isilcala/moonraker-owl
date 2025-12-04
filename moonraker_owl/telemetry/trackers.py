@@ -44,7 +44,7 @@ class SessionInfo:
     timelapse_paused: bool
     message: Optional[str]
 
-    # Cloud-assigned thumbnail URL (set via job:set-thumbnail-url command)
+    # Cloud-assigned thumbnail URL (set via sync:job-thumbnail command)
     thumbnail_url: Optional[str] = None
 
 
@@ -100,7 +100,7 @@ class PrintSessionTracker:
     def set_thumbnail_url(self, url: Optional[str]) -> None:
         """Set the thumbnail URL for the current print job.
 
-        Called by CommandProcessor when job:set-thumbnail-url command is received.
+        Called by CommandProcessor when sync:job-thumbnail command is received.
         The URL is cleared when the job ends (session_id becomes None).
         """
         self._current_thumbnail_url = url

@@ -187,7 +187,7 @@ class EventCollector:
         """
         occurred = occurred_at or datetime.now(timezone.utc)
         payload: Dict[str, Any] = {
-            "eventName": "commandStateChanged",
+            "eventName": "system:command-state",
             "severity": "info",
             "occurredAtUtc": occurred.replace(microsecond=0).isoformat(),
             "data": {
