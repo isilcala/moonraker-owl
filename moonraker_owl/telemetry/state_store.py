@@ -61,14 +61,6 @@ class MoonrakerStateStore:
         result = payload.get("result") if isinstance(payload, Mapping) else None
         if isinstance(result, Mapping):
             status = result.get("status")
-            # Debug: log HTTP responses that contain print_stats
-            if isinstance(status, Mapping) and "print_stats" in status:
-                ps = status.get("print_stats", {})
-                LOGGER.debug(
-                    "HTTP response contains print_stats: state=%s keys=%s",
-                    ps.get("state") if isinstance(ps, Mapping) else None,
-                    list(ps.keys()) if isinstance(ps, Mapping) else [],
-                )
             self._ingest_status(status, observed_at)
 
         method = payload.get("method") if isinstance(payload, Mapping) else None

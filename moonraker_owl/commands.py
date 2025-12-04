@@ -943,6 +943,16 @@ class CommandProcessor:
                 result.file_size_bytes,
                 thumbnail_key,
             )
+
+            # Set the thumbnail URL in telemetry so it appears in status updates
+            thumbnail_url = params.get("thumbnailUrl")
+            if thumbnail_url and self._telemetry:
+                self._telemetry.set_thumbnail_url(thumbnail_url)
+                LOGGER.debug(
+                    "Set thumbnail URL for status telemetry: %s",
+                    thumbnail_url[:50] + "..." if len(thumbnail_url) > 50 else thumbnail_url,
+                )
+
             return {
                 "success": True,
                 "jobId": job_id,
