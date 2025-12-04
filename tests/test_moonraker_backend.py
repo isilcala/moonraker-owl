@@ -332,7 +332,9 @@ class TestFactoryMethods:
 
         with patch(
             "moonraker_owl.backends.moonraker.CommandProcessor"
-        ) as MockProcessor:
+        ) as MockProcessor, patch(
+            "moonraker_owl.backends.moonraker.S3UploadClient"
+        ) as MockS3Client:
             result = backend.create_command_processor(
                 mock_owl_config, mock_mqtt, mock_telemetry
             )
@@ -342,4 +344,5 @@ class TestFactoryMethods:
                 backend._client,
                 mock_mqtt,
                 telemetry=mock_telemetry,
+                s3_upload=MockS3Client.return_value,
             )

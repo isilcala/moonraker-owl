@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..adapters import MoonrakerClient
+from ..adapters.s3_upload import S3UploadClient
 from ..commands import CommandProcessor
 from ..core.printer_backend import (
     PrinterBackend,
@@ -164,11 +165,15 @@ class MoonrakerBackend(PrinterBackend):
         Returns:
             CommandProcessor instance.
         """
+        # Create S3 upload client for task:upload-thumbnail command (ADR-0013 Phase 2)
+        s3_upload = S3UploadClient()
+
         return CommandProcessor(
             config,
             self._client,
             mqtt_client,
             telemetry=telemetry,
+            s3_upload=s3_upload,
         )
 
     # -------------------------------------------------------------------------

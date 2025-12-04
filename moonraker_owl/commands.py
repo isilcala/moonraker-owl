@@ -14,6 +14,7 @@ from urllib.parse import quote
 from .printer_command_names import PrinterCommandNames
 from .config import OwlConfig
 from .telemetry import TelemetryPublisher
+from .adapters.s3_upload import S3UploadClient, UploadResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -184,11 +185,13 @@ class CommandProcessor:
         moonraker: MoonrakerCommandClient,
         mqtt: MQTTCommandsClient,
         telemetry: Optional[TelemetryPublisher] = None,
+        s3_upload: Optional[S3UploadClient] = None,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
         self._mqtt = mqtt
         self._telemetry = telemetry
+        self._s3_upload = s3_upload
 
         (
             self._tenant_id,
@@ -619,6 +622,10 @@ class CommandProcessor:
         if message.command == PrinterCommandNames.SYNC_JOB_THUMBNAIL:
             return self._execute_sync_job_thumbnail(message)
 
+        # System task commands
+        if message.command == PrinterCommandNames.UPLOAD_THUMBNAIL:
+            return await self._execute_upload_thumbnail(message)
+
         # Print control commands (pause, resume, cancel)
         # Map command name to Moonraker action (print:pause -> pause)
         command_to_action = {
@@ -811,6 +818,149 @@ class CommandProcessor:
             "thumbnailUrl": thumbnail_url,
             "printJobId": print_job_id,
         }
+
+    async def _execute_upload_thumbnail(
+        self, message: CommandMessage
+    ) -> Dict[str, Any]:
+        """Handle task:upload-thumbnail command.
+
+        This command is sent by the server to request thumbnail upload.
+        The agent fetches the thumbnail from Moonraker and uploads it
+        to the presigned S3 URL.
+
+        Parameters:
+            jobId (str): The print job ID
+            uploadUrl (str): Presigned URL for uploading
+            thumbnailKey (str): S3 key for the thumbnail
+            contentType (str): Expected content type (e.g., "image/png")
+            maxSizeBytes (int, optional): Maximum file size allowed
+            expiresAt (str, optional): When the presigned URL expires
+        """
+        if self._s3_upload is None:
+            raise CommandProcessingError(
+                "S3 upload client unavailable",
+                code="upload_unavailable",
+                command_id=message.command_id,
+            )
+
+        if self._telemetry is None:
+            raise CommandProcessingError(
+                "Telemetry publisher unavailable",
+                code="telemetry_unavailable",
+                command_id=message.command_id,
+            )
+
+        params = message.parameters or {}
+
+        job_id = params.get("jobId")
+        upload_url = params.get("uploadUrl")
+        thumbnail_key = params.get("thumbnailKey")
+        content_type = params.get("contentType", "image/png")
+        max_size_bytes = params.get("maxSizeBytes", 5 * 1024 * 1024)  # 5 MB default
+
+        if not upload_url or not isinstance(upload_url, str):
+            raise CommandProcessingError(
+                "uploadUrl parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        if not thumbnail_key or not isinstance(thumbnail_key, str):
+            raise CommandProcessingError(
+                "thumbnailKey parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        # Get current job thumbnail info from telemetry state
+        thumbnail_info = self._telemetry.get_current_thumbnail_info()
+        if thumbnail_info is None:
+            LOGGER.warning(
+                "No thumbnail available for job %s",
+                job_id[:8] if job_id else "unknown",
+            )
+            return {
+                "success": False,
+                "jobId": job_id,
+                "error": "no_thumbnail_available",
+                "errorMessage": "No thumbnail path available from current print job",
+            }
+
+        relative_path = thumbnail_info.get("relative_path")
+        gcode_filename = thumbnail_info.get("gcode_filename")
+
+        if not relative_path:
+            return {
+                "success": False,
+                "jobId": job_id,
+                "error": "no_thumbnail_path",
+                "errorMessage": "No thumbnail relative path available",
+            }
+
+        # Fetch thumbnail from Moonraker
+        try:
+            thumbnail_data = await self._moonraker.fetch_thumbnail(
+                relative_path, gcode_filename=gcode_filename, timeout=30.0
+            )
+        except Exception as exc:
+            LOGGER.error("Failed to fetch thumbnail: %s", exc)
+            return {
+                "success": False,
+                "jobId": job_id,
+                "error": "fetch_failed",
+                "errorMessage": str(exc),
+            }
+
+        if thumbnail_data is None:
+            return {
+                "success": False,
+                "jobId": job_id,
+                "error": "thumbnail_not_found",
+                "errorMessage": f"Thumbnail not found at {relative_path}",
+            }
+
+        # Validate size
+        if len(thumbnail_data) > max_size_bytes:
+            return {
+                "success": False,
+                "jobId": job_id,
+                "error": "thumbnail_too_large",
+                "errorMessage": f"Thumbnail size {len(thumbnail_data)} exceeds max {max_size_bytes}",
+            }
+
+        # Upload to S3
+        result = await self._s3_upload.upload(
+            presigned_url=upload_url,
+            data=thumbnail_data,
+            s3_key=thumbnail_key,
+            content_type=content_type,
+        )
+
+        if result.success:
+            LOGGER.info(
+                "Uploaded thumbnail for job %s: %d bytes to %s",
+                job_id[:8] if job_id else "unknown",
+                result.file_size_bytes,
+                thumbnail_key,
+            )
+            return {
+                "success": True,
+                "jobId": job_id,
+                "thumbnailKey": thumbnail_key,
+                "sizeBytes": result.file_size_bytes,
+            }
+        else:
+            LOGGER.warning(
+                "Failed to upload thumbnail for job %s: %s",
+                job_id[:8] if job_id else "unknown",
+                result.error_message,
+            )
+            return {
+                "success": False,
+                "jobId": job_id,
+                "error": result.error_code or "upload_failed",
+                "errorMessage": result.error_message,
+            }
 
     # -------------------------------------------------------------------------
     # Heater Control Commands

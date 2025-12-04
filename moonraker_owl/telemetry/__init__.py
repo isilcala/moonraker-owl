@@ -248,6 +248,10 @@ class TelemetryPublisher:
         # Timeout for fetching GCode metadata when enriching printStarted events
         self._thumbnail_fetch_timeout_ms = self._cadence.thumbnail_fetch_timeout_ms
 
+        # Current print job thumbnail info for task:upload-thumbnail command
+        # Stored when printStarted event is enriched, used by CommandProcessor
+        self._current_thumbnail_info: Optional[Dict[str, Any]] = None
+
         # Emit an initial cadence log to capture baseline configuration.
         self.apply_sensors_rate(
             mode="idle",
@@ -880,18 +884,21 @@ class TelemetryPublisher:
             self._orchestrator.sensors_selector.reset()
 
     async def _enrich_print_events(self, events_payload: Dict[str, Any]) -> None:
-        """Enrich printStarted events with thumbnailBase64 and set file metadata.
+        """Enrich printStarted events with hasThumbnail flag and set file metadata.
 
         This method:
-        1. Fetches GCode metadata to find the thumbnail
+        1. Fetches GCode metadata to find the thumbnail path
         2. Sets file metadata (gcode_start_byte, gcode_end_byte) for accurate progress calculation
-        3. Fetches and encodes the thumbnail image as Base64
+        3. Sets hasThumbnail=true if thumbnail is available (ADR-0013 Phase 2)
+        4. Stores thumbnail path info for later upload via task:upload-thumbnail command
+
+        Note: Thumbnail is NOT fetched or embedded here. The server will send a 
+        task:upload-thumbnail command with a presigned URL, and the agent will
+        then fetch and upload the thumbnail directly to S3.
 
         Args:
             events_payload: The events channel payload containing an "items" list.
         """
-        import base64
-
         # Events payload uses "items" key (see EventsSelector.build)
         events = events_payload.get("items")
         if not isinstance(events, list):
@@ -902,7 +909,7 @@ class TelemetryPublisher:
                 continue
 
             event_name = event.get("eventName")
-            if event_name != "printStarted":
+            if event_name != "print:started":
                 continue
 
             data = event.get("data")
@@ -912,6 +919,9 @@ class TelemetryPublisher:
             filename = data.get("filename")
             if not filename:
                 continue
+
+            # Clear any previous thumbnail info
+            self._current_thumbnail_info = None
 
             # Fetch metadata with timeout to get thumbnail paths and file byte ranges
             timeout_seconds = self._thumbnail_fetch_timeout_ms / 1000.0
@@ -960,44 +970,46 @@ class TelemetryPublisher:
                     )
                     continue
 
-                # Fetch thumbnail image data from Moonraker
-                thumb_data = await asyncio.wait_for(
-                    self._moonraker.fetch_thumbnail(thumb_path, gcode_filename=filename),
-                    timeout=timeout_seconds,
-                )
+                # Store thumbnail info for later upload via task:upload-thumbnail
+                self._current_thumbnail_info = {
+                    "relative_path": thumb_path,
+                    "gcode_filename": filename,
+                    "width": best_thumb.get("width"),
+                    "height": best_thumb.get("height"),
+                }
 
-                if not thumb_data:
-                    LOGGER.debug(
-                        "Thumbnail not found at path %s for %s",
-                        thumb_path,
-                        filename,
-                    )
-                    continue
-
-                # Encode as Base64 and add to event data
-                thumbnail_base64 = base64.b64encode(thumb_data).decode("ascii")
-                data["thumbnailBase64"] = thumbnail_base64
+                # Set hasThumbnail flag instead of embedding base64 (ADR-0013)
+                data["hasThumbnail"] = True
 
                 LOGGER.info(
-                    "Enriched printStarted event with thumbnail: filename=%s, size=%dx%d, bytes=%d",
+                    "Found thumbnail for printStarted event: filename=%s, size=%dx%d, path=%s",
                     filename,
                     best_thumb.get("width", 0),
                     best_thumb.get("height", 0),
-                    len(thumb_data),
+                    thumb_path,
                 )
 
             except asyncio.TimeoutError:
                 LOGGER.debug(
-                    "Timeout fetching thumbnail for %s (timeout=%dms)",
+                    "Timeout fetching metadata for %s (timeout=%dms)",
                     filename,
                     self._thumbnail_fetch_timeout_ms,
                 )
             except Exception as exc:
                 LOGGER.warning(
-                    "Error fetching thumbnail for %s: %s",
+                    "Error fetching metadata for %s: %s",
                     filename,
                     exc,
                 )
+
+    def get_current_thumbnail_info(self) -> Optional[Dict[str, Any]]:
+        """Get the current print job's thumbnail info for task:upload-thumbnail.
+
+        Returns:
+            Dictionary with thumbnail info (relative_path, gcode_filename, etc.)
+            or None if no thumbnail is available.
+        """
+        return self._current_thumbnail_info
 
     def _maybe_expire_watch_window(self, *, now: Optional[datetime] = None) -> None:
         if self._current_mode == "idle":
