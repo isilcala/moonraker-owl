@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import gzip
 import inspect
 import json
 import logging
@@ -19,7 +20,7 @@ from paho.mqtt.properties import Properties
 
 from .. import constants
 from ..adapters import MQTTConnectionError
-from ..config import OwlConfig
+from ..config import CompressionConfig, OwlConfig
 from ..core import PrinterAdapter, deep_merge
 from .cadence import (
     ChannelCadenceController,
@@ -1290,6 +1291,21 @@ class TelemetryPublisher:
         properties = Properties(PacketTypes.PUBLISH)
         # Note: Device authentication now handled via JWT (MQTT password)
         # No need to attach device_token as MQTT user property
+
+        # Apply compression if configured for this channel
+        compression_config = self._config.compression
+        should_compress = (
+            compression_config.enabled
+            and channel in compression_config.channels
+            and len(payload_bytes) >= compression_config.min_size_bytes
+        )
+
+        if should_compress:
+            compressed = gzip.compress(payload_bytes, compresslevel=6)
+            # Only use compressed if it's actually smaller
+            if len(compressed) < len(payload_bytes):
+                properties.ContentType = "application/gzip"
+                payload_bytes = compressed
 
         try:
             self._mqtt.publish(

@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import gzip
 import json
 import time
 from contextlib import suppress
@@ -15,6 +16,7 @@ import pytest
 from moonraker_owl.config import (
     CloudConfig,
     CommandConfig,
+    CompressionConfig,
     LoggingConfig,
     MoonrakerConfig,
     OwlConfig,
@@ -157,6 +159,7 @@ def build_config(
         commands=CommandConfig(),
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),
+        compression=CompressionConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -170,7 +173,15 @@ def _load_sample(name: str) -> Dict[str, Any]:
 
 
 def _decode(message: dict[str, Any]) -> Dict[str, Any]:
-    return json.loads(message["payload"].decode("utf-8"))
+    """Decode a telemetry message payload, handling gzip compression if present."""
+    payload = message["payload"]
+    props = message.get("properties")
+    content_type = getattr(props, "ContentType", None) if props else None
+
+    if content_type == "application/gzip":
+        payload = gzip.decompress(payload)
+
+    return json.loads(payload.decode("utf-8"))
 
 
 @pytest.mark.asyncio
@@ -1196,6 +1207,7 @@ def test_telemetry_configuration_requires_device_id():
         commands=CommandConfig(),
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),
+        compression=CompressionConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -1206,7 +1218,7 @@ def test_telemetry_configuration_requires_device_id():
         )
 
 
-def test_telemetry_configuration_requires_device_id():
+def test_telemetry_configuration_requires_device_id_v2():
     """Test that TelemetryPublisher raises error when device_id is missing."""
     parser = ConfigParser()
     parser.add_section("cloud")
@@ -1220,6 +1232,7 @@ def test_telemetry_configuration_requires_device_id():
         commands=CommandConfig(),
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),
+        compression=CompressionConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )

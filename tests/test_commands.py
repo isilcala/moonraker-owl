@@ -17,6 +17,7 @@ from moonraker_owl.commands import (
 from moonraker_owl.config import (
     CloudConfig,
     CommandConfig,
+    CompressionConfig,
     LoggingConfig,
     MoonrakerConfig,
     OwlConfig,
@@ -182,10 +183,11 @@ def config() -> OwlConfig:
         ),
         moonraker=MoonrakerConfig(),
         telemetry=TelemetryConfig(),
-    telemetry_cadence=TelemetryCadenceConfig(),
+        telemetry_cadence=TelemetryCadenceConfig(),
         commands=CommandConfig(),
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),
+        compression=CompressionConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -667,6 +669,7 @@ def test_command_processor_requires_device_id():
         commands=CommandConfig(),
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),
+        compression=CompressionConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )

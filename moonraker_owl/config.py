@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from configparser import ConfigParser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -107,6 +108,23 @@ class ResilienceConfig:
 
 
 @dataclass(slots=True)
+class CompressionConfig:
+    """Configuration for telemetry compression.
+    
+    Compression can be disabled globally via the OWL_COMPRESSION_DISABLED
+    environment variable (set to 'true', '1', or 'yes').
+    """
+    enabled: bool = True
+    channels: List[str] = field(default_factory=lambda: ["sensors"])
+    min_size_bytes: int = 1024
+
+    @classmethod
+    def is_disabled_by_env(cls) -> bool:
+        """Check if compression is disabled via environment variable."""
+        return os.environ.get("OWL_COMPRESSION_DISABLED", "").lower() in ("true", "1", "yes")
+
+
+@dataclass(slots=True)
 class OwlConfig:
     cloud: CloudConfig
     moonraker: MoonrakerConfig
@@ -115,6 +133,7 @@ class OwlConfig:
     commands: CommandConfig
     logging: LoggingConfig
     resilience: ResilienceConfig
+    compression: CompressionConfig
     raw: ConfigParser
     path: Path
 
@@ -182,6 +201,11 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "health_enabled": "false",
                 "health_host": "127.0.0.1",
                 "health_port": "0",
+            },
+            "compression": {
+                "enabled": "true",
+                "channels": "sensors",
+                "min_size_bytes": "1024",
             },
         }
     )
@@ -339,14 +363,33 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         health_port=parser.getint("resilience", "health_port", fallback=0),
     )
 
+    # Compression config - environment variable takes precedence
+    compression_defaults = CompressionConfig()
+    if CompressionConfig.is_disabled_by_env():
+        compression = CompressionConfig(enabled=False)
+    else:
+        compression = CompressionConfig(
+            enabled=parser.getboolean(
+                "compression", "enabled", fallback=compression_defaults.enabled
+            ),
+            channels=_parse_list(
+                parser.get("compression", "channels", fallback="sensors"),
+                default=compression_defaults.channels,
+            ),
+            min_size_bytes=parser.getint(
+                "compression", "min_size_bytes", fallback=compression_defaults.min_size_bytes
+            ),
+        )
+
     return OwlConfig(
         cloud=cloud,
         moonraker=moonraker,
         telemetry=telemetry,
-    telemetry_cadence=telemetry_cadence,
+        telemetry_cadence=telemetry_cadence,
         commands=commands,
         logging=logging_config,
         resilience=resilience,
+        compression=compression,
         raw=parser,
         path=config_path,
     )
