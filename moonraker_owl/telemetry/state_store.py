@@ -194,20 +194,11 @@ class MoonrakerStateStore:
                 # Log print_stats updates for debugging state transitions
                 if isinstance(entry, Mapping) and "print_stats" in entry:
                     ps = entry["print_stats"]
-                    if isinstance(ps, Mapping):
-                        # Log state changes at DEBUG level
-                        if "state" in ps:
-                            LOGGER.debug(
-                                "WS: print_stats.state=%s",
-                                ps.get("state"),
-                            )
-                        # Also log if print_stats update doesn't contain state
-                        # (this helps diagnose why state transitions might be missed)
-                        else:
-                            LOGGER.debug(
-                                "WS: print_stats update (no state field): keys=%s",
-                                list(ps.keys()),
-                            )
+                    if isinstance(ps, Mapping) and "state" in ps:
+                        LOGGER.debug(
+                            "WS: print_stats.state=%s",
+                            ps.get("state"),
+                        )
                 self._ingest_status(entry, observed_at)
             return
 

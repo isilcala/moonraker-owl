@@ -880,11 +880,12 @@ class TelemetryPublisher:
             self._orchestrator.sensors_selector.reset()
 
     async def _enrich_print_events(self, events_payload: Dict[str, Any]) -> None:
-        """Enrich printStarted events with thumbnailBase64 field.
+        """Enrich printStarted events with thumbnailBase64 and set file metadata.
 
-        This method fetches GCode metadata to find the thumbnail, fetches
-        the thumbnail image, and encodes it as Base64. The server will
-        upload to S3 and return a permanent URL.
+        This method:
+        1. Fetches GCode metadata to find the thumbnail
+        2. Sets file metadata (gcode_start_byte, gcode_end_byte) for accurate progress calculation
+        3. Fetches and encodes the thumbnail image as Base64
 
         Args:
             events_payload: The events channel payload containing an "items" list.
@@ -912,7 +913,7 @@ class TelemetryPublisher:
             if not filename:
                 continue
 
-            # Fetch metadata with timeout to get thumbnail paths
+            # Fetch metadata with timeout to get thumbnail paths and file byte ranges
             timeout_seconds = self._thumbnail_fetch_timeout_ms / 1000.0
             try:
                 metadata = await asyncio.wait_for(
@@ -921,10 +922,19 @@ class TelemetryPublisher:
                 )
                 if not metadata:
                     LOGGER.debug(
-                        "No metadata found for %s, skipping thumbnail",
+                        "No metadata found for %s, skipping thumbnail and file metadata",
                         filename,
                     )
                     continue
+
+                # Set file metadata for accurate progress calculation (Mainsail file-relative method)
+                gcode_start_byte = metadata.get("gcode_start_byte")
+                gcode_end_byte = metadata.get("gcode_end_byte")
+                self._orchestrator.session_tracker.set_file_metadata(
+                    filename=filename,
+                    gcode_start_byte=gcode_start_byte,
+                    gcode_end_byte=gcode_end_byte,
+                )
 
                 thumbnails = metadata.get("thumbnails", [])
                 if not thumbnails:

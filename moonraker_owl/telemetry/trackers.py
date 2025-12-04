@@ -55,12 +55,47 @@ class PrintSessionTracker:
     - Session ID is cleared when job ends (not latched)
     - Active job detection is simple: print_stats.state in {printing, paused}
     - Terminal states from history_event take precedence
+    - Progress calculation uses file-relative method (like Mainsail's default)
     """
 
     def __init__(self) -> None:
         self._current_session_id: Optional[str] = None
         # Cloud-assigned thumbnail URL for the current print job
         self._current_thumbnail_url: Optional[str] = None
+        # File metadata for accurate progress calculation (Mainsail file-relative method)
+        self._gcode_start_byte: Optional[int] = None
+        self._gcode_end_byte: Optional[int] = None
+        self._current_filename: Optional[str] = None
+
+    def set_file_metadata(
+        self,
+        filename: str,
+        gcode_start_byte: Optional[int],
+        gcode_end_byte: Optional[int],
+    ) -> None:
+        """Set file metadata for accurate progress calculation.
+
+        Called when a new print job starts. These values are used to calculate
+        progress using the file-relative method (excluding slicer headers).
+        """
+        self._current_filename = filename
+        self._gcode_start_byte = gcode_start_byte
+        self._gcode_end_byte = gcode_end_byte
+        if gcode_start_byte is not None and gcode_end_byte is not None:
+            LOGGER.debug(
+                "File metadata set: %s (gcode: %d-%d bytes)",
+                filename,
+                gcode_start_byte,
+                gcode_end_byte,
+            )
+        else:
+            LOGGER.debug("File metadata set: %s (no byte range)", filename)
+
+    def clear_file_metadata(self) -> None:
+        """Clear file metadata when job ends."""
+        self._current_filename = None
+        self._gcode_start_byte = None
+        self._gcode_end_byte = None
 
     def set_thumbnail_url(self, url: Optional[str]) -> None:
         """Set the thumbnail URL for the current print job.
@@ -117,9 +152,19 @@ class PrintSessionTracker:
             job_id=job_id,
             has_active_job=has_active_job,
         )
+
+        # Use file-relative progress if metadata available, otherwise fallback
+        # Check if filename matches current metadata (new job may not have metadata yet)
+        use_file_metadata = (
+            self._current_filename is not None
+            and filename is not None
+            and self._current_filename == filename
+        )
         progress_percent = _extract_progress_percent(
-            display_status,
             virtual_sdcard,
+            filename=filename if use_file_metadata else None,
+            gcode_start_byte=self._gcode_start_byte if use_file_metadata else None,
+            gcode_end_byte=self._gcode_end_byte if use_file_metadata else None,
         )
         elapsed_seconds = _as_int(print_stats.get("print_duration"))
         remaining_seconds = _as_int(print_stats.get("print_duration_remaining"))
@@ -134,11 +179,15 @@ class PrintSessionTracker:
             has_active_job=has_active_job,
         )
 
-        # Clear thumbnail URL when job ends
+        # Clear thumbnail URL and file metadata when job ends
         thumbnail_url = self._current_thumbnail_url if has_active_job else None
-        if not has_active_job and self._current_thumbnail_url:
-            self._current_thumbnail_url = None
-            LOGGER.debug("Cleared thumbnail URL (job ended)")
+        if not has_active_job:
+            if self._current_thumbnail_url:
+                self._current_thumbnail_url = None
+                LOGGER.debug("Cleared thumbnail URL (job ended)")
+            if self._current_filename:
+                self.clear_file_metadata()
+                LOGGER.debug("Cleared file metadata (job ended)")
 
         return SessionInfo(
             session_id=session_id,
@@ -389,28 +438,50 @@ def _normalise_message(
 
 
 def _extract_progress_percent(
-    display_status: Mapping[str, Any],
     virtual_sdcard: Mapping[str, Any],
+    filename: Optional[str],
+    gcode_start_byte: Optional[int],
+    gcode_end_byte: Optional[int],
 ) -> Optional[float]:
     """Extract progress percentage from Moonraker state.
 
-    Strategy aligned with Mainsail's 'slicer' mode:
-    - Primary: display_status.progress (slicer-reported, knows actual print progress)
-    - Fallback: virtual_sdcard.progress (file position, less accurate during preheat)
+    Strategy aligned with Mainsail's 'file-relative' mode (default):
+    - Primary: Calculate from file_position relative to gcode byte range
+    - Fallback: virtual_sdcard.progress (when metadata unavailable)
 
-    Using display_status.progress as primary because:
-    - The slicer tracks actual extrusion progress, not just file reading
-    - During preheat, virtual_sdcard may advance while actual printing hasn't started
-    - Mainsail also prioritizes display_status when using 'slicer' mode
+    The file-relative method is more accurate because:
+    - It excludes slicer headers/metadata from progress calculation
+    - It matches what users see in Mainsail by default
+    - virtual_sdcard.progress includes header bytes which can cause mismatch
+
+    Reference: Mainsail src/store/printer/getters.ts getPrintPercentByFilepositionRelative
     """
-    display_progress = _as_float(display_status.get("progress"))
+    file_position = _as_int(virtual_sdcard.get("file_position"))
+
+    # Try file-relative calculation if we have all required data
+    if (
+        file_position is not None
+        and filename is not None
+        and gcode_start_byte is not None
+        and gcode_end_byte is not None
+        and gcode_end_byte > gcode_start_byte
+    ):
+        # Before gcode starts
+        if file_position <= gcode_start_byte:
+            return 0.0
+        # After gcode ends
+        if file_position >= gcode_end_byte:
+            return 100.0
+
+        # Calculate relative progress within gcode range
+        current_position = file_position - gcode_start_byte
+        max_position = gcode_end_byte - gcode_start_byte
+        if current_position > 0 and max_position > 0:
+            progress = (current_position / max_position) * 100.0
+            return max(0.0, min(progress, 100.0))
+
+    # Fallback to virtual_sdcard.progress when file-relative not possible
     sd_progress = _as_float(virtual_sdcard.get("progress"))
-
-    # Prefer display_status (slicer-reported) - it knows actual print progress
-    if display_progress is not None:
-        return max(0.0, min(display_progress * 100.0, 100.0))
-
-    # Fallback to virtual_sdcard when display_status unavailable
     if sd_progress is not None:
         return max(0.0, min(sd_progress * 100.0, 100.0))
 
