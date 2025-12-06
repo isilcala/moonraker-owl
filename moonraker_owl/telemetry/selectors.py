@@ -604,6 +604,7 @@ class ObjectsSelector:
 
         # No exclude_object data - feature not configured or no objects
         if exclude_obj_snapshot is None:
+            # Only log at TRACE level (below DEBUG) - this is very frequent
             return None
 
         data = exclude_obj_snapshot.data
@@ -612,6 +613,8 @@ class ObjectsSelector:
         # No objects defined - don't publish
         if not objects:
             return None
+
+        # Build definitions list
 
         # Build definitions list
         definitions: List[Dict[str, Any]] = []
@@ -652,6 +655,9 @@ class ObjectsSelector:
         # Check if we should publish (change detection)
         if not self.should_publish(self._previous_payload, payload):
             return None
+
+        LOGGER.info("[ObjectsSelector] Publishing objects channel: %d definitions, %d excluded, current=%s",
+            len(definitions), len(excluded), current)
 
         # Update previous payload for next comparison
         self._previous_payload = payload

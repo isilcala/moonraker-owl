@@ -605,6 +605,8 @@ class CommandProcessor:
         - task:capture-image: Capture and upload camera frame
         - object:exclude: Exclude an object from the current print (ADR-0016)
         """
+        LOGGER.debug("[CommandDispatch] Executing command: %s (id=%s)", message.command, message.command_id[:8])
+        
         # System control commands
         if message.command == PrinterCommandNames.SET_TELEMETRY_RATE:
             return self._execute_set_telemetry_rate(message)
@@ -1218,9 +1220,10 @@ class CommandProcessor:
     # Object Control Commands (ADR-0016: Exclude Object)
     # -------------------------------------------------------------------------
 
-    # Regex pattern for valid object names (alphanumeric, underscores, hyphens)
+    # Regex pattern for valid object names (alphanumeric, underscores, hyphens, dots)
     # Used to prevent G-code injection attacks
-    _OBJECT_NAME_PATTERN = __import__("re").compile(r"^[\w\-]+$")
+    # Dots are allowed because slicers like PrusaSlicer/OrcaSlicer use them in object names
+    _OBJECT_NAME_PATTERN = __import__("re").compile(r"^[\w\-\.]+$")
 
     async def _execute_object_exclude(self, message: CommandMessage) -> Dict[str, Any]:
         """Exclude an object from the current print (ADR-0016).
@@ -1237,9 +1240,11 @@ class CommandProcessor:
             CommandProcessingError: If objectName is missing, invalid, or execution fails.
         """
         params = message.parameters or {}
+        LOGGER.debug("[ExcludeObject] Received parameters: %s", params)
 
         object_name = params.get("objectName")
         if not object_name or not isinstance(object_name, str):
+            LOGGER.warning("[ExcludeObject] Missing objectName parameter. Received: %s", params)
             raise CommandProcessingError(
                 "objectName parameter is required",
                 code="missing_parameter",

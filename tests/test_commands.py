@@ -1451,6 +1451,8 @@ async def test_object_exclude_allows_valid_names(config):
         "test-part-2",
         "a",  # Single character
         "A1b2C3",  # Mixed case
+        "GIMBAL_PROTECTOR_V8.STEP_ID_1_COPY_0",  # Dots allowed (PrusaSlicer/OrcaSlicer format)
+        "part.1.2.3",  # Multiple dots
     ]
 
     for i, name in enumerate(valid_names):
