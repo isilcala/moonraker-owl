@@ -1269,14 +1269,19 @@ class CommandProcessor:
                 command_id=message.command_id,
             )
 
-        # Execute the EXCLUDE_OBJECT G-code command
+        # Execute the EXCLUDE_OBJECT G-code command using fire-and-forget.
+        # State changes are tracked via Moonraker WebSocket notifications,
+        # not command execution result. This allows:
+        # 1. No timeout issues for slow GCode execution
+        # 2. UI updates from any source (Mainsail, Fluidd, our UI)
+        # 3. ACK means "command sent" not "command completed"
         script = f"EXCLUDE_OBJECT NAME={object_name}"
 
         try:
-            await self._moonraker.execute_gcode(script)
+            await self._moonraker.execute_gcode(script, fire_and_forget=True)
         except Exception as exc:
             error_message = str(exc).lower()
-            # Check for common error patterns
+            # Only catch send failures, not execution failures
             if "unknown" in error_message or "not found" in error_message:
                 raise CommandProcessingError(
                     f"Object '{object_name}' not found in current print",
@@ -1284,8 +1289,8 @@ class CommandProcessor:
                     command_id=message.command_id,
                 ) from exc
             raise CommandProcessingError(
-                f"Failed to exclude object: {exc}",
-                code="gcode_error",
+                f"Failed to send exclude command: {exc}",
+                code="send_error",
                 command_id=message.command_id,
             ) from exc
 

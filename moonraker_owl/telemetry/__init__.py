@@ -1272,9 +1272,13 @@ class TelemetryPublisher:
         state = self._channel_state[channel]
         state.sequence += 1
 
+        # Use "delta" kind when payload is a delta update (e.g., objects channel without definitions)
+        # NexusService will merge delta payloads with the previous full payload
+        payload_kind = "delta" if frame.is_delta else "full"
+
         document: Dict[str, Any] = {
             "_schema": 1,
-            "kind": "full",
+            "kind": payload_kind,
             "_ts": frame.observed_at.replace(microsecond=0).isoformat(),
             "_origin": self._orchestrator.origin,
             "_seq": state.sequence,

@@ -562,6 +562,18 @@ class ObjectDefinition:
     polygon: Optional[List[List[float]]] = None
 
 
+@dataclass
+class ObjectsPayloadResult:
+    """Result from ObjectsSelector.build() with payload and delta flag.
+    
+    The is_delta flag indicates whether the payload is a delta update
+    (missing definitions) that requires NexusService to merge with
+    the previous full payload.
+    """
+    payload: Dict[str, Any]
+    is_delta: bool
+
+
 class ObjectsSelector:
     """Selector for the objects channel payload (ADR-0016: Exclude Object).
 
@@ -574,23 +586,32 @@ class ObjectsSelector:
     2. Objects are defined (during active print with labeled objects)
 
     The channel uses kind="full" for updates and kind="reset" on print end.
+    
+    Bandwidth optimization:
+    - First publish includes full definitions (with polygon data)
+    - Subsequent publishes omit definitions unless they change
+    - Client should cache definitions and use cached version when omitted
     """
 
     def __init__(self) -> None:
         self._previous_payload: Optional[Dict[str, Any]] = None
         self._has_published: bool = False
+        self._definitions_sent: bool = False
+        self._last_definitions: Optional[List[Dict[str, Any]]] = None
 
     def reset(self) -> None:
         """Reset selector state (e.g., on print end or reconnection)."""
         self._previous_payload = None
         self._has_published = False
+        self._definitions_sent = False
+        self._last_definitions = None
 
     def build(
         self,
         store: MoonrakerStateStore,
         *,
         observed_at: datetime,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[ObjectsPayloadResult]:
         """Build objects channel payload from exclude_object state.
 
         Args:
@@ -598,7 +619,8 @@ class ObjectsSelector:
             observed_at: Observation timestamp.
 
         Returns:
-            Objects payload dict or None if no objects defined or no change.
+            ObjectsPayloadResult with payload and is_delta flag, or None if no objects defined or no change.
+            When is_delta=True, the payload omits definitions and NexusService should merge with previous.
         """
         exclude_obj_snapshot = store.get("exclude_object")
 
@@ -646,24 +668,59 @@ class ObjectsSelector:
         if current is not None and not isinstance(current, str):
             current = str(current) if current else None
 
-        payload = {
+        # Check if definitions changed since last send
+        definitions_changed = (
+            self._last_definitions is None
+            or definitions != self._last_definitions
+        )
+
+        # Build payload - only include definitions on first send or when changed
+        # This reduces bandwidth as polygon data can be large
+        payload: Dict[str, Any] = {
+            "excluded": excluded,
+            "current": current,
+        }
+
+        # Include definitions if:
+        # 1. First time sending (not yet sent)
+        # 2. Definitions actually changed
+        include_definitions = not self._definitions_sent or definitions_changed
+        if include_definitions:
+            payload["definitions"] = definitions
+
+        # For change detection, we need to compare the "canonical" payload
+        # (with definitions) to properly detect excluded/current changes
+        canonical_payload = {
             "definitions": definitions,
             "excluded": excluded,
             "current": current,
         }
 
         # Check if we should publish (change detection)
-        if not self.should_publish(self._previous_payload, payload):
+        if not self.should_publish(self._previous_payload, canonical_payload):
             return None
 
-        LOGGER.info("[ObjectsSelector] Publishing objects channel: %d definitions, %d excluded, current=%s",
-            len(definitions), len(excluded), current)
+        # Log what we're publishing
+        if include_definitions:
+            LOGGER.info(
+                "[ObjectsSelector] Publishing objects channel (full): %d definitions, %d excluded, current=%s",
+                len(definitions), len(excluded), current
+            )
+        else:
+            LOGGER.info(
+                "[ObjectsSelector] Publishing objects channel (delta): %d excluded, current=%s",
+                len(excluded), current
+            )
 
-        # Update previous payload for next comparison
-        self._previous_payload = payload
+        # Update state for next comparison
+        self._previous_payload = canonical_payload
         self._has_published = True
+        is_delta = not include_definitions
+        if include_definitions:
+            self._definitions_sent = True
+            self._last_definitions = definitions
 
-        return payload
+        return ObjectsPayloadResult(payload=payload, is_delta=is_delta)
 
     def should_publish(
         self,

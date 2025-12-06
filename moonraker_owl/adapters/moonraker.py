@@ -212,22 +212,60 @@ class MoonrakerClient(PrinterAdapter):
                     f"Moonraker action '{action_normalized}' failed with status {response.status}: {detail.strip()}"
                 )
 
-    async def execute_gcode(self, script: str, timeout: float = 10.0) -> None:
+    async def execute_gcode(
+        self,
+        script: str,
+        timeout: float = 10.0,
+        fire_and_forget: bool = False,
+    ) -> None:
         """Execute a GCode script via Moonraker HTTP API.
 
         Args:
             script: GCode command(s) to execute. Multiple commands can be
                     separated by newlines.
             timeout: Request timeout in seconds (default: 10.0).
+            fire_and_forget: If True, send the request without waiting for
+                    completion. Useful for commands where state changes are
+                    tracked via WebSocket notifications (e.g., EXCLUDE_OBJECT).
 
         Raises:
-            asyncio.TimeoutError: If request exceeds timeout.
-            RuntimeError: If GCode execution fails.
+            asyncio.TimeoutError: If request exceeds timeout (only when not fire_and_forget).
+            RuntimeError: If GCode execution fails (only when not fire_and_forget).
         """
         session = await self._ensure_session()
         url = f"{self._base_url}/printer/gcode/script"
         payload = {"script": script}
 
+        if fire_and_forget:
+            # Fire-and-forget: just send the request, don't wait for response
+            # State changes will be tracked via Moonraker WebSocket notifications
+            try:
+                async with asyncio.timeout(5.0):  # Short timeout just for sending
+                    async with session.post(
+                        url, json=payload, headers=self._headers
+                    ) as response:
+                        if response.status >= 400:
+                            detail = await response.text()
+                            LOGGER.warning(
+                                "GCode send failed with status %d: %s (script=%r)",
+                                response.status,
+                                detail.strip(),
+                                script[:50] + "..." if len(script) > 50 else script,
+                            )
+                            raise RuntimeError(
+                                f"GCode send failed with status {response.status}: {detail.strip()}"
+                            )
+                        LOGGER.debug("GCode sent (fire-and-forget): %r", script)
+            except asyncio.TimeoutError:
+                # For fire-and-forget, timeout on send is a real error
+                LOGGER.warning(
+                    "GCode send timed out after 5.0s (script=%r)",
+                    script[:50] + "..." if len(script) > 50 else script,
+                )
+                raise
+            return
+
+        # Standard blocking execution
         try:
             async with asyncio.timeout(timeout):
                 async with session.post(

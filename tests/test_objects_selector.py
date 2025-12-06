@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from moonraker_owl.telemetry.selectors import ObjectsSelector
+from moonraker_owl.telemetry.selectors import ObjectsPayloadResult, ObjectsSelector
 from moonraker_owl.telemetry.state_store import MoonrakerStateStore
 
 
@@ -93,18 +93,20 @@ def test_objects_selector_builds_payload_with_objects() -> None:
     result = selector.build(store, observed_at=observed_at)
 
     assert result is not None
-    assert len(result["definitions"]) == 2
-    assert result["definitions"][0]["name"] == "cube_1"
-    assert result["definitions"][0]["center"] == [100.0, 100.0]
-    assert result["definitions"][0]["polygon"] == [
+    assert isinstance(result, ObjectsPayloadResult)
+    assert result.is_delta is False  # First publish is always full
+    assert len(result.payload["definitions"]) == 2
+    assert result.payload["definitions"][0]["name"] == "cube_1"
+    assert result.payload["definitions"][0]["center"] == [100.0, 100.0]
+    assert result.payload["definitions"][0]["polygon"] == [
         [50.0, 50.0],
         [150.0, 50.0],
         [150.0, 150.0],
         [50.0, 150.0],
     ]
-    assert result["definitions"][1]["name"] == "cube_2"
-    assert result["excluded"] == []
-    assert result["current"] == "cube_1"
+    assert result.payload["definitions"][1]["name"] == "cube_2"
+    assert result.payload["excluded"] == []
+    assert result.payload["current"] == "cube_1"
 
 
 def test_objects_selector_includes_excluded_objects() -> None:
@@ -128,8 +130,8 @@ def test_objects_selector_includes_excluded_objects() -> None:
     result = selector.build(store, observed_at=observed_at)
 
     assert result is not None
-    assert result["excluded"] == ["cube_1", "cube_3"]
-    assert result["current"] == "cube_2"
+    assert result.payload["excluded"] == ["cube_1", "cube_3"]
+    assert result.payload["current"] == "cube_2"
 
 
 def test_objects_selector_handles_objects_without_polygon() -> None:
@@ -150,10 +152,10 @@ def test_objects_selector_handles_objects_without_polygon() -> None:
     result = selector.build(store, observed_at=observed_at)
 
     assert result is not None
-    assert len(result["definitions"]) == 1
-    assert result["definitions"][0]["name"] == "simple_object"
-    assert "center" not in result["definitions"][0]
-    assert "polygon" not in result["definitions"][0]
+    assert len(result.payload["definitions"]) == 1
+    assert result.payload["definitions"][0]["name"] == "simple_object"
+    assert "center" not in result.payload["definitions"][0]
+    assert "polygon" not in result.payload["definitions"][0]
 
 
 def test_objects_selector_handles_null_current_object() -> None:
@@ -172,7 +174,7 @@ def test_objects_selector_handles_null_current_object() -> None:
     result = selector.build(store, observed_at=observed_at)
 
     assert result is not None
-    assert result["current"] is None
+    assert result.payload["current"] is None
 
 
 # =============================================================================
@@ -320,9 +322,9 @@ def test_objects_selector_handles_malformed_objects() -> None:
 
     assert result is not None
     # Should only include valid objects
-    assert len(result["definitions"]) == 2
-    assert result["definitions"][0]["name"] == "valid_object"
-    assert result["definitions"][1]["name"] == "another_valid"
+    assert len(result.payload["definitions"]) == 2
+    assert result.payload["definitions"][0]["name"] == "valid_object"
+    assert result.payload["definitions"][1]["name"] == "another_valid"
 
 
 def test_objects_selector_handles_malformed_polygon() -> None:
@@ -346,6 +348,207 @@ def test_objects_selector_handles_malformed_polygon() -> None:
 
     assert result is not None
     # Should only include valid polygon points
-    polygon = result["definitions"][0].get("polygon", [])
+    polygon = result.payload["definitions"][0].get("polygon", [])
     assert len(polygon) == 1  # Only [1.0, 2.0] is valid
     assert polygon[0] == [1.0, 2.0]
+
+
+# =============================================================================
+# Delta Payload Tests (Bandwidth Optimization)
+# =============================================================================
+
+
+def test_objects_selector_first_publish_includes_definitions() -> None:
+    """Test that first publish includes full definitions with polygon data."""
+    store = MoonrakerStateStore()
+    selector = ObjectsSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[
+                {
+                    "name": "cube_1",
+                    "center": [100.0, 100.0],
+                    "polygon": [[50.0, 50.0], [150.0, 50.0]],
+                },
+            ],
+            current_object="cube_1",
+        )
+    )
+
+    result = selector.build(store, observed_at=observed_at)
+
+    assert result is not None
+    assert result.is_delta is False  # First publish is full
+    assert "definitions" in result.payload
+    assert len(result.payload["definitions"]) == 1
+    assert result.payload["definitions"][0]["name"] == "cube_1"
+    assert "polygon" in result.payload["definitions"][0]
+
+
+def test_objects_selector_subsequent_publish_omits_definitions() -> None:
+    """Test that subsequent publishes omit definitions when unchanged."""
+    store = MoonrakerStateStore()
+    selector = ObjectsSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    # First publish - should include definitions
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[
+                {"name": "cube_1", "polygon": [[0, 0], [10, 10]]},
+                {"name": "cube_2", "polygon": [[20, 20], [30, 30]]},
+            ],
+            current_object="cube_1",
+        )
+    )
+    first_result = selector.build(store, observed_at=observed_at)
+    assert first_result is not None
+    assert first_result.is_delta is False
+    assert "definitions" in first_result.payload
+
+    # Second publish - current object changed, definitions should be omitted
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[
+                {"name": "cube_1", "polygon": [[0, 0], [10, 10]]},
+                {"name": "cube_2", "polygon": [[20, 20], [30, 30]]},
+            ],
+            current_object="cube_2",  # Changed
+        )
+    )
+    second_result = selector.build(store, observed_at=observed_at)
+
+    assert second_result is not None
+    assert second_result.is_delta is True  # Delta payload
+    assert "definitions" not in second_result.payload  # Omitted for bandwidth
+    assert second_result.payload["current"] == "cube_2"
+    assert second_result.payload["excluded"] == []
+
+
+def test_objects_selector_includes_definitions_on_excluded_change() -> None:
+    """Test that excluded list changes don't trigger definitions resend."""
+    store = MoonrakerStateStore()
+    selector = ObjectsSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    # First publish
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[
+                {"name": "cube_1"},
+                {"name": "cube_2"},
+            ],
+            excluded_objects=[],
+            current_object="cube_1",
+        )
+    )
+    first_result = selector.build(store, observed_at=observed_at)
+    assert first_result is not None
+    assert "definitions" in first_result.payload
+
+    # Exclude an object - definitions should be omitted
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[
+                {"name": "cube_1"},
+                {"name": "cube_2"},
+            ],
+            excluded_objects=["cube_1"],  # Changed
+            current_object="cube_2",
+        )
+    )
+    second_result = selector.build(store, observed_at=observed_at)
+
+    assert second_result is not None
+    assert second_result.is_delta is True
+    assert "definitions" not in second_result.payload
+    assert second_result.payload["excluded"] == ["cube_1"]
+
+
+def test_objects_selector_includes_definitions_when_changed() -> None:
+    """Test that definitions are included when they actually change."""
+    store = MoonrakerStateStore()
+    selector = ObjectsSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    # First publish with 2 objects
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[
+                {"name": "cube_1"},
+                {"name": "cube_2"},
+            ],
+            current_object="cube_1",
+        )
+    )
+    first_result = selector.build(store, observed_at=observed_at)
+    assert first_result is not None
+    assert "definitions" in first_result.payload
+    assert len(first_result.payload["definitions"]) == 2
+
+    # Definitions change (new object added - rare but possible)
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[
+                {"name": "cube_1"},
+                {"name": "cube_2"},
+                {"name": "cube_3"},  # New object
+            ],
+            current_object="cube_1",
+        )
+    )
+    second_result = selector.build(store, observed_at=observed_at)
+
+    assert second_result is not None
+    assert second_result.is_delta is False  # Full because definitions changed
+    assert "definitions" in second_result.payload  # Included because changed
+    assert len(second_result.payload["definitions"]) == 3
+
+
+def test_objects_selector_reset_triggers_full_publish() -> None:
+    """Test that reset() causes next publish to include definitions."""
+    store = MoonrakerStateStore()
+    selector = ObjectsSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    # First publish
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[{"name": "cube_1"}],
+            current_object="cube_1",
+        )
+    )
+    first_result = selector.build(store, observed_at=observed_at)
+    assert first_result is not None
+    assert "definitions" in first_result.payload
+
+    # Simulate excluded change (would normally omit definitions)
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[{"name": "cube_1"}],
+            excluded_objects=["cube_1"],
+            current_object=None,
+        )
+    )
+    second_result = selector.build(store, observed_at=observed_at)
+    assert second_result is not None
+    assert second_result.is_delta is True
+    assert "definitions" not in second_result.payload
+
+    # Reset (e.g., print end or reconnection)
+    selector.reset()
+
+    # Next publish should include definitions again
+    store.ingest(
+        make_exclude_object_notification(
+            objects=[{"name": "cube_1"}],
+            current_object="cube_1",
+        )
+    )
+    third_result = selector.build(store, observed_at=observed_at)
+
+    assert third_result is not None
+    assert third_result.is_delta is False  # Full publish after reset
+    assert "definitions" in third_result.payload  # Full publish after reset

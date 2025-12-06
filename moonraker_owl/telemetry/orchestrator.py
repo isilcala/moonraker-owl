@@ -25,6 +25,7 @@ class ChannelPayload:
     session_id: str
     observed_at: datetime
     forced: bool
+    is_delta: bool = False  # When True, NexusService should merge with previous payload
 
 
 class TelemetryOrchestrator:
@@ -259,10 +260,11 @@ class TelemetryOrchestrator:
         if objects_payload:
             frames["objects"] = ChannelPayload(
                 channel="objects",
-                payload=objects_payload,
+                payload=objects_payload.payload,
                 session_id=session.session_id,
                 observed_at=observed_at,
                 forced="objects" in forced,
+                is_delta=objects_payload.is_delta,
             )
 
         # Harvest alert events (P0/P1 lifecycle) and add to events channel.

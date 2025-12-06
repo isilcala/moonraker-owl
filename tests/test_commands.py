@@ -41,7 +41,12 @@ class FakeMoonraker:
             raise ValueError(f"Unsupported Moonraker action: {action}")
         self.actions.append(action)
 
-    async def execute_gcode(self, script: str, timeout: float = 10.0) -> None:
+    async def execute_gcode(
+        self,
+        script: str,
+        timeout: float = 10.0,
+        fire_and_forget: bool = False,
+    ) -> None:
         """Execute a GCode script (fake implementation for testing)."""
         self.gcode_scripts.append(script)
 
