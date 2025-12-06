@@ -11,7 +11,7 @@ from ..config import TelemetryCadenceConfig
 from ..version import __version__
 from .events import EventCollector
 from .event_types import Event, EventName, PRINT_STATE_TRANSITIONS
-from .selectors import EventsSelector, SensorsSelector, StatusSelector
+from .selectors import EventsSelector, ObjectsSelector, SensorsSelector, StatusSelector
 from .state_store import MoonrakerStateStore, MoonrakerStoreState
 from .trackers import HeaterMonitor, PrintSessionTracker, SessionInfo
 
@@ -60,6 +60,7 @@ class TelemetryOrchestrator:
 
         self.status_selector = StatusSelector(heartbeat_seconds=heartbeat)
         self.sensors_selector = SensorsSelector()
+        self.objects_selector = ObjectsSelector()
         self.events_selector = EventsSelector(
             max_per_second=self._cadence.events_max_per_second,
             max_per_minute=self._cadence.events_max_per_minute,
@@ -113,6 +114,7 @@ class TelemetryOrchestrator:
             self.store.restore_state(snapshot)
         self.status_selector.reset()
         self.sensors_selector.reset()
+        self.objects_selector.reset()
         self.events.reset()
         self.session_tracker = PrintSessionTracker()
         self.heater_monitor = HeaterMonitor()
@@ -216,6 +218,10 @@ class TelemetryOrchestrator:
             events=self.events.drain(),
             observed_at=observed_at,
         )
+        objects_payload = self.objects_selector.build(
+            self.store,
+            observed_at=observed_at,
+        )
 
         frames: Dict[str, ChannelPayload] = {}
         if status_payload:
@@ -248,6 +254,15 @@ class TelemetryOrchestrator:
                 session_id=session.session_id,
                 observed_at=observed_at,
                 forced="events" in forced,
+            )
+
+        if objects_payload:
+            frames["objects"] = ChannelPayload(
+                channel="objects",
+                payload=objects_payload,
+                session_id=session.session_id,
+                observed_at=observed_at,
+                forced="objects" in forced,
             )
 
         # Harvest alert events (P0/P1 lifecycle) and add to events channel.

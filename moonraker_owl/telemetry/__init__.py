@@ -166,11 +166,13 @@ class TelemetryPublisher:
             "status": f"{self._base_topic}/status",
             "sensors": f"{self._base_topic}/sensors",
             "events": f"{self._base_topic}/events",
+            "objects": f"{self._base_topic}/objects",
         }
         self._channel_qos = {
             "status": 1,
             "sensors": 0,
             "events": 2,
+            "objects": 1,
         }
         self._channel_state: Dict[str, _ChannelPublishState] = {
             name: _ChannelPublishState() for name in self._channel_topics
@@ -1200,6 +1202,17 @@ class TelemetryPublisher:
                 max_interval=None,  # Sensors uses force_publish_seconds instead
                 forced_interval=sensors_forced_interval,
                 force_publish_seconds=sensors_force_publish,
+            )
+
+        # Objects channel: event-driven like events, but uses cadence controller
+        # for minimum interval protection. No max_interval (heartbeat not needed).
+        if "objects" in self._channel_topics:
+            self._cadence_controller.configure(
+                "objects",
+                interval=1.0,  # Minimum 1 second between publishes
+                max_interval=None,  # No heartbeat - purely change-driven
+                forced_interval=None,
+                force_publish_seconds=None,
             )
 
         # Note: events channel is NOT configured in cadence controller.

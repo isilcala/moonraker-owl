@@ -30,6 +30,8 @@ DEFAULT_TELEMETRY_FIELDS = [
     "gcode_macro TIMELAPSE_TAKE_FRAME",
     "extruder",
     "heater_bed",
+    # Exclude object support (ADR-0016) - provides object definitions, exclusions, and current object
+    "exclude_object",
 ]
 
 
@@ -115,7 +117,7 @@ class CompressionConfig:
     environment variable (set to 'true', '1', or 'yes').
     """
     enabled: bool = True
-    channels: List[str] = field(default_factory=lambda: ["sensors"])
+    channels: List[str] = field(default_factory=lambda: ["sensors", "objects"])
     min_size_bytes: int = 1024
 
     @classmethod
@@ -373,7 +375,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "compression", "enabled", fallback=compression_defaults.enabled
             ),
             channels=_parse_list(
-                parser.get("compression", "channels", fallback="sensors"),
+                parser.get("compression", "channels", fallback="sensors,objects"),
                 default=compression_defaults.channels,
             ),
             min_size_bytes=parser.getint(

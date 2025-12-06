@@ -81,6 +81,13 @@ class PrinterCommandNames:
     """Capture and upload camera frame to presigned URL."""
 
     # -------------------------------------------------------------------------
+    # Object Control Commands (user-triggered, ADR-0016)
+    # -------------------------------------------------------------------------
+
+    OBJECT_EXCLUDE = "object:exclude"
+    """Exclude an object from the current print."""
+
+    # -------------------------------------------------------------------------
     # Command Sets
     # -------------------------------------------------------------------------
 

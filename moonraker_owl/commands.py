@@ -603,6 +603,7 @@ class CommandProcessor:
         - sync:job-thumbnail: Set thumbnail URL for current print job
         - task:upload-thumbnail: Upload thumbnail to presigned URL
         - task:capture-image: Capture and upload camera frame
+        - object:exclude: Exclude an object from the current print (ADR-0016)
         """
         # System control commands
         if message.command == PrinterCommandNames.SET_TELEMETRY_RATE:
@@ -617,6 +618,10 @@ class CommandProcessor:
         # Fan control commands
         if message.command == PrinterCommandNames.FAN_SET_SPEED:
             return await self._execute_fan_set_speed(message)
+
+        # Object control commands (ADR-0016)
+        if message.command == PrinterCommandNames.OBJECT_EXCLUDE:
+            return await self._execute_object_exclude(message)
 
         # System sync commands
         if message.command == PrinterCommandNames.SYNC_JOB_THUMBNAIL:
@@ -1207,6 +1212,82 @@ class CommandProcessor:
         return {
             "fan": fan_name,
             "speed": speed_value,
+        }
+
+    # -------------------------------------------------------------------------
+    # Object Control Commands (ADR-0016: Exclude Object)
+    # -------------------------------------------------------------------------
+
+    # Regex pattern for valid object names (alphanumeric, underscores, hyphens)
+    # Used to prevent G-code injection attacks
+    _OBJECT_NAME_PATTERN = __import__("re").compile(r"^[\w\-]+$")
+
+    async def _execute_object_exclude(self, message: CommandMessage) -> Dict[str, Any]:
+        """Exclude an object from the current print (ADR-0016).
+
+        Parameters:
+            objectName (str): Name of the object to exclude
+
+        GCode: EXCLUDE_OBJECT NAME=<object_name>
+
+        Returns:
+            Dict with excluded object name on success.
+
+        Raises:
+            CommandProcessingError: If objectName is missing, invalid, or execution fails.
+        """
+        params = message.parameters or {}
+
+        object_name = params.get("objectName")
+        if not object_name or not isinstance(object_name, str):
+            raise CommandProcessingError(
+                "objectName parameter is required",
+                code="missing_parameter",
+                command_id=message.command_id,
+            )
+
+        object_name = object_name.strip()
+        if not object_name:
+            raise CommandProcessingError(
+                "objectName cannot be empty",
+                code="missing_parameter",
+                command_id=message.command_id,
+            )
+
+        # Validate object name to prevent G-code injection
+        # Object names should only contain alphanumeric characters, underscores, hyphens
+        if not self._OBJECT_NAME_PATTERN.match(object_name):
+            raise CommandProcessingError(
+                f"Invalid object name: {object_name}. "
+                "Object names must contain only letters, numbers, underscores, and hyphens.",
+                code="invalid_object_name",
+                command_id=message.command_id,
+            )
+
+        # Execute the EXCLUDE_OBJECT G-code command
+        script = f"EXCLUDE_OBJECT NAME={object_name}"
+
+        try:
+            await self._moonraker.execute_gcode(script)
+        except Exception as exc:
+            error_message = str(exc).lower()
+            # Check for common error patterns
+            if "unknown" in error_message or "not found" in error_message:
+                raise CommandProcessingError(
+                    f"Object '{object_name}' not found in current print",
+                    code="object_not_found",
+                    command_id=message.command_id,
+                ) from exc
+            raise CommandProcessingError(
+                f"Failed to exclude object: {exc}",
+                code="gcode_error",
+                command_id=message.command_id,
+            ) from exc
+
+        LOGGER.info("Excluded object: %s", object_name)
+
+        return {
+            "objectName": object_name,
         }
 
     # -------------------------------------------------------------------------

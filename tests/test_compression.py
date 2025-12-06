@@ -25,7 +25,7 @@ def test_compression_config_defaults():
     config = CompressionConfig()
     
     assert config.enabled is True
-    assert config.channels == ["sensors"]
+    assert config.channels == ["sensors", "objects"]
     assert config.min_size_bytes == 1024
 
 

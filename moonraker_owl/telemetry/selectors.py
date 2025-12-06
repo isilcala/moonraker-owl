@@ -546,3 +546,166 @@ def _to_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+# =============================================================================
+# ObjectsSelector - Exclude Object Channel (ADR-0016)
+# =============================================================================
+
+
+@dataclass
+class ObjectDefinition:
+    """A single object definition from Klipper's exclude_object module."""
+
+    name: str
+    center: Optional[List[float]] = None
+    polygon: Optional[List[List[float]]] = None
+
+
+class ObjectsSelector:
+    """Selector for the objects channel payload (ADR-0016: Exclude Object).
+
+    Builds the objects channel payload from Moonraker's exclude_object state.
+    This channel provides object definitions, exclusion status, and current
+    object for the exclude object UI feature.
+
+    Only produces output when:
+    1. exclude_object is configured in Klipper
+    2. Objects are defined (during active print with labeled objects)
+
+    The channel uses kind="full" for updates and kind="reset" on print end.
+    """
+
+    def __init__(self) -> None:
+        self._previous_payload: Optional[Dict[str, Any]] = None
+        self._has_published: bool = False
+
+    def reset(self) -> None:
+        """Reset selector state (e.g., on print end or reconnection)."""
+        self._previous_payload = None
+        self._has_published = False
+
+    def build(
+        self,
+        store: MoonrakerStateStore,
+        *,
+        observed_at: datetime,
+    ) -> Optional[Dict[str, Any]]:
+        """Build objects channel payload from exclude_object state.
+
+        Args:
+            store: Moonraker state store with current printer state.
+            observed_at: Observation timestamp.
+
+        Returns:
+            Objects payload dict or None if no objects defined or no change.
+        """
+        exclude_obj_snapshot = store.get("exclude_object")
+
+        # No exclude_object data - feature not configured or no objects
+        if exclude_obj_snapshot is None:
+            return None
+
+        data = exclude_obj_snapshot.data
+        objects = data.get("objects", [])
+
+        # No objects defined - don't publish
+        if not objects:
+            return None
+
+        # Build definitions list
+        definitions: List[Dict[str, Any]] = []
+        for obj in objects:
+            if not isinstance(obj, dict):
+                continue
+            name = obj.get("name")
+            if not name:
+                continue
+
+            definition: Dict[str, Any] = {"name": name}
+            center = obj.get("center")
+            if center and isinstance(center, (list, tuple)) and len(center) >= 2:
+                definition["center"] = [float(center[0]), float(center[1])]
+            polygon = obj.get("polygon")
+            if polygon and isinstance(polygon, list):
+                definition["polygon"] = [
+                    [float(p[0]), float(p[1])]
+                    for p in polygon
+                    if isinstance(p, (list, tuple)) and len(p) >= 2
+                ]
+            definitions.append(definition)
+
+        # Get excluded objects and current object
+        excluded = data.get("excluded_objects", [])
+        if not isinstance(excluded, list):
+            excluded = []
+        current = data.get("current_object")
+        if current is not None and not isinstance(current, str):
+            current = str(current) if current else None
+
+        payload = {
+            "definitions": definitions,
+            "excluded": excluded,
+            "current": current,
+        }
+
+        # Check if we should publish (change detection)
+        if not self.should_publish(self._previous_payload, payload):
+            return None
+
+        # Update previous payload for next comparison
+        self._previous_payload = payload
+        self._has_published = True
+
+        return payload
+
+    def should_publish(
+        self,
+        previous: Optional[Dict[str, Any]],
+        current: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Determine if objects channel should be published.
+
+        Publishes when:
+        - Objects appear for the first time (print start with labeled objects)
+        - excluded list changes (user excluded an object)
+        - current object changes (printing moved to different object)
+
+        Args:
+            previous: Previous payload (None if never published).
+            current: Current payload (None if no objects).
+
+        Returns:
+            True if channel should be published.
+        """
+        # First appearance of objects
+        if previous is None and current is not None:
+            return True
+
+        # Objects cleared (will be handled by reset, but detect anyway)
+        if previous is not None and current is None:
+            return True
+
+        # No objects on either side
+        if previous is None and current is None:
+            return False
+
+        # Check for meaningful changes
+        # Note: definitions rarely change, but excluded/current change during print
+        return (
+            previous.get("excluded") != current.get("excluded")
+            or previous.get("current") != current.get("current")
+            or previous.get("definitions") != current.get("definitions")
+        )
+
+    def needs_reset(self, had_objects: bool, has_objects: bool) -> bool:
+        """Determine if a reset should be published.
+
+        Args:
+            had_objects: Whether objects were previously published.
+            has_objects: Whether objects are currently available.
+
+        Returns:
+            True if reset should be published.
+        """
+        return had_objects and not has_objects

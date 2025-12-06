@@ -1269,7 +1269,210 @@ async def test_fan_set_speed_requires_parameters(config):
     await processor.stop()
 
 
+# =============================================================================
+# Object Control Commands (ADR-0016: Exclude Object)
+# =============================================================================
 
 
+@pytest.mark.asyncio
+async def test_object_exclude_executes_gcode(config):
+    """Test that object:exclude sends correct EXCLUDE_OBJECT GCode."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-obj-1",
+        "command": "object:exclude",
+        "parameters": {
+            "objectName": "cube_1",
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/object:exclude", message)
+
+    # Should have accepted + completed
+    assert len(mqtt.published) == 2
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["status"] == "completed"
+    assert completed["stage"] == "execution"
+
+    # Verify GCode was sent
+    assert len(moonraker.gcode_scripts) == 1
+    assert moonraker.gcode_scripts[0] == "EXCLUDE_OBJECT NAME=cube_1"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_object_exclude_validates_object_name_required(config):
+    """Test that object:exclude requires objectName parameter."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    # Missing objectName
+    message = {
+        "commandId": "cmd-obj-2",
+        "command": "object:exclude",
+        "parameters": {},
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/object:exclude", message)
+
+    # Should have accepted + failed
+    assert len(mqtt.published) == 2
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "missing_parameter"
+
+    # No GCode should be sent
+    assert len(moonraker.gcode_scripts) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_object_exclude_rejects_empty_object_name(config):
+    """Test that object:exclude rejects empty objectName."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-obj-3",
+        "command": "object:exclude",
+        "parameters": {
+            "objectName": "   ",
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/object:exclude", message)
+
+    # Should have accepted + failed
+    assert len(mqtt.published) == 2
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "missing_parameter"
+
+    # No GCode should be sent
+    assert len(moonraker.gcode_scripts) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_object_exclude_rejects_injection_semicolon(config):
+    """Test that object:exclude rejects object names with semicolons (injection prevention)."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-obj-4",
+        "command": "object:exclude",
+        "parameters": {
+            "objectName": "cube; M112",  # Attempted injection
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/object:exclude", message)
+
+    # Should have accepted + failed
+    assert len(mqtt.published) == 2
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_object_name"
+
+    # No GCode should be sent
+    assert len(moonraker.gcode_scripts) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_object_exclude_rejects_injection_newline(config):
+    """Test that object:exclude rejects object names with newlines (injection prevention)."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "commandId": "cmd-obj-5",
+        "command": "object:exclude",
+        "parameters": {
+            "objectName": "cube\nM112",  # Attempted injection
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/object:exclude", message)
+
+    # Should have accepted + failed
+    assert len(mqtt.published) == 2
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["reason"]["code"] == "invalid_object_name"
+
+    # No GCode should be sent
+    assert len(moonraker.gcode_scripts) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_object_exclude_allows_valid_names(config):
+    """Test that object:exclude accepts valid object names with underscores and hyphens."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    valid_names = [
+        "cube_1",
+        "Part-A",
+        "object123",
+        "My_Part_01",
+        "test-part-2",
+        "a",  # Single character
+        "A1b2C3",  # Mixed case
+    ]
+
+    for i, name in enumerate(valid_names):
+        mqtt.published.clear()
+        moonraker.gcode_scripts.clear()
+
+        message = {
+            "commandId": f"cmd-obj-valid-{i}",
+            "command": "object:exclude",
+            "parameters": {
+                "objectName": name,
+            },
+        }
+
+        await mqtt.emit("owl/printers/device-123/commands/object:exclude", message)
+
+        assert len(mqtt.published) == 2, f"Failed for name: {name}"
+
+        completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+        assert completed["status"] == "completed", f"Failed for name: {name}"
+        assert moonraker.gcode_scripts[0] == f"EXCLUDE_OBJECT NAME={name}"
+
+    await processor.stop()
 
 
