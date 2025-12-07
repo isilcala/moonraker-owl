@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..adapters import MoonrakerClient
+from ..adapters.camera import CameraClient
 from ..adapters.s3_upload import S3UploadClient
 from ..commands import CommandProcessor
 from ..core.printer_backend import (
@@ -168,12 +169,26 @@ class MoonrakerBackend(PrinterBackend):
         # Create S3 upload client for task:upload-thumbnail command (ADR-0013 Phase 2)
         s3_upload = S3UploadClient()
 
+        # Create camera client for task:capture-image command (ADR-0021)
+        camera: CameraClient | None = None
+        if config.camera.enabled:
+            camera = CameraClient(
+                snapshot_url=config.camera.snapshot_url,
+                timeout=config.camera.capture_timeout_seconds,
+                max_retries=config.camera.max_retries,
+            )
+            LOGGER.info(
+                "Camera capture enabled: %s",
+                config.camera.snapshot_url,
+            )
+
         return CommandProcessor(
             config,
             self._client,
             mqtt_client,
             telemetry=telemetry,
             s3_upload=s3_upload,
+            camera=camera,
         )
 
     # -------------------------------------------------------------------------

@@ -127,6 +127,23 @@ class CompressionConfig:
 
 
 @dataclass(slots=True)
+class CameraConfig:
+    """Configuration for camera capture functionality."""
+
+    enabled: bool = False
+    """Whether camera capture is enabled."""
+
+    snapshot_url: str = "http://localhost/webcam/?action=snapshot"
+    """URL for webcam snapshot capture."""
+
+    capture_timeout_seconds: float = 10.0
+    """Timeout for camera capture requests."""
+
+    max_retries: int = 2
+    """Maximum number of retry attempts for failed captures."""
+
+
+@dataclass(slots=True)
 class OwlConfig:
     cloud: CloudConfig
     moonraker: MoonrakerConfig
@@ -136,6 +153,7 @@ class OwlConfig:
     logging: LoggingConfig
     resilience: ResilienceConfig
     compression: CompressionConfig
+    camera: CameraConfig
     raw: ConfigParser
     path: Path
 
@@ -208,6 +226,12 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "enabled": "true",
                 "channels": "sensors",
                 "min_size_bytes": "1024",
+            },
+            "camera": {
+                "enabled": "false",
+                "snapshot_url": "http://localhost/webcam/?action=snapshot",
+                "capture_timeout_seconds": "10.0",
+                "max_retries": "2",
             },
         }
     )
@@ -383,6 +407,21 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             ),
         )
 
+    # Camera config
+    camera_defaults = CameraConfig()
+    camera = CameraConfig(
+        enabled=parser.getboolean("camera", "enabled", fallback=camera_defaults.enabled),
+        snapshot_url=parser.get(
+            "camera", "snapshot_url", fallback=camera_defaults.snapshot_url
+        ),
+        capture_timeout_seconds=parser.getfloat(
+            "camera", "capture_timeout_seconds", fallback=camera_defaults.capture_timeout_seconds
+        ),
+        max_retries=parser.getint(
+            "camera", "max_retries", fallback=camera_defaults.max_retries
+        ),
+    )
+
     return OwlConfig(
         cloud=cloud,
         moonraker=moonraker,
@@ -392,6 +431,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         logging=logging_config,
         resilience=resilience,
         compression=compression,
+        camera=camera,
         raw=parser,
         path=config_path,
     )

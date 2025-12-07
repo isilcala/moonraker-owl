@@ -15,6 +15,7 @@ from .printer_command_names import PrinterCommandNames
 from .config import OwlConfig
 from .telemetry import TelemetryPublisher
 from .adapters.s3_upload import S3UploadClient, UploadResult
+from .adapters.camera import CameraClient
 
 LOGGER = logging.getLogger(__name__)
 
@@ -186,12 +187,14 @@ class CommandProcessor:
         mqtt: MQTTCommandsClient,
         telemetry: Optional[TelemetryPublisher] = None,
         s3_upload: Optional[S3UploadClient] = None,
+        camera: Optional[CameraClient] = None,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
         self._mqtt = mqtt
         self._telemetry = telemetry
         self._s3_upload = s3_upload
+        self._camera = camera
 
         (
             self._tenant_id,
@@ -322,6 +325,7 @@ class CommandProcessor:
                     message.command_id,
                     "completed",
                     stage="execution",
+                    result=details,
                 )
                 self._record_command_state(message, "completed", details=details)
                 self._finish_inflight(message.command_id)
@@ -632,6 +636,9 @@ class CommandProcessor:
         # System task commands
         if message.command == PrinterCommandNames.UPLOAD_THUMBNAIL:
             return await self._execute_upload_thumbnail(message)
+
+        if message.command == PrinterCommandNames.CAPTURE_IMAGE:
+            return await self._execute_capture_image(message)
 
         # Print control commands (pause, resume, cancel)
         # Map command name to Moonraker action (print:pause -> pause)
@@ -976,6 +983,130 @@ class CommandProcessor:
                 "success": False,
                 "jobId": job_id,
                 "error": result.error_code or "upload_failed",
+                "errorMessage": result.error_message,
+            }
+
+    async def _execute_capture_image(
+        self, message: CommandMessage
+    ) -> Dict[str, Any]:
+        """Handle task:capture-image command.
+
+        This command is sent by the server to request camera capture.
+        The agent captures a snapshot from the webcam and uploads it
+        to the presigned S3 URL.
+
+        Parameters:
+            frameId (str): The capture frame ID for correlation
+            uploadUrl (str): Presigned URL for uploading
+            blobKey (str): S3 key for the captured image
+            maxFileSizeBytes (int, optional): Maximum file size allowed
+            allowedContentTypes (list, optional): Allowed MIME types
+        """
+        if self._s3_upload is None:
+            raise CommandProcessingError(
+                "S3 upload client unavailable",
+                code="upload_unavailable",
+                command_id=message.command_id,
+            )
+
+        if self._camera is None:
+            return {
+                "success": False,
+                "frameId": message.parameters.get("frameId") if message.parameters else None,
+                "errorCode": "camera_unavailable",
+                "errorMessage": "Camera capture is not configured or disabled",
+            }
+
+        params = message.parameters or {}
+
+        frame_id = params.get("frameId")
+        upload_url = params.get("uploadUrl")
+        blob_key = params.get("blobKey")
+        max_size_bytes = params.get("maxFileSizeBytes", 5 * 1024 * 1024)  # 5 MB default
+
+        if not frame_id:
+            raise CommandProcessingError(
+                "frameId parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        if not upload_url or not isinstance(upload_url, str):
+            raise CommandProcessingError(
+                "uploadUrl parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        if not blob_key or not isinstance(blob_key, str):
+            raise CommandProcessingError(
+                "blobKey parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        # Capture image from webcam
+        from datetime import timezone
+        from datetime import datetime as dt
+        capture_result = await self._camera.capture()
+
+        if not capture_result.success:
+            LOGGER.warning(
+                "Camera capture failed for frame %s: %s",
+                frame_id[:8] if isinstance(frame_id, str) else frame_id,
+                capture_result.error_message,
+            )
+            return {
+                "success": False,
+                "frameId": frame_id,
+                "errorCode": capture_result.error_code or "capture_failed",
+                "errorMessage": capture_result.error_message,
+            }
+
+        image_data = capture_result.image_data
+        content_type = capture_result.content_type or "image/jpeg"
+        captured_at = capture_result.captured_at or dt.now(timezone.utc)
+
+        # Validate size
+        if image_data and len(image_data) > max_size_bytes:
+            return {
+                "success": False,
+                "frameId": frame_id,
+                "errorCode": "image_too_large",
+                "errorMessage": f"Image size {len(image_data)} exceeds max {max_size_bytes}",
+            }
+
+        # Upload to S3
+        result = await self._s3_upload.upload(
+            presigned_url=upload_url,
+            data=image_data,
+            s3_key=blob_key,
+            content_type=content_type,
+        )
+
+        if result.success:
+            LOGGER.info(
+                "Captured and uploaded frame %s: %d bytes to %s",
+                frame_id[:8] if isinstance(frame_id, str) else frame_id,
+                result.file_size_bytes,
+                blob_key,
+            )
+            return {
+                "success": True,
+                "frameId": frame_id,
+                "capturedAt": captured_at.isoformat(),
+                "fileSizeBytes": result.file_size_bytes,
+            }
+        else:
+            LOGGER.warning(
+                "Failed to upload frame %s: %s",
+                frame_id[:8] if isinstance(frame_id, str) else frame_id,
+                result.error_message,
+            )
+            return {
+                "success": False,
+                "frameId": frame_id,
+                "errorCode": result.error_code or "upload_failed",
                 "errorMessage": result.error_message,
             }
 
@@ -1346,6 +1477,7 @@ class CommandProcessor:
         stage: str = "execution",
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
     ) -> None:
         topic = _build_ack_topic(self._device_id, command_name)
         acknowledged_at = datetime.now(timezone.utc).replace(microsecond=0)
@@ -1386,6 +1518,10 @@ class CommandProcessor:
                 reason["message"] = error_message
             if reason:
                 document["reason"] = reason
+
+        # Include execution result data (e.g., capture details, uploaded file info)
+        if result:
+            document["result"] = result
 
         payload = json.dumps(document).encode("utf-8")
         self._mqtt.publish(topic, payload, qos=1, retain=False)
