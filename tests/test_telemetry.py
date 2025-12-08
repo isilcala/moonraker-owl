@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 import pytest
 
 from moonraker_owl.config import (
+    CameraConfig,
     CloudConfig,
     CommandConfig,
     CompressionConfig,
@@ -160,6 +161,7 @@ def build_config(
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),
         compression=CompressionConfig(),
+        camera=CameraConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -455,11 +457,12 @@ def test_pause_then_cancel_clears_paused_state() -> None:
     assert session.has_active_job is False
 
 
-def test_completed_job_status_overrides_stale_printing_state() -> None:
-    """Test that job_status='completed' triggers Completed phase even when raw_state lags.
+def test_completed_job_status_updates_via_query() -> None:
+    """Test that print_stats.state query after history event provides correct state.
 
-    This addresses the timing gap where notify_history_changed arrives before
-    print_stats.state updates from 'printing' to 'complete'.
+    Following Mainsail's pattern, we trust print_stats.state as authoritative.
+    The TelemetryPublisher queries print_stats on action:finished to get the
+    actual terminal state. This test simulates that flow.
     """
     store = MoonrakerStateStore()
     tracker = PrintSessionTracker()
@@ -503,8 +506,9 @@ def test_completed_job_status_overrides_stale_printing_state() -> None:
     assert status.get("printerStatus") == "Printing"
     assert session.has_active_job is True
 
-    # Job finishes - notify_history_changed arrives BEFORE print_stats.state updates
-    # This simulates the timing gap
+    # Job finishes - simulate the query-on-notification pattern:
+    # TelemetryPublisher receives action:finished and queries print_stats,
+    # which returns the updated state
     store.ingest(
         {
             "jsonrpc": "2.0",
@@ -515,30 +519,35 @@ def test_completed_job_status_overrides_stale_printing_state() -> None:
                     "job": {
                         "job_id": "0003EE",
                         "filename": "benchy.gcode",
-                        "status": "completed",  # Job status is completed
+                        "status": "completed",
                     },
                 }
             ],
         }
     )
-    # Note: print_stats.state is NOT updated to "complete" yet - this is the bug scenario
+    # Simulate the query result: print_stats.state is now "complete"
+    # (This is what TelemetryPublisher._query_print_stats_on_job_start does)
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "query_result",  # Simulated query response
+            "params": [{"print_stats": {"state": "complete"}}],
+        }
+    )
     heater.refresh(store)
 
     session = tracker.compute(store)
-    # Verify session detects job is no longer active via job_status
+    # Now raw_state is "complete" from the query
+    assert session.raw_state == "complete"
     assert session.has_active_job is False
-    assert session.job_status == "completed"
-    # raw_state still shows "printing" due to timing lag
-    assert session.raw_state == "printing"
 
     status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
     assert status is not None
-    # Key assertion: printerStatus should be "Completed" not "Printing"
     assert status.get("printerStatus") == "Completed"
 
 
-def test_cancelled_job_status_overrides_stale_printing_state() -> None:
-    """Test that job_status='cancelled' triggers Cancelled phase even when raw_state lags."""
+def test_cancelled_job_status_updates_via_query() -> None:
+    """Test that print_stats.state query after cancel provides correct state."""
     store = MoonrakerStateStore()
     tracker = PrintSessionTracker()
     heater = HeaterMonitor()
@@ -577,7 +586,7 @@ def test_cancelled_job_status_overrides_stale_printing_state() -> None:
     session = tracker.compute(store)
     assert session.has_active_job is True
 
-    # Job cancelled via notify_history_changed before print_stats updates
+    # Job cancelled - simulate query-on-notification pattern
     store.ingest(
         {
             "jsonrpc": "2.0",
@@ -594,16 +603,119 @@ def test_cancelled_job_status_overrides_stale_printing_state() -> None:
             ],
         }
     )
+    # Simulate the query result: print_stats.state is now "cancelled"
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "query_result",
+            "params": [{"print_stats": {"state": "cancelled"}}],
+        }
+    )
     heater.refresh(store)
 
     session = tracker.compute(store)
+    assert session.raw_state == "cancelled"
     assert session.has_active_job is False
-    assert session.job_status == "cancelled"
-    assert session.raw_state == "printing"  # Still stale
 
     status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
     assert status is not None
     assert status.get("printerStatus") == "Cancelled"
+
+
+def test_new_print_after_cancel_shows_printing_not_cancelled() -> None:
+    """Test that starting a new print immediately after cancellation shows Printing.
+
+    Aligned with Mainsail/Obico: trust print_stats.state as authoritative.
+    
+    Timeline (race condition scenario):
+    1. Previous print cancelled (action:finished, job_status=cancelled)
+    2. User starts new print (Reprint Job in Mainsail)
+    3. print_stats.state changes to "printing" (via WebSocket)
+    4. Agent sends status message (should show "Printing" because we trust print_stats.state)
+    5. notify_history_changed action:added arrives LATER → triggers query → confirms state
+
+    With Mainsail-aligned approach, we simply trust print_stats.state="printing"
+    regardless of stale job_status from history. No override logic needed.
+    """
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+
+    observed_at = datetime.now(timezone.utc)
+
+    # Step 1: Previous print was cancelled
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "cancelled"},
+                    "virtual_sdcard": {"is_active": False, "progress": 0.0},
+                    "idle_timeout": {"state": "Idle"},
+                }
+            ],
+        }
+    )
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [
+                {
+                    "action": "finished",
+                    "job": {
+                        "job_id": "0005GG",
+                        "filename": "test.gcode",
+                        "status": "cancelled",
+                    },
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    assert session.job_status == "cancelled"
+    assert session.history_action == "finished"
+
+    # Verify it shows Cancelled initially (raw_state is "cancelled")
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert status.get("printerStatus") == "Cancelled"
+
+    # Step 2: User starts a new print - print_stats.state changes to "printing"
+    # With Mainsail-aligned logic, we trust this state immediately
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},  # New print started!
+                    "virtual_sdcard": {"is_active": True, "progress": 0.01},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    # raw_state is now "printing" - this is what Mainsail trusts
+    assert session.raw_state == "printing"
+    # job_status may still be stale, but we don't use it for override
+    assert session.job_status == "cancelled"  # Stale from previous print
+    # has_active_job is True because raw_state="printing" (Mainsail-aligned)
+    assert session.has_active_job is True
+    assert session.progress_percent == 1.0
+
+    # With Mainsail-aligned logic: printerStatus = "Printing" because
+    # we trust print_stats.state="printing" directly, no override from job_status
+    status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
+    assert status is not None
+    assert status.get("printerStatus") == "Printing"
 
 
 @pytest.mark.asyncio
@@ -1208,6 +1320,7 @@ def test_telemetry_configuration_requires_device_id():
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),
         compression=CompressionConfig(),
+        camera=CameraConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -1233,6 +1346,7 @@ def test_telemetry_configuration_requires_device_id_v2():
         logging=LoggingConfig(),
         resilience=ResilienceConfig(),
         compression=CompressionConfig(),
+        camera=CameraConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -2560,13 +2674,18 @@ async def test_query_print_stats_on_job_start_adr0003():
 
 
 @pytest.mark.asyncio
-async def test_no_query_on_job_finished():
-    """Verify that print_stats is NOT queried for finished jobs (only for job start)."""
+async def test_query_print_stats_on_job_finished():
+    """Verify that print_stats is queried for finished jobs (Mainsail-aligned).
+    
+    Per ADR-0003 and Mainsail alignment: query print_stats on BOTH action:added
+    and action:finished to ensure terminal states are captured, since Moonraker
+    may not push the final print_stats.state via notify_status_update.
+    """
     initial_state = {
         "result": {
             "status": {
                 "extruder": {"temperature": 200.0, "target": 0.0},
-                "print_stats": {"state": "standby", "filename": ""},
+                "print_stats": {"state": "printing", "filename": "test.gcode"},
             }
         }
     }
@@ -2600,12 +2719,13 @@ async def test_no_query_on_job_finished():
     await moonraker.emit(job_finished_notification)
     await asyncio.sleep(0.1)
 
-    # Verify that print_stats was NOT queried (no need on job finish)
+    # Verify that print_stats WAS queried (Mainsail-aligned: query on all history events)
     print_stats_queries = [
         q for q in moonraker.query_log if q and "print_stats" in q
     ]
-    assert not print_stats_queries, (
-        f"Did not expect HTTP query for print_stats on job finish. Query log: {moonraker.query_log}"
+    assert print_stats_queries, (
+        "Expected HTTP query for print_stats on job finish (Mainsail-aligned). "
+        f"Query log: {moonraker.query_log}"
     )
 
     await publisher.stop()

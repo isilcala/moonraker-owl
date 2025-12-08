@@ -67,28 +67,12 @@ class StatusSelector:
         if is_shutdown:
             phase = "Error"
 
-        # Override phase when job has terminated but print_stats.state lags behind.
-        # This handles the timing gap between notify_history_changed (which updates
-        # job_status) and print_stats.state updates from Moonraker.
-        elif not session.has_active_job and phase == "Printing":
-            state_lower = state.lower() if isinstance(state, str) else ""
-            job_status_lower = (
-                session.job_status.lower()
-                if isinstance(session.job_status, str)
-                else ""
-            )
-
-            # Determine terminal phase from job_status or raw_state
-            completed_states = {"complete", "completed"}
-            cancelled_states = {"cancelled", "canceled"}
-            error_states = {"error"}
-
-            if state_lower in completed_states or job_status_lower in completed_states:
-                phase = "Completed"
-            elif state_lower in cancelled_states or job_status_lower in cancelled_states:
-                phase = "Cancelled"
-            elif state_lower in error_states or job_status_lower in error_states:
-                phase = "Error"
+        # Note: We follow Mainsail's pattern of trusting print_stats.state directly.
+        # Unlike previous implementation, we do NOT override phase based on job_status
+        # from notify_history_changed. Instead, we query print_stats on history events
+        # (both action:added and action:finished) to get the authoritative state.
+        # This avoids complex override logic and race conditions between history events
+        # and state updates.
 
         lifecycle: Dict[str, Any] = {
             "phase": phase,

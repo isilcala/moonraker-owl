@@ -38,17 +38,23 @@ def test_no_active_job_when_terminal_state() -> None:
     assert result is False
 
 
-def test_no_active_job_when_job_status_terminal() -> None:
-    """Test that terminal job_status takes precedence over raw_state."""
+def test_raw_state_printing_is_active_job_regardless_of_job_status() -> None:
+    """Test that raw_state="printing" is active, regardless of stale job_status.
+    
+    Aligned with Mainsail/Obico: trust print_stats.state as authoritative.
+    Even if job_status is stale (e.g., "cancelled" from previous print),
+    we trust raw_state="printing" to indicate an active job.
+    """
     tracker = PrintSessionTracker()
 
-    # Even if raw_state is printing, terminal job_status takes precedence
+    # raw_state="printing" should be active, even with stale job_status
     result = tracker._has_active_job(
         raw_state="printing",
-        job_status="completed",
+        job_status="completed",  # Stale from previous print
     )
 
-    assert result is False
+    # With Mainsail-aligned logic: raw_state takes precedence
+    assert result is True
 
 
 def test_history_event_nested_job_populates_session_identifiers() -> None:

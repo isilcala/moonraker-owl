@@ -31,6 +31,7 @@ class SessionInfo:
     raw_state: Optional[str]  # print_stats.state
     idle_timeout_state: Optional[str]
     job_status: Optional[str]  # from history_event (takes precedence for terminal states)
+    history_action: Optional[str]  # "added" or "finished" from notify_history_changed
     has_active_job: bool
 
     # Progress (only meaningful when has_active_job=True)
@@ -134,6 +135,7 @@ class PrintSessionTracker:
         raw_state = _normalise_state(print_stats.get("state"))
         idle_state = _normalise_state(idle_timeout.get("state"))
         job_status = _normalise_state(_extract_job_status(history_event))
+        history_action = history_event.get("action") if history_event else None
         timelapse_paused = bool(_as_bool(timelapse_macro.get("is_paused")))
 
         sd_active = bool(_as_bool(virtual_sdcard.get("is_active")))
@@ -195,6 +197,7 @@ class PrintSessionTracker:
             raw_state=raw_state,
             idle_timeout_state=idle_state,
             job_status=job_status,
+            history_action=history_action,
             has_active_job=has_active_job,
             progress_percent=progress_percent,
             elapsed_seconds=elapsed_seconds,
@@ -247,21 +250,18 @@ class PrintSessionTracker:
     ) -> bool:
         """Determine if there's an active print job.
 
-        Simplified logic aligned with Obico's has_active_job():
-        - Terminal states from history_event (job_status) take precedence
-        - Active states: printing, paused (from print_stats.state)
+        Aligned with Mainsail/Obico pattern:
+        - Use print_stats.state as the authoritative source
+        - Active states: printing, paused
+        - Terminal states: complete, cancelled, standby, error
 
-        This replaces the previous 7-signal approach with a clean 2-signal check.
+        Note: We do NOT use job_status from history_event to override this.
+        Instead, we query print_stats on history events (action:added/finished)
+        to ensure raw_state is always up-to-date.
         """
         raw = (raw_state or "").lower()
-        job = (job_status or "").lower()
 
-        # Terminal states from history event take precedence
-        terminal_states = {"complete", "completed", "cancelled", "canceled", "error"}
-        if job in terminal_states:
-            return False
-
-        # Active states from print_stats (aligned with Obico's ACTIVE_STATES)
+        # Active states from print_stats (aligned with Mainsail/Obico)
         active_states = {"printing", "paused"}
         return raw in active_states
 

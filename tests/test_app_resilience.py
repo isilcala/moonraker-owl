@@ -13,10 +13,7 @@ import pytest
 
 from moonraker_owl.app import AgentState, MoonrakerOwlApp
 from moonraker_owl.config import (
-    CloudConfig,
-    CommandConfig,
-    LoggingConfig,
-    MoonrakerConfig,
+    CameraConfig,
     CloudConfig,
     CommandConfig,
     CompressionConfig,
@@ -51,6 +48,7 @@ def _build_config(*, breaker_threshold: int = 2) -> OwlConfig:
         logging=LoggingConfig(),
         resilience=ResilienceConfig(moonraker_breaker_threshold=breaker_threshold),
         compression=CompressionConfig(),
+        camera=CameraConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )

@@ -412,14 +412,19 @@ class TelemetryPublisher:
         await self._enqueue(payload)
 
     async def _query_print_stats_on_job_start(self, payload: Dict[str, Any]) -> None:
-        """Query print_stats when job starts to ensure state is captured.
+        """Query print_stats on history events (job start/finish).
 
         Moonraker optimizes WebSocket notifications by omitting unchanged fields.
-        When a print starts, notify_history_changed arrives with action:added,
-        but print_stats.state may not be pushed via notify_status_update.
+        When job lifecycle changes occur via notify_history_changed, the
+        print_stats.state may not be pushed via notify_status_update.
 
-        This implements the ADR-0003 query-on-notification pattern for print_stats,
-        similar to how heater targets are handled.
+        This implements the ADR-0003 query-on-notification pattern for print_stats.
+        Following Mainsail's pattern, we query print_stats to get the authoritative
+        state rather than inferring it from history_event status.
+
+        Queried on both:
+        - action:added - new print started, ensures we get 'printing' state
+        - action:finished - print ended, ensures we get terminal state
         """
         method = payload.get("method")
         if method != "notify_history_changed":
@@ -432,11 +437,12 @@ class TelemetryPublisher:
         entry = params[0] if isinstance(params[0], dict) else {}
         action = entry.get("action")
 
-        # Only query on job start (action:added indicates new print)
-        if action != "added":
+        # Query on job start (action:added) and job finish (action:finished)
+        # This ensures print_stats.state is always fresh after lifecycle events
+        if action not in ("added", "finished"):
             return
 
-        LOGGER.debug("Job started (action:added), querying print_stats for full state")
+        LOGGER.debug("History event (action:%s), querying print_stats for full state", action)
 
         try:
             # Query print_stats to get complete state including 'state' field
@@ -448,7 +454,7 @@ class TelemetryPublisher:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            LOGGER.debug("Failed to query print_stats on job start: %s", exc)
+            LOGGER.debug("Failed to query print_stats on history event: %s", exc)
 
     async def _query_print_stats_on_klippy_ready(self, payload: Dict[str, Any]) -> None:
         """Query print_stats when klippy becomes ready to get actual state.
