@@ -22,6 +22,7 @@ from .. import constants
 from ..adapters import MQTTConnectionError
 from ..config import CompressionConfig, OwlConfig
 from ..core import PrinterAdapter, deep_merge
+from ..tracing import create_traceparent
 from .cadence import (
     ChannelCadenceController,
     ChannelDecision,
@@ -1312,8 +1313,11 @@ class TelemetryPublisher:
     ) -> None:
         payload_bytes = json.dumps(document, default=_json_default).encode("utf-8")
         properties = Properties(PacketTypes.PUBLISH)
-        # Note: Device authentication now handled via JWT (MQTT password)
-        # No need to attach device_token as MQTT user property
+
+        # Add W3C Trace Context for distributed tracing
+        # NexusService will parse this to continue the trace
+        traceparent = create_traceparent()
+        properties.UserProperty = [("traceparent", traceparent)]
 
         # Apply compression if configured for this channel
         compression_config = self._config.compression

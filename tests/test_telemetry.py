@@ -205,8 +205,19 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
 
     props = mqtt.messages[0]["properties"]
     assert props is not None
-    # Device authentication now handled via JWT (MQTT password) - no UserProperty needed
-    assert getattr(props, "UserProperty", None) is None
+    # Verify traceparent is set for distributed tracing
+    user_props = getattr(props, "UserProperty", None)
+    assert user_props is not None, "Expected traceparent in UserProperty"
+    assert len(user_props) == 1
+    assert user_props[0][0] == "traceparent"
+    # Verify W3C trace context format: 00-{trace-id}-{span-id}-{flags}
+    traceparent = user_props[0][1]
+    parts = traceparent.split("-")
+    assert len(parts) == 4
+    assert parts[0] == "00"  # version
+    assert len(parts[1]) == 32  # trace-id (32 hex chars)
+    assert len(parts[2]) == 16  # span-id (16 hex chars)
+    assert parts[3] in ("00", "01")  # trace-flags
 
     expected_qos = {"status": 1, "sensors": 0}
     for channel in ("status", "sensors"):
