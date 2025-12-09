@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from ..adapters import MoonrakerClient
 from ..adapters.camera import CameraClient
+from ..adapters.image_preprocessor import ImagePreprocessor
 from ..adapters.s3_upload import S3UploadClient
 from ..commands import CommandProcessor
 from ..core.printer_backend import (
@@ -171,6 +172,7 @@ class MoonrakerBackend(PrinterBackend):
 
         # Create camera client for task:capture-image command (ADR-0021)
         camera: CameraClient | None = None
+        image_preprocessor: ImagePreprocessor | None = None
         if config.camera.enabled:
             camera = CameraClient(
                 snapshot_url=config.camera.snapshot_url,
@@ -182,6 +184,19 @@ class MoonrakerBackend(PrinterBackend):
                 config.camera.snapshot_url,
             )
 
+            # Create image preprocessor for resizing/compressing captures (ADR-0024)
+            if config.camera.preprocess_enabled:
+                image_preprocessor = ImagePreprocessor(
+                    target_width=config.camera.preprocess_target_width,
+                    jpeg_quality=config.camera.preprocess_jpeg_quality,
+                    enabled=True,
+                )
+                LOGGER.info(
+                    "Image preprocessing enabled: target_width=%d, jpeg_quality=%d",
+                    config.camera.preprocess_target_width,
+                    config.camera.preprocess_jpeg_quality,
+                )
+
         return CommandProcessor(
             config,
             self._client,
@@ -189,6 +204,7 @@ class MoonrakerBackend(PrinterBackend):
             telemetry=telemetry,
             s3_upload=s3_upload,
             camera=camera,
+            image_preprocessor=image_preprocessor,
         )
 
     # -------------------------------------------------------------------------

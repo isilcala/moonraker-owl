@@ -142,6 +142,15 @@ class CameraConfig:
     max_retries: int = 2
     """Maximum number of retry attempts for failed captures."""
 
+    preprocess_enabled: bool = True
+    """Whether to preprocess (resize/compress) images before upload."""
+
+    preprocess_target_width: int = 800
+    """Target width for image resizing. Images wider than this will be resized."""
+
+    preprocess_jpeg_quality: int = 85
+    """JPEG quality for compressed images (1-100)."""
+
 
 @dataclass(slots=True)
 class OwlConfig:
@@ -232,6 +241,9 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "snapshot_url": "http://localhost/webcam/?action=snapshot",
                 "capture_timeout_seconds": "10.0",
                 "max_retries": "2",
+                "preprocess_enabled": "true",
+                "preprocess_target_width": "800",
+                "preprocess_jpeg_quality": "85",
             },
         }
     )
@@ -419,6 +431,15 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         ),
         max_retries=parser.getint(
             "camera", "max_retries", fallback=camera_defaults.max_retries
+        ),
+        preprocess_enabled=parser.getboolean(
+            "camera", "preprocess_enabled", fallback=camera_defaults.preprocess_enabled
+        ),
+        preprocess_target_width=parser.getint(
+            "camera", "preprocess_target_width", fallback=camera_defaults.preprocess_target_width
+        ),
+        preprocess_jpeg_quality=parser.getint(
+            "camera", "preprocess_jpeg_quality", fallback=camera_defaults.preprocess_jpeg_quality
         ),
     )
 

@@ -336,7 +336,9 @@ class TestFactoryMethods:
             "moonraker_owl.backends.moonraker.S3UploadClient"
         ) as MockS3Client, patch(
             "moonraker_owl.backends.moonraker.CameraClient"
-        ) as MockCameraClient:
+        ) as MockCameraClient, patch(
+            "moonraker_owl.backends.moonraker.ImagePreprocessor"
+        ) as MockImagePreprocessor:
             result = backend.create_command_processor(
                 mock_owl_config, mock_mqtt, mock_telemetry
             )
@@ -348,4 +350,5 @@ class TestFactoryMethods:
                 telemetry=mock_telemetry,
                 s3_upload=MockS3Client.return_value,
                 camera=MockCameraClient.return_value,
+                image_preprocessor=MockImagePreprocessor.return_value,
             )

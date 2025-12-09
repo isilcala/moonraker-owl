@@ -16,6 +16,7 @@ from .config import OwlConfig
 from .telemetry import TelemetryPublisher
 from .adapters.s3_upload import S3UploadClient, UploadResult
 from .adapters.camera import CameraClient
+from .adapters.image_preprocessor import ImagePreprocessor
 
 LOGGER = logging.getLogger(__name__)
 
@@ -188,6 +189,7 @@ class CommandProcessor:
         telemetry: Optional[TelemetryPublisher] = None,
         s3_upload: Optional[S3UploadClient] = None,
         camera: Optional[CameraClient] = None,
+        image_preprocessor: Optional[ImagePreprocessor] = None,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
@@ -195,6 +197,7 @@ class CommandProcessor:
         self._telemetry = telemetry
         self._s3_upload = s3_upload
         self._camera = camera
+        self._image_preprocessor = image_preprocessor
 
         (
             self._tenant_id,
@@ -1067,7 +1070,29 @@ class CommandProcessor:
         content_type = capture_result.content_type or "image/jpeg"
         captured_at = capture_result.captured_at or dt.now(timezone.utc)
 
-        # Validate size
+        # Preprocess image (resize/compress) if preprocessor is available
+        original_size_bytes = len(image_data) if image_data else 0
+        was_resized = False
+        if image_data and self._image_preprocessor:
+            preprocess_result = self._image_preprocessor.preprocess(
+                image_data, content_type
+            )
+            image_data = preprocess_result.image_data
+            content_type = preprocess_result.content_type
+            was_resized = preprocess_result.was_resized
+            if was_resized:
+                LOGGER.debug(
+                    "Image preprocessed for frame %s: %dx%d -> %dx%d, %d -> %d bytes",
+                    frame_id[:8] if isinstance(frame_id, str) else frame_id,
+                    preprocess_result.original_size[0],
+                    preprocess_result.original_size[1],
+                    preprocess_result.processed_size[0],
+                    preprocess_result.processed_size[1],
+                    preprocess_result.original_bytes,
+                    preprocess_result.processed_bytes,
+                )
+
+        # Validate size after preprocessing
         if image_data and len(image_data) > max_size_bytes:
             return {
                 "success": False,
@@ -1086,17 +1111,22 @@ class CommandProcessor:
 
         if result.success:
             LOGGER.info(
-                "Captured and uploaded frame %s: %d bytes to %s",
+                "Captured and uploaded frame %s: %d bytes to %s%s",
                 frame_id[:8] if isinstance(frame_id, str) else frame_id,
                 result.file_size_bytes,
                 blob_key,
+                f" (resized from {original_size_bytes} bytes)" if was_resized else "",
             )
-            return {
+            response: Dict[str, Any] = {
                 "success": True,
                 "frameId": frame_id,
                 "capturedAt": captured_at.isoformat(),
                 "fileSizeBytes": result.file_size_bytes,
             }
+            if was_resized:
+                response["originalSizeBytes"] = original_size_bytes
+                response["wasResized"] = True
+            return response
         else:
             LOGGER.warning(
                 "Failed to upload frame %s: %s",
