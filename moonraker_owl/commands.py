@@ -17,6 +17,7 @@ from .telemetry import TelemetryPublisher
 from .adapters.s3_upload import S3UploadClient, UploadResult
 from .adapters.camera import CameraClient
 from .adapters.image_preprocessor import ImagePreprocessor
+from .core.idempotency import CommandIdempotencyGuard
 
 LOGGER = logging.getLogger(__name__)
 
@@ -209,6 +210,17 @@ class CommandProcessor:
         self._command_subscription = f"{self._command_topic_prefix}/#"
         self._handler_registered = False
         self._inflight: Dict[str, _InflightCommand] = {}
+
+        # Idempotency guard for duplicate command detection (ADR-0013 Appendix D)
+        # Uses TTL-based expiration instead of fixed-size history
+        self._idempotency = CommandIdempotencyGuard(
+            ttl_hours=24,
+            max_entries=10000,
+            cleanup_interval=100,
+        )
+
+        # Legacy history tracking (kept for backward compatibility with tests)
+        # Will be removed once tests are updated to use idempotency guard
         self._history: Dict[str, _CommandHistoryEntry] = {}
         self._history_order: Deque[str] = deque()
         self._history_limit = 64
@@ -525,21 +537,58 @@ class CommandProcessor:
             expired = self._history_order.popleft()
             self._history.pop(expired, None)
 
-    async def _replay_duplicate(self, command_name: str, command_id: str) -> bool:
-        entry = self._history.get(command_id)
-        if entry is None:
-            return False
-
-        LOGGER.debug("Replaying duplicate command %s with cached status", command_id)
-        await self._publish_ack(
-            command_name,
+        # Also record in idempotency guard for TTL-based duplicate detection
+        self._idempotency.mark_processed(
             command_id,
-            entry.status,
-            stage=entry.stage,
-            error_code=entry.error_code,
-            error_message=entry.error_message,
+            status=status,
+            stage=stage,
+            error_code=error_code,
+            error_message=error_message,
         )
-        return True
+
+    async def _replay_duplicate(self, command_name: str, command_id: str) -> bool:
+        """Check if command is a duplicate and replay cached ACK if so.
+
+        Uses the idempotency guard (TTL-based) as primary check,
+        falls back to legacy history for backward compatibility.
+
+        Per ADR-0013 Appendix D, duplicate ACKs include 'skipped: true'.
+        """
+        # Primary: Check idempotency guard (TTL-based)
+        cached = self._idempotency.get_cached_result(command_id)
+        if cached is not None:
+            LOGGER.info(
+                "Duplicate command %s detected via idempotency guard (processed at %s)",
+                command_id,
+                cached.processed_at.isoformat(),
+            )
+            await self._publish_ack(
+                command_name,
+                command_id,
+                cached.status,
+                stage=cached.stage,
+                error_code=cached.error_code,
+                error_message=cached.error_message,
+                skipped=True,  # ADR-0013 Appendix D: indicate duplicate detection
+            )
+            return True
+
+        # Fallback: Check legacy history (for commands processed before upgrade)
+        entry = self._history.get(command_id)
+        if entry is not None:
+            LOGGER.debug("Replaying duplicate command %s with cached status (legacy)", command_id)
+            await self._publish_ack(
+                command_name,
+                command_id,
+                entry.status,
+                stage=entry.stage,
+                error_code=entry.error_code,
+                error_message=entry.error_message,
+                skipped=True,
+            )
+            return True
+
+        return False
 
     @property
     def pending_count(self) -> int:
@@ -1508,7 +1557,20 @@ class CommandProcessor:
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
         result: Optional[Dict[str, Any]] = None,
+        skipped: bool = False,
     ) -> None:
+        """Publish command acknowledgment to MQTT.
+
+        Args:
+            command_name: The command name (e.g., "print:pause").
+            command_id: Unique command identifier.
+            status: ACK status ("accepted", "completed", "failed").
+            stage: Processing stage ("dispatch", "execution").
+            error_code: Error code if failed.
+            error_message: Error message if failed.
+            result: Optional result data from command execution.
+            skipped: If True, indicates this is a duplicate command replay (ADR-0013 Appendix D).
+        """
         topic = _build_ack_topic(self._device_id, command_name)
         acknowledged_at = datetime.now(timezone.utc).replace(microsecond=0)
         stage_value = stage.lower()
@@ -1522,6 +1584,10 @@ class CommandProcessor:
                 "acknowledgedAt": acknowledged_at.isoformat(timespec="seconds"),
             },
         }
+
+        # ADR-0013 Appendix D: Indicate duplicate detection
+        if skipped:
+            document["skipped"] = True
 
         if stage_value == "dispatch":
             document["timestamps"]["dispatchedAt"] = acknowledged_at.isoformat(
