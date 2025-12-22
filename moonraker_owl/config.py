@@ -145,7 +145,7 @@ class CameraConfig:
     preprocess_enabled: bool = True
     """Whether to preprocess (resize/compress) images before upload."""
 
-    preprocess_target_width: int = 800
+    preprocess_target_width: int = 1280
     """Target width for image resizing. Images wider than this will be resized."""
 
     preprocess_jpeg_quality: int = 85

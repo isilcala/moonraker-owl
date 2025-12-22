@@ -6,10 +6,10 @@ and storage costs while preserving enough detail for YOLO inference.
 The strategy is:
 1. Resize images wider than TARGET_WIDTH to TARGET_WIDTH (preserving aspect ratio)
 2. Re-encode as JPEG with quality setting (default 85%)
-3. YOLO will letterbox the result to 640x640 for inference
+3. YOLO will letterbox the result to 1024x1024 for inference
 
-Using 800px target width gives YOLO more detail to work with than uploading
-the original 640px, while still achieving significant file size reduction.
+Using 1280px target width gives YOLO more detail to work with than uploading
+the original 1024px, while still achieving significant file size reduction.
 """
 
 from __future__ import annotations
@@ -68,15 +68,15 @@ class ImagePreprocessor:
     - Re-encoding as JPEG with configurable quality
     - Graceful fallback when Pillow is not available
 
-    The default target width of 800px is chosen because:
-    - YOLO uses 640x640 input, so 800px provides extra detail margin
+    The default target width of 1280px is chosen because:
+    - YOLO uses 1024x1024 input, so 1280px provides extra detail margin
     - Most webcams capture at 1280x720 or higher
-    - 800px width typically reduces file size by 60-80%
+    - 1280px width typically reduces file size by 40-60%
     """
 
     def __init__(
         self,
-        target_width: int = 800,
+        target_width: int = 1280,
         jpeg_quality: int = 85,
         *,
         enabled: bool = True,

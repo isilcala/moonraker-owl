@@ -44,7 +44,7 @@ class TestImagePreprocessor:
     def test_default_settings(self):
         """Test default target_width and jpeg_quality."""
         preprocessor = ImagePreprocessor()
-        assert preprocessor.target_width == 800
+        assert preprocessor.target_width == 1280
         assert preprocessor.jpeg_quality == 85
         assert preprocessor.enabled is True
         assert preprocessor.available is True
