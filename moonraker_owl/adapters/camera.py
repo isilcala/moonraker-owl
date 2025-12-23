@@ -11,12 +11,14 @@ or similar URLs.
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
 import aiohttp
+from PIL import Image
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +38,12 @@ class CaptureResult:
 
     captured_at: Optional[datetime] = None
     """UTC timestamp when capture completed."""
+
+    image_width: Optional[int] = None
+    """Width of the captured image in pixels."""
+
+    image_height: Optional[int] = None
+    """Height of the captured image in pixels."""
 
     error_code: Optional[str] = None
     """Error code if capture failed."""
@@ -106,7 +114,7 @@ class CameraClient:
         """Capture a snapshot from the webcam.
 
         Returns:
-            CaptureResult with image data if successful, or error details.
+            CaptureResult with image data and dimensions if successful, or error details.
         """
         session = await self._ensure_session()
         last_error: Optional[Exception] = None
@@ -144,17 +152,37 @@ class CameraClient:
                                 error_message="Camera returned empty image data",
                             )
 
-                        LOGGER.debug(
-                            "Captured %d bytes from camera (%s)",
-                            len(image_data),
-                            content_type,
-                        )
+                        # Extract image dimensions using Pillow
+                        image_width: Optional[int] = None
+                        image_height: Optional[int] = None
+                        try:
+                            img = Image.open(io.BytesIO(image_data))
+                            image_width, image_height = img.size
+                            LOGGER.debug(
+                                "Captured %d bytes from camera (%s): %dx%d pixels",
+                                len(image_data),
+                                content_type,
+                                image_width,
+                                image_height,
+                            )
+                        except Exception as e:
+                            LOGGER.warning(
+                                "Failed to extract image dimensions: %s",
+                                str(e),
+                            )
+                            LOGGER.debug(
+                                "Captured %d bytes from camera (%s)",
+                                len(image_data),
+                                content_type,
+                            )
 
                         return CaptureResult(
                             success=True,
                             image_data=image_data,
                             content_type=content_type,
                             captured_at=datetime.now(timezone.utc),
+                            image_width=image_width,
+                            image_height=image_height,
                         )
 
                     elif response.status == 404:

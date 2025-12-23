@@ -1175,6 +1175,11 @@ class CommandProcessor:
             if was_resized:
                 response["originalSizeBytes"] = original_size_bytes
                 response["wasResized"] = True
+            # Include image dimensions if available
+            if capture_result.image_width is not None:
+                response["imageWidth"] = capture_result.image_width
+            if capture_result.image_height is not None:
+                response["imageHeight"] = capture_result.image_height
             return response
         else:
             LOGGER.warning(
