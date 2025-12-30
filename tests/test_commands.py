@@ -32,6 +32,8 @@ class FakeMoonraker:
     def __init__(self) -> None:
         self.actions: list[str] = []
         self.gcode_scripts: list[str] = []
+        self.emergency_stops: list[bool] = []
+        self.started_prints: list[str] = []
         self.available_heaters: dict[str, list[str]] = {
             "available_heaters": ["extruder", "heater_bed"],
             "available_sensors": [],
@@ -50,6 +52,16 @@ class FakeMoonraker:
     ) -> None:
         """Execute a GCode script (fake implementation for testing)."""
         self.gcode_scripts.append(script)
+
+    async def emergency_stop(self) -> None:
+        """Execute emergency stop (fake implementation for testing)."""
+        self.emergency_stops.append(True)
+
+    async def start_print(self, filename: str) -> None:
+        """Start printing a file (fake implementation for testing)."""
+        if not filename or not filename.strip():
+            raise ValueError("Filename cannot be empty")
+        self.started_prints.append(filename)
 
     async def fetch_available_heaters(
         self, timeout: float = 5.0

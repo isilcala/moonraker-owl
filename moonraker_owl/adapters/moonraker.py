@@ -212,6 +212,46 @@ class MoonrakerClient(PrinterAdapter):
                     f"Moonraker action '{action_normalized}' failed with status {response.status}: {detail.strip()}"
                 )
 
+    async def emergency_stop(self) -> None:
+        """Execute emergency stop on the printer.
+
+        This calls the Moonraker emergency_stop endpoint which immediately
+        halts all printer operations.
+        """
+        session = await self._ensure_session()
+        url = f"{self._base_url}/printer/emergency_stop"
+
+        async with session.post(url, headers=self._headers) as response:
+            if response.status >= 400:
+                detail = await response.text()
+                raise RuntimeError(
+                    f"Emergency stop failed with status {response.status}: {detail.strip()}"
+                )
+
+    async def start_print(self, filename: str) -> None:
+        """Start printing the specified GCode file.
+
+        Args:
+            filename: The GCode filename to print.
+
+        Raises:
+            ValueError: If filename is empty.
+            RuntimeError: If the print start fails.
+        """
+        if not filename or not filename.strip():
+            raise ValueError("Filename cannot be empty")
+
+        session = await self._ensure_session()
+        url = f"{self._base_url}/printer/print/start"
+        params = {"filename": filename.strip()}
+
+        async with session.post(url, params=params, headers=self._headers) as response:
+            if response.status >= 400:
+                detail = await response.text()
+                raise RuntimeError(
+                    f"Start print failed with status {response.status}: {detail.strip()}"
+                )
+
     async def execute_gcode(
         self,
         script: str,

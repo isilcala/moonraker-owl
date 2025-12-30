@@ -39,6 +39,9 @@ class PrinterCommandNames:
     FIRMWARE_RESTART = "print:firmware-restart"
     """Restart the Klipper firmware."""
 
+    REPRINT = "print:reprint"
+    """Reprint the last print job."""
+
     # -------------------------------------------------------------------------
     # System Control Commands (cloud-triggered, requires ACK)
     # -------------------------------------------------------------------------

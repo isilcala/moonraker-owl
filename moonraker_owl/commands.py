@@ -56,6 +56,18 @@ class MoonrakerCommandClient(Protocol):
         """Execute an arbitrary GCode script on the printer."""
         ...
 
+    async def emergency_stop(self) -> None:
+        """Execute emergency stop (M112) on the printer."""
+        ...
+
+    async def start_print(self, filename: str) -> None:
+        """Start printing the specified GCode file.
+
+        Args:
+            filename: The GCode filename to print.
+        """
+        ...
+
     async def fetch_available_heaters(
         self, timeout: float = 5.0
     ) -> dict[str, list[str]]:
@@ -656,6 +668,8 @@ class CommandProcessor:
         - heater:turn-off: Turn off a specific heater
         - fan:set-speed: Set fan speed
         - print:pause/resume/cancel: Print control actions
+        - print:emergency-stop: Emergency stop
+        - print:reprint: Reprint the last print job
         - sync:job-thumbnail: Set thumbnail URL for current print job
         - task:upload-thumbnail: Upload thumbnail to presigned URL
         - task:capture-image: Capture and upload camera frame
@@ -692,6 +706,14 @@ class CommandProcessor:
         if message.command == PrinterCommandNames.CAPTURE_IMAGE:
             return await self._execute_capture_image(message)
 
+        # Emergency stop command
+        if message.command == PrinterCommandNames.EMERGENCY_STOP:
+            return await self._execute_emergency_stop(message)
+
+        # Reprint command
+        if message.command == PrinterCommandNames.REPRINT:
+            return await self._execute_reprint(message)
+
         # Print control commands (pause, resume, cancel)
         # Map command name to Moonraker action (print:pause -> pause)
         command_to_action = {
@@ -721,6 +743,56 @@ class CommandProcessor:
             code="unsupported_command",
             command_id=message.command_id,
         )
+
+    async def _execute_emergency_stop(self, message: CommandMessage) -> Dict[str, Any]:
+        """Handle print:emergency-stop command.
+
+        Immediately halts all printer operations via Moonraker's emergency_stop API.
+        This is equivalent to sending M112 but uses the dedicated endpoint.
+        """
+        try:
+            await self._moonraker.emergency_stop()
+            LOGGER.warning("Emergency stop executed (command_id=%s)", message.command_id[:8])
+        except Exception as exc:
+            raise CommandProcessingError(
+                f"Emergency stop failed: {exc}",
+                code="moonraker_error",
+                command_id=message.command_id,
+            ) from exc
+        return {"command": message.command}
+
+    async def _execute_reprint(self, message: CommandMessage) -> Dict[str, Any]:
+        """Handle print:reprint command.
+
+        Starts printing the specified GCode file. The filename is passed as a parameter.
+        """
+        params = message.parameters or {}
+        filename = params.get("filename")
+
+        if not filename or not str(filename).strip():
+            raise CommandProcessingError(
+                "Missing or empty 'filename' parameter",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        filename = str(filename).strip()
+
+        try:
+            await self._moonraker.start_print(filename)
+            LOGGER.info("Reprint started for file '%s' (command_id=%s)", filename, message.command_id[:8])
+        except ValueError as exc:
+            raise CommandProcessingError(
+                str(exc), code="invalid_parameters", command_id=message.command_id
+            ) from exc
+        except Exception as exc:
+            raise CommandProcessingError(
+                f"Start print failed: {exc}",
+                code="moonraker_error",
+                command_id=message.command_id,
+            ) from exc
+
+        return {"command": message.command, "filename": filename}
 
     def _execute_set_telemetry_rate(self, message: CommandMessage) -> Dict[str, Any]:
         """Handle control:set-telemetry-rate command."""
