@@ -45,8 +45,8 @@ class SessionInfo:
     timelapse_paused: bool
     message: Optional[str]
 
-    # Cloud-assigned thumbnail URL (set via sync:job-thumbnail command)
-    thumbnail_url: Optional[str] = None
+    # Note: thumbnail_url has been removed from session telemetry.
+    # Thumbnail URLs are now pushed via SignalR after upload ACK processing.
 
 
 class PrintSessionTracker:
@@ -61,8 +61,6 @@ class PrintSessionTracker:
 
     def __init__(self) -> None:
         self._current_session_id: Optional[str] = None
-        # Cloud-assigned thumbnail URL for the current print job
-        self._current_thumbnail_url: Optional[str] = None
         # File metadata for accurate progress calculation (Mainsail file-relative method)
         self._gcode_start_byte: Optional[int] = None
         self._gcode_end_byte: Optional[int] = None
@@ -97,20 +95,6 @@ class PrintSessionTracker:
         self._current_filename = None
         self._gcode_start_byte = None
         self._gcode_end_byte = None
-
-    def set_thumbnail_url(self, url: Optional[str]) -> None:
-        """Set the thumbnail URL for the current print job.
-
-        Called by CommandProcessor when sync:job-thumbnail command is received.
-        The URL is cleared when the job ends (session_id becomes None).
-        """
-        self._current_thumbnail_url = url
-        if url:
-            LOGGER.debug("Thumbnail URL set: %s", url)
-
-    def clear_thumbnail_url(self) -> None:
-        """Clear the thumbnail URL (e.g., when job ends)."""
-        self._current_thumbnail_url = None
 
     def compute(self, store: MoonrakerStateStore) -> SessionInfo:
         print_stats = _coerce_section(store.get("print_stats"))
@@ -181,12 +165,8 @@ class PrintSessionTracker:
             has_active_job=has_active_job,
         )
 
-        # Clear thumbnail URL and file metadata when job ends
-        thumbnail_url = self._current_thumbnail_url if has_active_job else None
+        # Clear file metadata when job ends
         if not has_active_job:
-            if self._current_thumbnail_url:
-                self._current_thumbnail_url = None
-                LOGGER.debug("Cleared thumbnail URL (job ended)")
             if self._current_filename:
                 self.clear_file_metadata()
                 LOGGER.debug("Cleared file metadata (job ended)")
@@ -206,7 +186,6 @@ class PrintSessionTracker:
             layer_total=layer_total,
             timelapse_paused=timelapse_paused,
             message=message,
-            thumbnail_url=thumbnail_url,
         )
 
     def _resolve_session_id(

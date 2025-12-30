@@ -695,9 +695,8 @@ class CommandProcessor:
         if message.command == PrinterCommandNames.OBJECT_EXCLUDE:
             return await self._execute_object_exclude(message)
 
-        # System sync commands
-        if message.command == PrinterCommandNames.SYNC_JOB_THUMBNAIL:
-            return self._execute_sync_job_thumbnail(message)
+        # Note: sync:job-thumbnail command has been removed.
+        # Thumbnail URLs are now pushed via SignalR after ACK processing.
 
         # System task commands
         if message.command == PrinterCommandNames.UPLOAD_THUMBNAIL:
@@ -911,51 +910,8 @@ class CommandProcessor:
         return details
 
     # -------------------------------------------------------------------------
-    # System Sync Commands
+    # System Task Commands
     # -------------------------------------------------------------------------
-
-    def _execute_sync_job_thumbnail(self, message: CommandMessage) -> Dict[str, Any]:
-        """Handle sync:job-thumbnail command.
-
-        This command is sent by the server after it uploads the thumbnail to S3.
-        The URL is stored and included in subsequent status telemetry payloads.
-
-        Parameters:
-            thumbnailUrl (str): The CDN URL for the thumbnail
-            printJobId (str, optional): The print job ID (for validation)
-        """
-        if self._telemetry is None:
-            raise CommandProcessingError(
-                "Telemetry publisher unavailable",
-                code="telemetry_unavailable",
-                command_id=message.command_id,
-            )
-
-        params = message.parameters or {}
-
-        thumbnail_url = params.get("thumbnailUrl")
-        if not thumbnail_url or not isinstance(thumbnail_url, str):
-            raise CommandProcessingError(
-                "thumbnailUrl parameter is required",
-                code="invalid_parameters",
-                command_id=message.command_id,
-            )
-
-        print_job_id = params.get("printJobId", "")
-
-        # Store the URL in the telemetry publisher
-        self._telemetry.set_thumbnail_url(thumbnail_url)
-
-        LOGGER.info(
-            "Set thumbnail URL for job %s: %s",
-            print_job_id[:8] if print_job_id else "unknown",
-            thumbnail_url[:60] + "..." if len(thumbnail_url) > 60 else thumbnail_url,
-        )
-
-        return {
-            "thumbnailUrl": thumbnail_url,
-            "printJobId": print_job_id,
-        }
 
     async def _execute_upload_thumbnail(
         self, message: CommandMessage
@@ -1082,14 +1038,8 @@ class CommandProcessor:
                 thumbnail_key,
             )
 
-            # Set the thumbnail URL in telemetry so it appears in status updates
-            thumbnail_url = params.get("thumbnailUrl")
-            if thumbnail_url and self._telemetry:
-                self._telemetry.set_thumbnail_url(thumbnail_url)
-                LOGGER.debug(
-                    "Set thumbnail URL for status telemetry: %s",
-                    thumbnail_url[:50] + "..." if len(thumbnail_url) > 50 else thumbnail_url,
-                )
+            # Note: We no longer set thumbnailUrl in telemetry status.
+            # The server will push the URL via SignalR after processing the ACK.
 
             return {
                 "success": True,

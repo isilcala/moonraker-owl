@@ -66,12 +66,8 @@ class PrinterCommandNames:
     FAN_SET_SPEED = "fan:set-speed"
     """Set fan speed."""
 
-    # -------------------------------------------------------------------------
-    # System Sync Commands (cloud-triggered, fire-and-forget)
-    # -------------------------------------------------------------------------
-
-    SYNC_JOB_THUMBNAIL = "sync:job-thumbnail"
-    """Sync the thumbnail URL for the current print job."""
+    # Note: SYNC_JOB_THUMBNAIL has been removed.
+    # Thumbnail URLs are now pushed via SignalR after ACK processing.
 
     # -------------------------------------------------------------------------
     # System Task Commands (cloud-triggered, requires result)

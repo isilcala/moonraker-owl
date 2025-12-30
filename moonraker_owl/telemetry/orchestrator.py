@@ -98,16 +98,8 @@ class TelemetryOrchestrator:
         """
         self._on_print_state_changed = callback
 
-    def set_thumbnail_url(self, url: Optional[str]) -> None:
-        """Set the thumbnail URL for the current print job.
-
-        Delegates to the session tracker which manages the URL lifecycle.
-        The URL is automatically cleared when the job ends.
-
-        Args:
-            url: The CDN URL for the thumbnail, or None to clear.
-        """
-        self.session_tracker.set_thumbnail_url(url)
+    # Note: set_thumbnail_url has been removed.
+    # Thumbnail URLs are now pushed via SignalR after upload ACK processing.
 
     def reset(self, *, snapshot: Optional[MoonrakerStoreState] = None) -> None:
         self.store = MoonrakerStateStore(clock=self._clock)
