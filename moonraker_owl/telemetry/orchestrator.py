@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterable, Optional, Set
+from typing import Any, Callable, Dict, Iterable, Optional, Set, TYPE_CHECKING
 
 from ..config import TelemetryCadenceConfig
 from ..version import __version__
@@ -14,6 +14,9 @@ from .event_types import Event, EventName, PRINT_STATE_TRANSITIONS
 from .selectors import EventsSelector, ObjectsSelector, SensorsSelector, StatusSelector
 from .state_store import MoonrakerStateStore, MoonrakerStoreState
 from .trackers import HeaterMonitor, PrintSessionTracker, SessionInfo
+
+if TYPE_CHECKING:
+    from ..core.job_registry import PrintJobRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,9 +46,11 @@ class TelemetryOrchestrator:
         heartbeat_seconds: Optional[int] = None,
         clock=None,
         cadence: Optional[TelemetryCadenceConfig] = None,
+        job_registry: Optional["PrintJobRegistry"] = None,
     ) -> None:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._origin = origin or f"moonraker-owl@{__version__}"
+        self._job_registry = job_registry
 
         self._cadence = cadence or TelemetryCadenceConfig()
         heartbeat = (
@@ -78,6 +83,25 @@ class TelemetryOrchestrator:
         self._last_session_id: Optional[str] = None  # Track session for new-job detection
         self._last_job_status: Optional[str] = None  # Track job_status for terminal events
         self._terminal_event_emitted: bool = False  # Prevent duplicate terminal events
+
+        # Timelapse event deduplication
+        self._last_timelapse_filename: Optional[str] = None
+
+        # Track last completed job for timelapse correlation
+        # When a job ends, we save its info so timelapse (which renders after job ends)
+        # can still be correlated to the correct job
+        self._last_completed_job_session_id: Optional[str] = None
+        self._last_completed_job_filename: Optional[str] = None
+        self._last_completed_moonraker_job_id: Optional[str] = None
+        # Track moonraker_job_id while printing (before terminal state)
+        self._last_moonraker_job_id: Optional[str] = None
+
+        # Timelapse polling fallback: When render:running is detected but no
+        # render:success arrives (moonraker-timelapse plugin bug), we poll for
+        # new timelapse files to detect render completion.
+        self._timelapse_poll_requested: bool = False
+        self._timelapse_poll_started_at: Optional[datetime] = None
+        self._timelapse_known_files: Set[str] = set()
 
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
@@ -121,6 +145,17 @@ class TelemetryOrchestrator:
         self._last_session_id = None
         self._last_job_status = None
         self._terminal_event_emitted = False
+        self._last_timelapse_filename = None
+        # Reset completed job tracking (timelapse correlation)
+        self._last_completed_job_session_id = None
+        self._last_completed_job_filename = None
+        self._last_completed_moonraker_job_id = None
+        # Track moonraker_job_id while printing (before terminal state)
+        self._last_moonraker_job_id = None
+        # Reset timelapse polling state
+        self._timelapse_poll_requested = False
+        self._timelapse_poll_started_at = None
+        self._timelapse_known_files = set()
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
         # Note: _on_print_state_changed is preserved
@@ -294,6 +329,7 @@ class TelemetryOrchestrator:
         """
         self._detect_klippy_state_change()
         self._detect_print_state_change()
+        self._detect_timelapse_ready()
 
     def _detect_klippy_state_change(self) -> None:
         """Detect Klippy state transitions and record P0 events.
@@ -396,6 +432,8 @@ class TelemetryOrchestrator:
             self._last_print_state = current_state
             if current_session_id:
                 self._last_session_id = current_session_id
+            if session.moonraker_job_id:
+                self._last_moonraker_job_id = session.moonraker_job_id
             return
 
         # Update job_status tracking
@@ -404,6 +442,9 @@ class TelemetryOrchestrator:
         # Update session tracking
         if current_session_id:
             self._last_session_id = current_session_id
+        # Track moonraker_job_id while printing for timelapse correlation
+        if session.moonraker_job_id:
+            self._last_moonraker_job_id = session.moonraker_job_id
 
         # === Priority 2: Standard print_stats.state-based detection ===
         # Aligned with Mainsail: only use print_stats.state transitions
@@ -451,6 +492,24 @@ class TelemetryOrchestrator:
                 return
             # Mark terminal event as emitted
             self._terminal_event_emitted = True
+            # Save job info for timelapse correlation
+            # Timelapse renders after print ends, so we need to remember the job.
+            # IMPORTANT: session.session_id may already be None when state becomes
+            # terminal (session_tracker returns empty session for terminal states).
+            # Use _last_session_id as fallback - it was saved while still printing.
+            effective_session = session.session_id or self._last_session_id
+            # Use moonraker_job_id from session or fallback to _last_moonraker_job_id
+            effective_job_id = session.moonraker_job_id or self._last_moonraker_job_id
+            if effective_session or effective_job_id:
+                self._last_completed_job_session_id = effective_session
+                self._last_completed_job_filename = self._last_filename
+                self._last_completed_moonraker_job_id = effective_job_id
+                LOGGER.debug(
+                    "Saved completed job info for timelapse (via state): session_id=%s, moonraker_job_id=%s, filename=%s",
+                    effective_session,
+                    effective_job_id,
+                    self._last_filename,
+                )
         elif event_name == EventName.PRINT_STARTED:
             # Reset terminal event flag when a new print starts
             self._terminal_event_emitted = False
@@ -528,6 +587,25 @@ class TelemetryOrchestrator:
         # Mark terminal event as emitted
         self._terminal_event_emitted = True
 
+        # Save job info for timelapse correlation
+        # Timelapse renders after print ends, so we need to remember the job.
+        # IMPORTANT: session.session_id may already be None when state becomes
+        # terminal (session_tracker returns empty session for terminal states).
+        # Use _last_session_id as fallback - it was saved while still printing.
+        effective_session = session.session_id or self._last_session_id
+        # Use moonraker_job_id from session or fallback to _last_moonraker_job_id
+        effective_job_id = session.moonraker_job_id or self._last_moonraker_job_id
+        if effective_session or effective_job_id:
+            self._last_completed_job_session_id = effective_session
+            self._last_completed_job_filename = self._last_filename
+            self._last_completed_moonraker_job_id = effective_job_id
+            LOGGER.debug(
+                "Saved completed job info for timelapse (via job_status): session_id=%s, moonraker_job_id=%s, filename=%s",
+                effective_session,
+                effective_job_id,
+                self._last_filename,
+            )
+
         event = Event(
             event_name=event_name,
             message=self._build_print_event_message(event_name),
@@ -563,6 +641,10 @@ class TelemetryOrchestrator:
         base_data: Dict[str, Any] = {}
         if self._last_filename:
             base_data["filename"] = self._last_filename
+        
+        # Always include moonrakerJobId if available (critical for job correlation)
+        if session.moonraker_job_id:
+            base_data["moonrakerJobId"] = session.moonraker_job_id
 
         if event_name == EventName.PRINT_STARTED:
             if session.remaining_seconds is not None:
@@ -601,6 +683,254 @@ class TelemetryOrchestrator:
             return base_data
 
         return base_data
+
+    def _detect_timelapse_ready(self) -> None:
+        """Detect timelapse render completion from moonraker-timelapse.
+
+        moonraker-timelapse sends notify_timelapse_event when:
+        - action=newframe: Frame captured (we ignore this)
+        - action=render, status=started: Render began (we ignore this)
+        - action=render, status=running: Render in progress (start polling fallback)
+        - action=render, status=success: Render completed (we emit TIMELAPSE_READY)
+        - action=saveframes: Frames saved to zip (we ignore this)
+
+        When render completes successfully, we emit TIMELAPSE_READY event with:
+        - filename: The rendered video filename (e.g., "timelapse_xxx.mp4")
+        - previewImage: The preview image filename (e.g., "timelapse_xxx.jpg")
+        - printFile: The original gcode filename
+        - moonrakerJobId: The Moonraker job ID for correlation
+        - printJobId: The cloud-side PrintJob ID (if available from registry)
+
+        FALLBACK: moonraker-timelapse sometimes fails to send render:success.
+        When we detect render:running, we start polling the timelapse file list
+        to detect when a new .mp4 file appears, indicating render completion.
+        """
+        timelapse_event = self.store.get("timelapse_event")
+        if timelapse_event is None:
+            return
+
+        event_data = timelapse_event.data
+        action = event_data.get("action")
+        status = event_data.get("status")
+        filename = event_data.get("filename")
+
+        # When render is running, request polling fallback
+        # This handles the case where moonraker-timelapse doesn't send render:success
+        if action == "render" and status == "running":
+            if not self._timelapse_poll_requested:
+                LOGGER.info(
+                    "Timelapse render running, enabling polling fallback for completion detection"
+                )
+                self._timelapse_poll_requested = True
+                self._timelapse_poll_started_at = self._clock()
+            return
+
+        # Only process successful render completions
+        if action != "render" or status != "success":
+            return
+
+        # Disable polling since we got the success event
+        self._timelapse_poll_requested = False
+        self._timelapse_poll_started_at = None
+
+        # Deduplicate: skip if we already processed this timelapse
+        if filename and filename == self._last_timelapse_filename:
+            return
+
+        self._last_timelapse_filename = filename
+
+        # Get current session info - session_id may be None if print already ended
+        session = self.session_tracker.compute(self.store)
+
+        # Get moonraker_job_id directly from session or fallback to saved value
+        # The saved value comes from when the print was still active
+        moonraker_job_id: Optional[str] = (
+            session.moonraker_job_id or self._last_completed_moonraker_job_id
+        )
+
+        # Look up cloud-side PrintJobId from registry
+        # The registry is populated by job:registered commands from the server
+        print_job_id: Optional[str] = None
+        # Use print_file from timelapse event, fallback to last completed job's filename
+        print_file = event_data.get("printfile") or self._last_completed_job_filename
+
+        if self._job_registry:
+            # Try to find by filename first (most reliable for post-print events)
+            if print_file:
+                mapping = self._job_registry.find_by_filename(print_file)
+                if mapping:
+                    print_job_id = mapping.print_job_id
+                    # Also get moonraker_job_id from mapping if we didn't have it
+                    if not moonraker_job_id:
+                        moonraker_job_id = mapping.moonraker_job_id
+                    LOGGER.debug(
+                        "Found PrintJob mapping by filename '%s': printJobId=%s",
+                        print_file, print_job_id,
+                    )
+
+            # Fallback: try by moonraker_job_id
+            if not print_job_id and moonraker_job_id:
+                mapping = self._job_registry.find_by_moonraker_job_id(moonraker_job_id)
+                if mapping:
+                    print_job_id = mapping.print_job_id
+                    LOGGER.debug(
+                        "Found PrintJob mapping by moonrakerJobId '%s': printJobId=%s",
+                        moonraker_job_id, print_job_id,
+                    )
+
+        # Build event data
+        data: Dict[str, Any] = {}
+        if filename:
+            data["filename"] = filename
+        preview_image = event_data.get("previewimage")
+        if preview_image:
+            data["previewImage"] = preview_image
+        if print_file:
+            data["printFile"] = print_file
+        if moonraker_job_id:
+            data["moonrakerJobId"] = moonraker_job_id
+        if print_job_id:
+            data["printJobId"] = print_job_id
+
+        LOGGER.info(
+            "Timelapse render complete: %s (printJobId=%s, moonrakerJobId=%s)",
+            filename,
+            print_job_id or "none",
+            moonraker_job_id or "none",
+        )
+
+        event = Event(
+            event_name=EventName.TIMELAPSE_READY,
+            message=f"Timelapse ready: {filename or 'unknown'}",
+            session_id=session.session_id,
+            data=data,
+        )
+        self.events.record(event)
+
+    def should_poll_timelapse(self) -> bool:
+        """Check if timelapse polling is requested.
+
+        Returns True if we detected render:running but haven't received
+        render:success yet, and polling hasn't timed out (5 minutes max).
+        """
+        if not self._timelapse_poll_requested:
+            return False
+
+        # Timeout after 5 minutes to avoid infinite polling
+        if self._timelapse_poll_started_at:
+            elapsed = (self._clock() - self._timelapse_poll_started_at).total_seconds()
+            if elapsed > 300:  # 5 minutes
+                LOGGER.warning(
+                    "Timelapse polling timed out after %.0f seconds", elapsed
+                )
+                self._timelapse_poll_requested = False
+                self._timelapse_poll_started_at = None
+                return False
+
+        return True
+
+    def set_known_timelapse_files(self, files: Set[str]) -> None:
+        """Set the baseline of known timelapse files for polling detection.
+
+        Called by TelemetryPublisher when starting timelapse polling to
+        establish the baseline of existing files.
+        """
+        self._timelapse_known_files = files
+
+    def check_new_timelapse_file(self, current_files: Set[str]) -> Optional[str]:
+        """Check if a new timelapse mp4 file has appeared.
+
+        Compares current files against known files to detect new videos.
+        Returns the filename of the new mp4 file if found, None otherwise.
+        """
+        new_files = current_files - self._timelapse_known_files
+        # Look for new .mp4 files (timelapse videos)
+        new_videos = [f for f in new_files if f.lower().endswith(".mp4")]
+
+        if new_videos:
+            # Return the most recently modified one (by filename, as they include timestamp)
+            new_video = sorted(new_videos)[-1]
+            LOGGER.info(
+                "Timelapse polling detected new video: %s (known=%d, current=%d)",
+                new_video,
+                len(self._timelapse_known_files),
+                len(current_files),
+            )
+            return new_video
+
+        return None
+
+    def emit_timelapse_from_polling(self, filename: str) -> None:
+        """Emit TIMELAPSE_READY event from polling detection.
+
+        Called when polling detects a new timelapse video file,
+        bypassing the unreliable notify_timelapse_event mechanism.
+        """
+        # Stop polling
+        self._timelapse_poll_requested = False
+        self._timelapse_poll_started_at = None
+
+        # Deduplicate
+        if filename == self._last_timelapse_filename:
+            return
+
+        self._last_timelapse_filename = filename
+        self._timelapse_known_files.add(filename)
+
+        # Get session info for job correlation
+        session = self.session_tracker.compute(self.store)
+
+        # Get moonraker_job_id directly from session or fallback to saved value
+        moonraker_job_id: Optional[str] = (
+            session.moonraker_job_id or self._last_completed_moonraker_job_id
+        )
+
+        # Look up cloud-side PrintJobId from registry
+        print_job_id: Optional[str] = None
+        print_file = self._last_completed_job_filename
+
+        if self._job_registry:
+            if print_file:
+                mapping = self._job_registry.find_by_filename(print_file)
+                if mapping:
+                    print_job_id = mapping.print_job_id
+                    if not moonraker_job_id:
+                        moonraker_job_id = mapping.moonraker_job_id
+
+            if not print_job_id and moonraker_job_id:
+                mapping = self._job_registry.find_by_moonraker_job_id(moonraker_job_id)
+                if mapping:
+                    print_job_id = mapping.print_job_id
+
+        # Build event data
+        data: Dict[str, Any] = {"filename": filename}
+
+        # Derive preview image filename (same name but .jpg extension)
+        if filename.lower().endswith(".mp4"):
+            preview_image = filename[:-4] + ".jpg"
+            data["previewImage"] = preview_image
+
+        if print_file:
+            data["printFile"] = print_file
+        if moonraker_job_id:
+            data["moonrakerJobId"] = moonraker_job_id
+        if print_job_id:
+            data["printJobId"] = print_job_id
+
+        LOGGER.info(
+            "Timelapse detected via polling: %s (printJobId=%s, moonrakerJobId=%s)",
+            filename,
+            print_job_id or "none",
+            moonraker_job_id or "none",
+        )
+
+        event = Event(
+            event_name=EventName.TIMELAPSE_READY,
+            message=f"Timelapse ready: {filename}",
+            session_id=session.session_id,
+            data=data,
+        )
+        self.events.record(event)
 
     def _build_alert_events_payload(
         self, events: list[Event]

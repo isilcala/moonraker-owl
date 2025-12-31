@@ -79,6 +79,16 @@ class PrinterCommandNames:
     CAPTURE_IMAGE = "task:capture-image"
     """Capture and upload camera frame to presigned URL."""
 
+    UPLOAD_TIMELAPSE = "task:upload-timelapse"
+    """Upload timelapse video and preview to presigned URLs."""
+
+    # -------------------------------------------------------------------------
+    # Job Lifecycle Commands (cloud-triggered, informational)
+    # -------------------------------------------------------------------------
+
+    JOB_REGISTERED = "job:registered"
+    """Server confirms PrintJob creation with cloud-side ID mapping."""
+
     # -------------------------------------------------------------------------
     # Object Control Commands (user-triggered, ADR-0016)
     # -------------------------------------------------------------------------

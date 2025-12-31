@@ -1,5 +1,6 @@
 """Core primitives for moonraker-owl."""
 
+from .job_registry import PrintJobMapping, PrintJobRegistry
 from .printer_backend import (
     PrinterBackend,
     PrinterBackendFactory,
@@ -15,6 +16,8 @@ __all__ = [
     "PrinterBackend",
     "PrinterBackendFactory",
     "PrinterHealthAssessment",
+    "PrintJobMapping",
+    "PrintJobRegistry",
     "StatusCallback",
     "deep_merge",
 ]

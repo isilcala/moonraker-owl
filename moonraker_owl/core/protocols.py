@@ -68,6 +68,24 @@ class PrinterAdapter(Protocol):
         """
         ...
 
+    async def fetch_most_recent_job(
+        self, timeout: float = 5.0
+    ) -> Optional[dict[str, Any]]:
+        """Fetch the most recent job from Moonraker's history API.
+
+        This is used to reliably obtain moonrakerJobId when a print starts,
+        as WebSocket notifications may arrive after print state change.
+        Follows the Obico pattern of querying history API for job correlation.
+
+        Returns:
+            Job dict containing 'job_id', 'filename', 'start_time', etc.
+            or None if no jobs in history.
+
+        Raises:
+            asyncio.TimeoutError: If request exceeds timeout.
+        """
+        ...
+
     async def aclose(self) -> None:
         """Close any underlying resources."""
         ...

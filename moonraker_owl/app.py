@@ -17,6 +17,7 @@ from .commands import CommandConfigurationError, CommandProcessor
 from .config import OwlConfig, load_config
 from .connection import ConnectionCoordinator, ReconnectReason
 from .core import PrinterBackend, PrinterHealthAssessment
+from .core.job_registry import PrintJobRegistry
 from .health import HealthReporter, HealthServer
 from .logging import configure_logging
 from .telemetry import (
@@ -103,6 +104,8 @@ class MoonrakerOwlApp:
         self._moonraker_recovery_lock: Optional[asyncio.Lock] = None
         self._component_restart_lock: Optional[asyncio.Lock] = None
         self._component_restart_in_progress = False
+        # Shared registry for PrintJob ID mapping (populated by job:registered commands)
+        self._job_registry = PrintJobRegistry()
 
     @property
     def _moonraker_client(self) -> Any:
@@ -564,7 +567,7 @@ class MoonrakerOwlApp:
         if telemetry is None:
             # Use backend factory if available, otherwise fallback to direct creation
             telemetry = self._printer_backend.create_telemetry_publisher(
-                self._config, self._mqtt_client
+                self._config, self._mqtt_client, job_registry=self._job_registry
             )
             self._telemetry_publisher = telemetry
             self._status_listener_registered = False
@@ -601,6 +604,7 @@ class MoonrakerOwlApp:
                 self._config,
                 self._mqtt_client,
                 self._telemetry_publisher,
+                job_registry=self._job_registry,
             )
             self._command_processor = processor
 

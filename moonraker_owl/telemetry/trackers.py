@@ -26,6 +26,7 @@ class SessionInfo:
     # Core identification - None when no active job
     session_id: Optional[str]
     job_name: Optional[str]
+    moonraker_job_id: Optional[str]  # Raw job_id from print_stats/history_event
 
     # State signals
     raw_state: Optional[str]  # print_stats.state
@@ -174,6 +175,7 @@ class PrintSessionTracker:
         return SessionInfo(
             session_id=session_id,
             job_name=filename,
+            moonraker_job_id=job_id,
             raw_state=raw_state,
             idle_timeout_state=idle_state,
             job_status=job_status,

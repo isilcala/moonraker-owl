@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ..commands import CommandProcessor
     from ..config import OwlConfig
     from ..telemetry import TelemetryPublisher
+    from .job_registry import PrintJobRegistry
 
 
 # Type alias for status update callbacks
@@ -126,6 +127,8 @@ class PrinterBackend(Protocol):
         self,
         config: "OwlConfig",
         mqtt_client: Any,
+        *,
+        job_registry: Optional["PrintJobRegistry"] = None,
     ) -> "TelemetryPublisher":
         """Factory method for creating a telemetry publisher.
 
@@ -135,6 +138,7 @@ class PrinterBackend(Protocol):
         Args:
             config: Application configuration.
             mqtt_client: MQTT client for publishing telemetry.
+            job_registry: Optional registry for PrintJob ID mapping.
 
         Returns:
             Configured TelemetryPublisher instance.
@@ -146,6 +150,8 @@ class PrinterBackend(Protocol):
         config: "OwlConfig",
         mqtt_client: Any,
         telemetry: "TelemetryPublisher",
+        *,
+        job_registry: Optional["PrintJobRegistry"] = None,
     ) -> "CommandProcessor":
         """Factory method for creating a command processor.
 
@@ -156,6 +162,7 @@ class PrinterBackend(Protocol):
             config: Application configuration.
             mqtt_client: MQTT client for receiving commands.
             telemetry: Telemetry publisher for status updates.
+            job_registry: Optional registry for PrintJob ID mapping.
 
         Returns:
             Configured CommandProcessor instance.

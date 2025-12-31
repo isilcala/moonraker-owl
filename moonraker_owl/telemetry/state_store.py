@@ -256,6 +256,13 @@ class MoonrakerStateStore:
                     self._store_history_event(entry, observed_at)
             return
 
+        # Handle moonraker-timelapse events (render complete, etc.)
+        if method == "notify_timelapse_event":
+            for entry in _iter_dicts(params):
+                if isinstance(entry, Mapping):
+                    self._store_timelapse_event(entry, observed_at)
+            return
+
         for entry in _iter_dicts(params):
             self._ingest_status(entry, observed_at)
 
@@ -322,6 +329,17 @@ class MoonrakerStateStore:
         incoming = dict(event)
         existing = self._sections.get("history_event")
 
+        # DEBUG: Log incoming history_event to understand structure
+        action = incoming.get("action")
+        job = incoming.get("job", {})
+        job_id = job.get("job_id") if isinstance(job, dict) else None
+        LOGGER.debug(
+            "history_event received: action=%s, job_id=%s, keys=%s",
+            action,
+            job_id,
+            list(job.keys()) if isinstance(job, dict) else "no job",
+        )
+
         # Always replace when action changes (different event type)
         if existing is not None:
             old_action = existing.data.get("action")
@@ -350,6 +368,45 @@ class MoonrakerStateStore:
             data=base,
         )
         self._sections["history_event"] = snapshot
+        self._latest_observed_at = observed_at
+
+    def _store_timelapse_event(
+        self, event: Mapping[str, Any], observed_at: datetime
+    ) -> None:
+        """Store moonraker-timelapse event for render detection.
+
+        moonraker-timelapse sends notify_timelapse_event with data like:
+        {
+            "action": "render",
+            "status": "success",
+            "filename": "timelapse_xxx.mp4",
+            "previewimage": "timelapse_xxx.jpg",
+            "printfile": "original_gcode.gcode"
+        }
+
+        We store this as timelapse_event section and let the orchestrator
+        detect when action=render and status=success to emit TIMELAPSE_READY.
+        
+        Unlike history_event, we always replace since each timelapse event
+        is a discrete notification (not incremental state updates).
+        """
+        incoming = dict(event)
+        action = incoming.get("action", "unknown")
+        status = incoming.get("status", "unknown")
+        
+        LOGGER.debug(
+            "timelapse_event: action=%s status=%s filename=%s",
+            action,
+            status,
+            incoming.get("filename"),
+        )
+
+        snapshot = SectionSnapshot(
+            name="timelapse_event",
+            observed_at=observed_at,
+            data=incoming,
+        )
+        self._sections["timelapse_event"] = snapshot
         self._latest_observed_at = observed_at
 
     def _log_print_state_transition(

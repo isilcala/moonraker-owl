@@ -29,6 +29,7 @@ from ..telemetry import TelemetryPublisher
 if TYPE_CHECKING:
     from ..adapters.mqtt import MQTTClient
     from ..config import MoonrakerConfig, OwlConfig
+    from ..core.job_registry import PrintJobRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -139,23 +140,30 @@ class MoonrakerBackend(PrinterBackend):
         self,
         config: "OwlConfig",
         mqtt_client: "MQTTClient",
+        *,
+        job_registry: Optional["PrintJobRegistry"] = None,
     ) -> TelemetryPublisher:
         """Create a TelemetryPublisher configured for Moonraker.
 
         Args:
             config: Application configuration.
             mqtt_client: MQTT client for publishing.
+            job_registry: Optional registry for PrintJob ID mapping.
 
         Returns:
             TelemetryPublisher instance.
         """
-        return TelemetryPublisher(config, self._client, mqtt_client)
+        return TelemetryPublisher(
+            config, self._client, mqtt_client, job_registry=job_registry
+        )
 
     def create_command_processor(
         self,
         config: "OwlConfig",
         mqtt_client: "MQTTClient",
         telemetry: TelemetryPublisher,
+        *,
+        job_registry: Optional["PrintJobRegistry"] = None,
     ) -> CommandProcessor:
         """Create a CommandProcessor configured for Moonraker.
 
@@ -163,6 +171,7 @@ class MoonrakerBackend(PrinterBackend):
             config: Application configuration.
             mqtt_client: MQTT client for receiving commands.
             telemetry: Telemetry publisher for status updates.
+            job_registry: Optional registry for PrintJob ID mapping.
 
         Returns:
             CommandProcessor instance.
@@ -205,6 +214,7 @@ class MoonrakerBackend(PrinterBackend):
             s3_upload=s3_upload,
             camera=camera,
             image_preprocessor=image_preprocessor,
+            job_registry=job_registry,
         )
 
     # -------------------------------------------------------------------------

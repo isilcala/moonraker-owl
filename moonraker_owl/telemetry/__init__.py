@@ -13,7 +13,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Protocol, Sequence, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Protocol, Sequence, Set, Tuple, TYPE_CHECKING
 
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
@@ -36,6 +36,9 @@ from .orchestrator import ChannelPayload, TelemetryOrchestrator
 from .polling import DEFAULT_POLL_SPECS, PollSpec
 from .state_store import MoonrakerStateStore
 from .telemetry_state import TelemetryHasher
+
+if TYPE_CHECKING:
+    from ..core.job_registry import PrintJobRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -149,10 +152,12 @@ class TelemetryPublisher:
         *,
         queue_size: int = 16,
         poll_specs: Optional[Iterable[PollSpec]] = None,
+        job_registry: Optional["PrintJobRegistry"] = None,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
         self._mqtt = mqtt
+        self._job_registry = job_registry
 
         (
             self._tenant_id,
@@ -242,6 +247,7 @@ class TelemetryPublisher:
         self._orchestrator = TelemetryOrchestrator(
             clock=lambda: datetime.now(timezone.utc),
             cadence=self._cadence,
+            job_registry=self._job_registry,
         )
         self._orchestrator.set_sensors_mode(
             mode="idle",
@@ -263,6 +269,10 @@ class TelemetryPublisher:
             duration_seconds=None,
             requested_at=datetime.now(timezone.utc),
         )
+
+        # Timelapse polling task for fallback detection
+        self._timelapse_poll_task: Optional[asyncio.Task[None]] = None
+        self._timelapse_poll_interval: float = 5.0  # Poll every 5 seconds
 
     async def start(self) -> None:
         await self._dispose_worker(remove_callback=True)
@@ -292,6 +302,7 @@ class TelemetryPublisher:
 
         self._worker = asyncio.create_task(self._run())
         self._start_pollers()
+        self._start_timelapse_poller()
 
     async def _discover_and_subscribe_sensors(self) -> None:
         """Discover all available heaters and sensors and update subscriptions.
@@ -359,6 +370,7 @@ class TelemetryPublisher:
         self._event.set()
 
         await self._cancel_pollers()
+        await self._cancel_timelapse_poller()
 
         await self._dispose_worker(remove_callback=True)
         # Removed: Agent no longer sets retained flag, Nexus snapshot provides authoritative state
@@ -590,6 +602,78 @@ class TelemetryPublisher:
         for group in self._poll_groups:
             task = asyncio.create_task(self._poll_loop(group))
             self._poll_tasks.append(task)
+
+    def _start_timelapse_poller(self) -> None:
+        """Start the timelapse polling fallback task."""
+        if self._timelapse_poll_task is not None:
+            return
+        self._timelapse_poll_task = asyncio.create_task(self._timelapse_poll_loop())
+
+    async def _cancel_timelapse_poller(self) -> None:
+        """Cancel the timelapse polling task."""
+        if self._timelapse_poll_task is None:
+            return
+        self._timelapse_poll_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._timelapse_poll_task
+        self._timelapse_poll_task = None
+
+    async def _timelapse_poll_loop(self) -> None:
+        """Poll for timelapse render completion when notify_timelapse_event is unreliable.
+
+        moonraker-timelapse sometimes fails to send the render:success notification.
+        When we detect render:running, we start polling the timelapse file list
+        to detect when a new .mp4 file appears.
+        """
+        baseline_captured = False
+
+        while not self._stop_event.is_set():
+            try:
+                # Check if polling is requested
+                if not self._orchestrator.should_poll_timelapse():
+                    baseline_captured = False
+                    await asyncio.sleep(self._timelapse_poll_interval)
+                    continue
+
+                # First poll: capture baseline of existing files
+                if not baseline_captured:
+                    try:
+                        files = await self._moonraker.list_timelapse_files()
+                        known_files = {f.get("path", "") for f in files if f.get("path")}
+                        self._orchestrator.set_known_timelapse_files(known_files)
+                        baseline_captured = True
+                        LOGGER.debug(
+                            "Timelapse polling baseline: %d files",
+                            len(known_files),
+                        )
+                    except Exception as exc:
+                        LOGGER.debug("Failed to get timelapse baseline: %s", exc)
+                        await asyncio.sleep(self._timelapse_poll_interval)
+                        continue
+
+                # Subsequent polls: check for new files
+                try:
+                    files = await self._moonraker.list_timelapse_files()
+                    current_files = {f.get("path", "") for f in files if f.get("path")}
+
+                    new_video = self._orchestrator.check_new_timelapse_file(current_files)
+                    if new_video:
+                        # Emit the TIMELAPSE_READY event
+                        self._orchestrator.emit_timelapse_from_polling(new_video)
+                        # Signal event processing
+                        self._event.set()
+                        baseline_captured = False  # Reset for next timelapse
+
+                except Exception as exc:
+                    LOGGER.debug("Timelapse poll failed: %s", exc)
+
+                await asyncio.sleep(self._timelapse_poll_interval)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("Timelapse poll loop error")
+                await asyncio.sleep(self._timelapse_poll_interval)
 
     async def _cancel_pollers(self) -> None:
         if not self._poll_tasks:
@@ -894,13 +978,18 @@ class TelemetryPublisher:
             self._orchestrator.sensors_selector.reset()
 
     async def _enrich_print_events(self, events_payload: Dict[str, Any]) -> None:
-        """Enrich printStarted events with hasThumbnail flag and set file metadata.
+        """Enrich printStarted events with moonrakerJobId, hasThumbnail, and file metadata.
 
         This method:
-        1. Fetches GCode metadata to find the thumbnail path
-        2. Sets file metadata (gcode_start_byte, gcode_end_byte) for accurate progress calculation
-        3. Sets hasThumbnail=true if thumbnail is available (ADR-0013 Phase 2)
-        4. Stores thumbnail path info for later upload via task:upload-thumbnail command
+        1. Fetches moonrakerJobId from History API (critical for job correlation)
+        2. Fetches GCode metadata to find the thumbnail path
+        3. Sets file metadata (gcode_start_byte, gcode_end_byte) for accurate progress calculation
+        4. Sets hasThumbnail=true if thumbnail is available (ADR-0013 Phase 2)
+        5. Stores thumbnail path info for later upload via task:upload-thumbnail command
+
+        The moonrakerJobId fetch is critical because WebSocket notifications
+        (notify_history_changed) may arrive after print state changes.
+        We follow Obico's pattern of querying History API for reliable job correlation.
 
         Note: Thumbnail is NOT fetched or embedded here. The server will send a 
         task:upload-thumbnail command with a presigned URL, and the agent will
@@ -932,6 +1021,13 @@ class TelemetryPublisher:
 
             # Clear any previous thumbnail info
             self._current_thumbnail_info = None
+
+            # === CRITICAL: Fetch moonrakerJobId from History API ===
+            # This is more reliable than waiting for notify_history_changed
+            # because print state change may be detected before the WebSocket
+            # notification arrives. Follows Obico's pattern.
+            if not data.get("moonrakerJobId"):
+                await self._fetch_and_set_moonraker_job_id(data)
 
             # Fetch metadata with timeout to get thumbnail paths and file byte ranges
             timeout_seconds = self._thumbnail_fetch_timeout_ms / 1000.0
@@ -1011,6 +1107,58 @@ class TelemetryPublisher:
                     filename,
                     exc,
                 )
+
+    async def _fetch_and_set_moonraker_job_id(
+        self, event_data: Dict[str, Any]
+    ) -> None:
+        """Fetch moonrakerJobId from History API and add it to event data.
+
+        This method queries Moonraker's history API to get the most recent job,
+        which should be the currently starting print. This is more reliable than
+        waiting for notify_history_changed because:
+
+        1. print_stats.state changes (triggering PRINT_STARTED) may arrive before
+           notify_history_changed WebSocket notification
+        2. The history API provides immediate access to job_id
+
+        This follows Obico's pattern in moonraker_obico/moonraker_conn.py:
+        find_most_recent_job() which queries /server/history/list?order=desc&limit=1
+
+        Args:
+            event_data: The event data dict to mutate with moonrakerJobId
+        """
+        timeout_seconds = self._thumbnail_fetch_timeout_ms / 1000.0
+        try:
+            job = await asyncio.wait_for(
+                self._moonraker.fetch_most_recent_job(),
+                timeout=timeout_seconds,
+            )
+            if job and job.get("job_id"):
+                job_id = job["job_id"]
+                event_data["moonrakerJobId"] = job_id
+                LOGGER.info(
+                    "Enriched printStarted with moonrakerJobId=%s (filename=%s)",
+                    job_id,
+                    event_data.get("filename"),
+                )
+                
+                # Also update the orchestrator's tracking for timelapse correlation
+                self._orchestrator._last_moonraker_job_id = job_id
+            else:
+                LOGGER.debug(
+                    "No job found in history for printStarted event (filename=%s)",
+                    event_data.get("filename"),
+                )
+        except asyncio.TimeoutError:
+            LOGGER.debug(
+                "Timeout fetching moonrakerJobId from history (timeout=%.1fs)",
+                timeout_seconds,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Error fetching moonrakerJobId from history: %s",
+                exc,
+            )
 
     def get_current_thumbnail_info(self) -> Optional[Dict[str, Any]]:
         """Get the current print job's thumbnail info for task:upload-thumbnail.

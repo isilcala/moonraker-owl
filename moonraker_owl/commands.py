@@ -18,6 +18,7 @@ from .adapters.s3_upload import S3UploadClient, UploadResult
 from .adapters.camera import CameraClient
 from .adapters.image_preprocessor import ImagePreprocessor
 from .core.idempotency import CommandIdempotencyGuard
+from .core.job_registry import PrintJobRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -107,6 +108,20 @@ class MoonrakerCommandClient(Protocol):
 
         Returns:
             Metadata dictionary or None if not found.
+        """
+        ...
+
+    async def fetch_timelapse_file(
+        self, filename: str, timeout: float = 120.0
+    ) -> Optional[bytes]:
+        """Fetch timelapse video or preview from Moonraker file server.
+
+        Args:
+            filename: Timelapse filename (e.g., "timelapse_xxx.mp4")
+            timeout: Request timeout in seconds.
+
+        Returns:
+            Raw file bytes if successful, None if not found.
         """
         ...
 
@@ -203,6 +218,7 @@ class CommandProcessor:
         s3_upload: Optional[S3UploadClient] = None,
         camera: Optional[CameraClient] = None,
         image_preprocessor: Optional[ImagePreprocessor] = None,
+        job_registry: Optional[PrintJobRegistry] = None,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
@@ -211,6 +227,7 @@ class CommandProcessor:
         self._s3_upload = s3_upload
         self._camera = camera
         self._image_preprocessor = image_preprocessor
+        self._job_registry = job_registry
 
         (
             self._tenant_id,
@@ -705,6 +722,13 @@ class CommandProcessor:
         if message.command == PrinterCommandNames.CAPTURE_IMAGE:
             return await self._execute_capture_image(message)
 
+        if message.command == PrinterCommandNames.UPLOAD_TIMELAPSE:
+            return await self._execute_upload_timelapse(message)
+
+        # Job lifecycle commands
+        if message.command == PrinterCommandNames.JOB_REGISTERED:
+            return self._execute_job_registered(message)
+
         # Emergency stop command
         if message.command == PrinterCommandNames.EMERGENCY_STOP:
             return await self._execute_emergency_stop(message)
@@ -792,6 +816,71 @@ class CommandProcessor:
             ) from exc
 
         return {"command": message.command, "filename": filename}
+
+    def _execute_job_registered(self, message: CommandMessage) -> Dict[str, Any]:
+        """Handle job:registered command.
+
+        This command is sent by the server after creating a PrintJob record.
+        It provides the mapping between Moonraker job ID and cloud-side PrintJobId,
+        enabling accurate correlation for timelapse and other events.
+
+        Parameters:
+            moonrakerJobId (str): Moonraker's job ID (e.g., "0002DD")
+            printJobId (str): Cloud-side PrintJob UUID
+            fileName (str): The gcode filename being printed
+        """
+        params = message.parameters or {}
+
+        moonraker_job_id = params.get("moonrakerJobId")
+        print_job_id = params.get("printJobId")
+        filename = params.get("fileName")
+
+        # All fields are required
+        if not moonraker_job_id or not isinstance(moonraker_job_id, str):
+            raise CommandProcessingError(
+                "moonrakerJobId parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        if not print_job_id or not isinstance(print_job_id, str):
+            raise CommandProcessingError(
+                "printJobId parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        if not filename or not isinstance(filename, str):
+            raise CommandProcessingError(
+                "fileName parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        # Register the mapping if registry is available
+        if self._job_registry is not None:
+            self._job_registry.register(
+                moonraker_job_id=moonraker_job_id,
+                print_job_id=print_job_id,
+                filename=filename,
+            )
+            LOGGER.info(
+                "Job registered: moonrakerJobId=%s -> printJobId=%s (file: %s)",
+                moonraker_job_id,
+                print_job_id[:8] if len(print_job_id) > 8 else print_job_id,
+                filename,
+            )
+        else:
+            LOGGER.warning(
+                "Job registry unavailable, cannot store mapping for moonrakerJobId=%s",
+                moonraker_job_id,
+            )
+
+        return {
+            "success": True,
+            "moonrakerJobId": moonraker_job_id,
+            "printJobId": print_job_id,
+        }
 
     def _execute_set_telemetry_rate(self, message: CommandMessage) -> Dict[str, Any]:
         """Handle control:set-telemetry-rate command."""
@@ -1215,6 +1304,192 @@ class CommandProcessor:
                 "errorCode": result.error_code or "upload_failed",
                 "errorMessage": result.error_message,
             }
+
+    async def _execute_upload_timelapse(
+        self, message: CommandMessage
+    ) -> Dict[str, Any]:
+        """Handle task:upload-timelapse command.
+
+        This command is sent by the server to request timelapse video upload.
+        The agent fetches the video and preview image from Moonraker's
+        timelapse directory and uploads them to the presigned S3 URLs.
+
+        Parameters:
+            printJobId (str): The print job ID
+            videoUploadUrl (str): Presigned URL for uploading video
+            videoKey (str): S3 key for the video
+            previewUploadUrl (str, optional): Presigned URL for uploading preview
+            previewKey (str, optional): S3 key for the preview
+            videoFilename (str): Video filename from timelapse event
+            previewFilename (str, optional): Preview image filename
+            maxVideoSizeBytes (int, optional): Maximum video size allowed
+            maxPreviewSizeBytes (int, optional): Maximum preview size allowed
+        """
+        if self._s3_upload is None:
+            raise CommandProcessingError(
+                "S3 upload client unavailable",
+                code="upload_unavailable",
+                command_id=message.command_id,
+            )
+
+        params = message.parameters or {}
+
+        print_job_id = params.get("printJobId")
+        video_upload_url = params.get("videoUploadUrl")
+        video_key = params.get("videoKey")
+        video_filename = params.get("videoFilename")
+        preview_upload_url = params.get("previewUploadUrl")
+        preview_key = params.get("previewKey")
+        preview_filename = params.get("previewFilename")
+        max_video_size = params.get("maxVideoSizeBytes", 500 * 1024 * 1024)  # 500 MB default
+        max_preview_size = params.get("maxPreviewSizeBytes", 5 * 1024 * 1024)  # 5 MB default
+
+        # Validate required parameters
+        if not video_upload_url or not isinstance(video_upload_url, str):
+            raise CommandProcessingError(
+                "videoUploadUrl parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        if not video_key or not isinstance(video_key, str):
+            raise CommandProcessingError(
+                "videoKey parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        if not video_filename or not isinstance(video_filename, str):
+            raise CommandProcessingError(
+                "videoFilename parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        result_data: Dict[str, Any] = {
+            "printJobId": print_job_id,
+        }
+
+        # Fetch and upload video
+        video_uploaded = False
+        try:
+            LOGGER.info(
+                "Fetching timelapse video %s for job %s",
+                video_filename,
+                print_job_id[:8] if print_job_id else "unknown",
+            )
+            video_data = await self._moonraker.fetch_timelapse_file(
+                video_filename, timeout=120.0
+            )
+        except Exception as exc:
+            LOGGER.error("Failed to fetch timelapse video: %s", exc)
+            return {
+                "success": False,
+                "printJobId": print_job_id,
+                "errorCode": "video_fetch_failed",
+                "errorMessage": str(exc),
+            }
+
+        if video_data is None:
+            return {
+                "success": False,
+                "printJobId": print_job_id,
+                "errorCode": "video_not_found",
+                "errorMessage": f"Timelapse video not found: {video_filename}",
+            }
+
+        # Validate video size
+        if len(video_data) > max_video_size:
+            return {
+                "success": False,
+                "printJobId": print_job_id,
+                "errorCode": "video_too_large",
+                "errorMessage": f"Video size {len(video_data)} exceeds max {max_video_size}",
+            }
+
+        # Determine content type
+        video_content_type = "video/mp4"
+        if video_filename.endswith(".webm"):
+            video_content_type = "video/webm"
+
+        # Upload video to S3
+        video_result = await self._s3_upload.upload(
+            presigned_url=video_upload_url,
+            data=video_data,
+            s3_key=video_key,
+            content_type=video_content_type,
+        )
+
+        if video_result.success:
+            video_uploaded = True
+            result_data["videoKey"] = video_key
+            result_data["videoSizeBytes"] = video_result.file_size_bytes
+            LOGGER.info(
+                "Uploaded timelapse video for job %s: %d bytes to %s",
+                print_job_id[:8] if print_job_id else "unknown",
+                video_result.file_size_bytes,
+                video_key,
+            )
+        else:
+            LOGGER.warning(
+                "Failed to upload timelapse video for job %s: %s",
+                print_job_id[:8] if print_job_id else "unknown",
+                video_result.error_message,
+            )
+            return {
+                "success": False,
+                "printJobId": print_job_id,
+                "errorCode": video_result.error_code or "video_upload_failed",
+                "errorMessage": video_result.error_message,
+            }
+
+        # Fetch and upload preview (optional)
+        preview_uploaded = False
+        if preview_upload_url and preview_key and preview_filename:
+            try:
+                preview_data = await self._moonraker.fetch_timelapse_file(
+                    preview_filename, timeout=30.0
+                )
+
+                if preview_data:
+                    # Validate preview size
+                    if len(preview_data) > max_preview_size:
+                        LOGGER.warning(
+                            "Preview image too large: %d > %d, skipping",
+                            len(preview_data),
+                            max_preview_size,
+                        )
+                    else:
+                        preview_result = await self._s3_upload.upload(
+                            presigned_url=preview_upload_url,
+                            data=preview_data,
+                            s3_key=preview_key,
+                            content_type="image/jpeg",
+                        )
+
+                        if preview_result.success:
+                            preview_uploaded = True
+                            result_data["previewKey"] = preview_key
+                            result_data["previewSizeBytes"] = preview_result.file_size_bytes
+                            LOGGER.info(
+                                "Uploaded timelapse preview for job %s: %d bytes to %s",
+                                print_job_id[:8] if print_job_id else "unknown",
+                                preview_result.file_size_bytes,
+                                preview_key,
+                            )
+                        else:
+                            LOGGER.warning(
+                                "Failed to upload timelapse preview: %s",
+                                preview_result.error_message,
+                            )
+                else:
+                    LOGGER.debug("Preview image not found: %s", preview_filename)
+            except Exception as exc:
+                LOGGER.warning("Failed to fetch timelapse preview: %s", exc)
+
+        result_data["success"] = video_uploaded
+        result_data["previewUploaded"] = preview_uploaded
+        return result_data
 
     # -------------------------------------------------------------------------
     # Heater Control Commands

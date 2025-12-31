@@ -321,7 +321,7 @@ class TestFactoryMethods:
             result = backend.create_telemetry_publisher(mock_owl_config, mock_mqtt)
 
             MockPublisher.assert_called_once_with(
-                mock_owl_config, backend._client, mock_mqtt
+                mock_owl_config, backend._client, mock_mqtt, job_registry=None
             )
 
     def test_create_command_processor(self, backend: MoonrakerBackend) -> None:
@@ -351,4 +351,5 @@ class TestFactoryMethods:
                 s3_upload=MockS3Client.return_value,
                 camera=MockCameraClient.return_value,
                 image_preprocessor=MockImagePreprocessor.return_value,
+                job_registry=None,
             )

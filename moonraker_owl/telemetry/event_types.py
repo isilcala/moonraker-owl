@@ -74,6 +74,9 @@ class EventName(str, Enum):
     PRINT_PAUSED = "print:paused"
     PRINT_RESUMED = "print:resumed"
 
+    # P1 - Timelapse Events
+    TIMELAPSE_READY = "timelapse:ready"
+
 
 # Event metadata registry - maps event names to their properties
 EVENT_METADATA: Dict[EventName, Dict[str, Any]] = {
@@ -125,6 +128,12 @@ EVENT_METADATA: Dict[EventName, Dict[str, Any]] = {
         "qos": 1,
     },
     EventName.PRINT_RESUMED: {
+        "priority": EventPriority.P1_IMPORTANT,
+        "severity": EventSeverity.INFO,
+        "qos": 1,
+    },
+    # P1 - Timelapse events
+    EventName.TIMELAPSE_READY: {
         "priority": EventPriority.P1_IMPORTANT,
         "severity": EventSeverity.INFO,
         "qos": 1,

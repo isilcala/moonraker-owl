@@ -458,6 +458,146 @@ class MoonrakerClient(PrinterAdapter):
             )
             raise
 
+    async def fetch_most_recent_job(
+        self, timeout: float = 5.0
+    ) -> Optional[dict]:
+        """Fetch the most recent job from Moonraker's history API.
+
+        This is used to reliably obtain moonrakerJobId when a print starts,
+        as WebSocket notifications may arrive after print state change.
+        Follows the Obico pattern of querying history API for job correlation.
+
+        Args:
+            timeout: Request timeout in seconds (default: 5.0)
+
+        Returns:
+            Job dict containing 'job_id', 'filename', 'start_time', etc.
+            or None if no jobs in history.
+
+        Raises:
+            asyncio.TimeoutError: If request exceeds timeout.
+        """
+        session = await self._ensure_session()
+        url = f"{self._base_url}/server/history/list"
+        params = {"limit": "1", "order": "desc"}
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.get(
+                    url, params=params, headers=self._headers
+                ) as response:
+                    if response.status >= 400:
+                        detail = await response.text()
+                        LOGGER.warning(
+                            "Failed to fetch history list: %s",
+                            detail[:200],
+                        )
+                        return None
+                    data = await response.json()
+                    jobs = data.get("result", {}).get("jobs", [])
+                    if jobs:
+                        return jobs[0]
+                    return None
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "History list fetch timed out after %.1fs",
+                timeout,
+            )
+            raise
+        except Exception as exc:
+            LOGGER.warning("Failed to parse history response: %s", exc)
+            return None
+
+    async def list_timelapse_files(
+        self,
+        timeout: float = 10.0,
+    ) -> list[dict[str, Any]]:
+        """List timelapse files from Moonraker file manager.
+
+        Queries the 'timelapse' root in file_manager to get a list of all
+        timelapse files (videos and thumbnails).
+
+        Args:
+            timeout: Request timeout in seconds (default: 10.0)
+
+        Returns:
+            List of file info dicts, each containing:
+                - path: Filename
+                - modified: Unix timestamp of last modification
+                - size: File size in bytes
+
+        Raises:
+            asyncio.TimeoutError: If request exceeds timeout.
+            RuntimeError: If query fails.
+        """
+        session = await self._ensure_session()
+        url = f"{self._base_url}/server/files/list?root=timelapse"
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.get(url, headers=self._headers) as response:
+                    if response.status >= 400:
+                        detail = await response.text()
+                        raise RuntimeError(
+                            f"Timelapse list failed with status {response.status}: {detail.strip()}"
+                        )
+                    data = await response.json()
+                    # Response format: {"result": [{"path": "file.mp4", "modified": 1234567890.0, "size": 12345}, ...]}
+                    return data.get("result", [])
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Timelapse list timed out after %.1fs",
+                timeout,
+            )
+            raise
+
+    async def fetch_timelapse_file(
+        self,
+        filename: str,
+        timeout: float = 120.0,
+    ) -> Optional[bytes]:
+        """Fetch timelapse video or preview image from Moonraker file server.
+
+        moonraker-timelapse registers the output directory as 'timelapse' root
+        in file_manager. Files are served at /server/files/timelapse/{filename}.
+
+        Args:
+            filename: Timelapse filename (e.g., "timelapse_xxx.mp4" or "timelapse_xxx.jpg")
+            timeout: Request timeout in seconds (default: 120.0 for large videos)
+
+        Returns:
+            Raw file bytes if successful, None if file not found.
+
+        Raises:
+            asyncio.TimeoutError: If request exceeds timeout.
+            RuntimeError: If fetch fails with non-404 error.
+        """
+        session = await self._ensure_session()
+
+        from urllib.parse import quote
+        encoded_filename = quote(filename, safe="")
+        url = f"{self._base_url}/server/files/timelapse/{encoded_filename}"
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.get(url, headers=self._headers) as response:
+                    if response.status == 404:
+                        LOGGER.debug("Timelapse file not found: %s (url=%s)", filename, url)
+                        return None
+                    if response.status >= 400:
+                        detail = await response.text()
+                        raise RuntimeError(
+                            f"Timelapse fetch failed with status {response.status}: {detail.strip()}"
+                        )
+                    return await response.read()
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Timelapse fetch timed out after %.1fs (filename=%s)",
+                timeout,
+                filename,
+            )
+            raise
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
