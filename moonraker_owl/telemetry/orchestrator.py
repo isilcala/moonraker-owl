@@ -702,8 +702,8 @@ class TelemetryOrchestrator:
         - printJobId: The cloud-side PrintJob ID (if available from registry)
 
         FALLBACK: moonraker-timelapse sometimes fails to send render:success.
-        When we detect render:running, we start polling the timelapse file list
-        to detect when a new .mp4 file appears, indicating render completion.
+        When we detect render:started or render:running, we start polling the 
+        timelapse file list to detect when a new .mp4 file appears.
         """
         timelapse_event = self.store.get("timelapse_event")
         if timelapse_event is None:
@@ -714,12 +714,15 @@ class TelemetryOrchestrator:
         status = event_data.get("status")
         filename = event_data.get("filename")
 
-        # When render is running, request polling fallback
-        # This handles the case where moonraker-timelapse doesn't send render:success
-        if action == "render" and status == "running":
+        # When render starts or is running, request polling fallback
+        # Some moonraker-timelapse versions skip "running" and go straight from
+        # "started" to completion without sending "success" notification.
+        # We start polling as early as possible to catch the new file.
+        if action == "render" and status in ("started", "running"):
             if not self._timelapse_poll_requested:
                 LOGGER.info(
-                    "Timelapse render running, enabling polling fallback for completion detection"
+                    "Timelapse render %s, enabling polling fallback for completion detection",
+                    status,
                 )
                 self._timelapse_poll_requested = True
                 self._timelapse_poll_started_at = self._clock()

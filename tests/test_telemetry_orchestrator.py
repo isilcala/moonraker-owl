@@ -454,3 +454,58 @@ def test_sensors_dedup_ignores_watch_window_expiry_changes(baseline_snapshot: di
 # Note: test_set_thumbnail_url_delegates_to_session_tracker has been removed.
 # Thumbnail URLs are now pushed via SignalR after upload ACK processing,
 # so set_thumbnail_url is no longer part of the TelemetryOrchestrator API.
+
+
+def test_timelapse_render_started_enables_polling_fallback(baseline_snapshot: dict) -> None:
+    """Timelapse polling should be enabled when render status is 'started'.
+    
+    Some moonraker-timelapse versions skip 'running' and go directly from
+    'started' to completion without sending 'success' notification.
+    We need to start polling early to catch the new file.
+    """
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = FakeClock(now, now + timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Initially, polling should not be requested
+    assert not orchestrator.should_poll_timelapse()
+    
+    # Simulate timelapse render started event
+    render_started = {
+        "method": "notify_timelapse_event",
+        "params": [{"action": "render", "status": "started"}],
+    }
+    orchestrator.ingest(render_started)
+    
+    # Polling should now be enabled
+    assert orchestrator.should_poll_timelapse(), (
+        "Polling should be enabled when render status is 'started'"
+    )
+
+
+def test_timelapse_render_running_enables_polling_fallback(baseline_snapshot: dict) -> None:
+    """Timelapse polling should be enabled when render status is 'running'."""
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = FakeClock(now, now + timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Initially, polling should not be requested
+    assert not orchestrator.should_poll_timelapse()
+    
+    # Simulate timelapse render running event
+    render_running = {
+        "method": "notify_timelapse_event",
+        "params": [{"action": "render", "status": "running"}],
+    }
+    orchestrator.ingest(render_running)
+    
+    # Polling should now be enabled
+    assert orchestrator.should_poll_timelapse(), (
+        "Polling should be enabled when render status is 'running'"
+    )
