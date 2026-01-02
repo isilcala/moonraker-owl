@@ -104,6 +104,8 @@ class MoonrakerOwlApp:
         self._moonraker_recovery_lock: Optional[asyncio.Lock] = None
         self._component_restart_lock: Optional[asyncio.Lock] = None
         self._component_restart_in_progress = False
+        # Track last reconnection reason for state preservation decisions
+        self._last_reconnect_reason: Optional[ReconnectReason] = None
         # Shared registry for PrintJob ID mapping (populated by job:registered commands)
         self._job_registry = PrintJobRegistry()
 
@@ -545,7 +547,9 @@ class MoonrakerOwlApp:
 
         return True
 
-    async def _start_runtime_components(self) -> bool:
+    async def _start_runtime_components(
+        self, *, preserve_print_state: bool = False
+    ) -> bool:
         if self._printer_backend is None or self._mqtt_client is None:
             return False
 
@@ -573,7 +577,7 @@ class MoonrakerOwlApp:
             self._status_listener_registered = False
 
         try:
-            await telemetry.start()
+            await telemetry.start(preserve_print_state=preserve_print_state)
         except TelemetryConfigurationError as exc:
             await self._health.update("telemetry", False, str(exc))
             LOGGER.error("Telemetry disabled: %s", exc)
@@ -716,8 +720,12 @@ class MoonrakerOwlApp:
 
         await self._health.update("moonraker", False, reason)
 
-    async def _restart_components(self) -> bool:
-        return await self._start_runtime_components()
+    async def _restart_components(
+        self, *, preserve_print_state: bool = False
+    ) -> bool:
+        return await self._start_runtime_components(
+            preserve_print_state=preserve_print_state
+        )
 
     # -------------------------------------------------------------------------
     # Connection Coordinator Callbacks
@@ -730,6 +738,9 @@ class MoonrakerOwlApp:
         before reconnection is attempted.
         """
         LOGGER.info("MQTT connection lost: %s", reason.value)
+        
+        # Save reason for use in _on_connection_restored
+        self._last_reconnect_reason = reason
 
         await self._transition_state(
             AgentState.RECOVERING,
@@ -777,8 +788,22 @@ class MoonrakerOwlApp:
         self._mqtt_ready = True
         await self._health.update("mqtt", True, None)
 
+        # Determine if we should preserve print state based on reconnect reason
+        # Token renewal is a planned reconnection - preserve state to avoid
+        # spurious print:started events while a print is still in progress
+        reason = self._last_reconnect_reason
+        preserve_print_state = reason == ReconnectReason.TOKEN_RENEWED
+        if preserve_print_state:
+            LOGGER.debug(
+                "Preserving print state across reconnection (reason=%s)",
+                reason.value if reason else "unknown",
+            )
+        self._last_reconnect_reason = None  # Clear after use
+
         try:
-            runtime_ready = await self._restart_components()
+            runtime_ready = await self._restart_components(
+                preserve_print_state=preserve_print_state
+            )
         except Exception as exc:
             LOGGER.exception("Failed to restart components after reconnect: %s", exc)
             await self._transition_state(

@@ -274,12 +274,20 @@ class TelemetryPublisher:
         self._timelapse_poll_task: Optional[asyncio.Task[None]] = None
         self._timelapse_poll_interval: float = 5.0  # Poll every 5 seconds
 
-    async def start(self) -> None:
+    async def start(self, *, preserve_print_state: bool = False) -> None:
+        """Start the telemetry publisher.
+        
+        Args:
+            preserve_print_state: If True, preserve the StateStore's print state
+                across restart. This is used during token renewal reconnection
+                to avoid spurious print:started events when the print is still
+                in progress.
+        """
         await self._dispose_worker(remove_callback=True)
 
         self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
-        self._reset_runtime_state()
+        self._reset_runtime_state(preserve_print_state=preserve_print_state)
 
         # Discover available heaters and sensors before subscribing
         await self._discover_and_subscribe_sensors()
@@ -1528,15 +1536,27 @@ class TelemetryPublisher:
             self._pending_timer_handle.cancel()
             self._pending_timer_handle = None
 
-    def _reset_runtime_state(self) -> None:
+    def _reset_runtime_state(self, *, preserve_print_state: bool = False) -> None:
+        """Reset runtime state for restart.
+        
+        Args:
+            preserve_print_state: If True, preserve the StateStore's state
+                to avoid spurious print:started events during token renewal.
+        """
         previous_snapshot = copy.deepcopy(self._last_payload_snapshot)
+        
+        # Export state store snapshot before reset if we need to preserve it
+        store_snapshot = None
+        if preserve_print_state:
+            store_snapshot = self._orchestrator.store.export_state()
 
         resubscribe_task = self._resubscribe_task
         if resubscribe_task is not None:
             resubscribe_task.cancel()
             self._resubscribe_task = None
 
-        self._orchestrator.reset()
+        # Reset orchestrator, optionally restoring state store
+        self._orchestrator.reset(snapshot=store_snapshot)
         self._orchestrator.set_sensors_mode(
             mode="idle",
             max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,

@@ -34,7 +34,7 @@ def configure_logging(
 
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_path)
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(
             logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
         )

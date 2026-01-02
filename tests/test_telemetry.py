@@ -2020,6 +2020,74 @@ def test_reset_runtime_state_requeues_previous_snapshot() -> None:
     assert publisher._last_payload_snapshot == snapshot
 
 
+def test_reset_runtime_state_preserves_print_state_when_requested() -> None:
+    """Test that preserve_print_state=True retains StateStore across reset.
+    
+    This is critical for token renewal reconnections: we don't want to
+    emit spurious print:started events when the print is still in progress.
+    """
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    # Simulate an active print - set up state store with printing state
+    printing_payload = {
+        "result": {
+            "status": {
+                "print_stats": {
+                    "state": "printing",
+                    "filename": "test.gcode",
+                },
+            }
+        }
+    }
+    publisher._orchestrator.store.ingest(printing_payload)
+    
+    # Verify initial state
+    assert publisher._orchestrator.store.print_state == "printing"
+    assert publisher._orchestrator.store.print_filename == "test.gcode"
+
+    # Reset WITH preserve_print_state=True (simulating token renewal)
+    publisher._reset_runtime_state(preserve_print_state=True)
+
+    # State should be preserved
+    assert publisher._orchestrator.store.print_state == "printing"
+    assert publisher._orchestrator.store.print_filename == "test.gcode"
+
+
+def test_reset_runtime_state_clears_print_state_by_default() -> None:
+    """Test that default reset clears StateStore (existing behavior)."""
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    # Simulate an active print
+    printing_payload = {
+        "result": {
+            "status": {
+                "print_stats": {
+                    "state": "printing",
+                    "filename": "test.gcode",
+                },
+            }
+        }
+    }
+    publisher._orchestrator.store.ingest(printing_payload)
+    
+    # Verify initial state
+    assert publisher._orchestrator.store.print_state == "printing"
+
+    # Reset WITHOUT preserve_print_state (default behavior)
+    publisher._reset_runtime_state(preserve_print_state=False)
+
+    # State should be cleared
+    assert publisher._orchestrator.store.print_state is None
+
+
 @pytest.mark.asyncio
 async def test_resubscribe_triggered_after_klippy_ready() -> None:
     initial_state = {
