@@ -2808,3 +2808,118 @@ async def test_query_print_stats_on_job_finished():
     )
 
     await publisher.stop()
+
+
+def test_status_payload_includes_moonraker_job_id() -> None:
+    """Test that job payload includes moonrakerJobId field for backend matching.
+
+    The moonrakerJobId (raw value like "0003BB") allows NexusService to match
+    thumbnail updates using the same ID stored in the PrintJob database record,
+    without requiring Agent-side mapping of cloud PrintJobIds.
+    """
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+
+    observed_at = datetime.now(timezone.utc)
+
+    # Simulate a printing state with job_id from print_stats
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "benchy.gcode",
+                        "info": {"total_layer": 100, "current_layer": 50},
+                    },
+                    "virtual_sdcard": {"is_active": True, "progress": 0.5},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+
+    # Simulate history event with job_id
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [
+                {
+                    "action": "added",
+                    "job": {
+                        "job_id": "0003BB",
+                        "filename": "benchy.gcode",
+                        "status": "in_progress",
+                    },
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+
+    assert status is not None
+    job = status.get("job")
+    assert job is not None, "Expected job payload when printing"
+
+    # Verify moonrakerJobId is included with raw value (no prefix)
+    assert job.get("moonrakerJobId") == "0003BB", (
+        f"Expected moonrakerJobId to be '0003BB', but got '{job.get('moonrakerJobId')}'"
+    )
+
+    # sessionId should have the prefix
+    session_id = job.get("sessionId")
+    assert session_id is not None
+    assert "0003BB" in session_id, "sessionId should contain the job ID"
+
+
+def test_status_payload_job_id_equals_session_id() -> None:
+    """Test that jobId equals sessionId (both use Agent's session identifier).
+
+    The jobId field uses session_id for backward compatibility. Backend matching
+    should use moonrakerJobId instead.
+    """
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+
+    observed_at = datetime.now(timezone.utc)
+
+    # Simulate a printing state
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "test.gcode",
+                    },
+                    "virtual_sdcard": {"is_active": True, "progress": 0.5},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+
+    assert status is not None
+    job = status.get("job")
+    assert job is not None, "Expected job payload when printing"
+
+    # jobId should equal sessionId
+    assert job.get("jobId") == job.get("sessionId"), (
+        "jobId should equal sessionId for backward compatibility"
+    )

@@ -364,8 +364,15 @@ def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
 
     payload: Dict[str, Any] = {
         "sessionId": session.session_id,
-        "jobId": session.session_id,  # Use session_id as jobId
+        "jobId": session.session_id,
     }
+
+    # Include moonrakerJobId (raw value like "0003BB") for backend matching.
+    # This allows NexusService to match thumbnail updates using the same ID
+    # stored in the PrintJob database record, without requiring Agent-side
+    # mapping of cloud PrintJobIds.
+    if session.moonraker_job_id:
+        payload["moonrakerJobId"] = session.moonraker_job_id
 
     if session.job_name:
         payload["name"] = session.job_name
