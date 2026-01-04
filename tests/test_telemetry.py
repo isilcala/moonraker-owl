@@ -2056,6 +2056,11 @@ def test_reset_runtime_state_preserves_print_state_when_requested() -> None:
     assert publisher._orchestrator.store.print_state == "printing"
     assert publisher._orchestrator.store.print_filename == "test.gcode"
 
+    # CRITICAL: Orchestrator tracking state must also be preserved to prevent
+    # spurious print:started events when the same print_state is re-ingested
+    assert publisher._orchestrator._last_print_state == "printing"
+    assert publisher._orchestrator._last_filename == "test.gcode"
+
 
 def test_reset_runtime_state_clears_print_state_by_default() -> None:
     """Test that default reset clears StateStore (existing behavior)."""
@@ -2086,6 +2091,57 @@ def test_reset_runtime_state_clears_print_state_by_default() -> None:
 
     # State should be cleared
     assert publisher._orchestrator.store.print_state is None
+
+
+def test_preserve_print_state_prevents_spurious_print_started_event() -> None:
+    """Test that no spurious print:started event is emitted after token renewal.
+    
+    This is a regression test for the bug where token renewal during a print
+    would cause a new print:started event because the orchestrator's tracking
+    state was reset even though the StateStore was preserved.
+    
+    The fix ensures that when preserve_print_state=True, the orchestrator's
+    _last_print_state is initialized from the restored StateStore, preventing
+    the (None -> printing) transition that would emit a spurious event.
+    """
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    # 1. Start a print - this should emit one print:started event
+    start_payload = {
+        "result": {
+            "status": {
+                "print_stats": {
+                    "state": "printing",
+                    "filename": "test.gcode",
+                },
+            }
+        }
+    }
+    publisher._orchestrator.ingest(start_payload)
+    
+    # Harvest the initial print:started event
+    initial_events = publisher._orchestrator.events.harvest()
+    started_events = [e for e in initial_events if e.event_name.value == "print:started"]
+    assert len(started_events) == 1, "Expected exactly one print:started event"
+
+    # 2. Simulate token renewal while printing
+    publisher._reset_runtime_state(preserve_print_state=True)
+
+    # 3. Re-ingest the same printing state (simulating _prime_initial_state)
+    # This should NOT emit another print:started event
+    publisher._orchestrator.ingest(start_payload)
+
+    # Check for spurious events
+    post_renewal_events = publisher._orchestrator.events.harvest()
+    spurious_started = [e for e in post_renewal_events if e.event_name.value == "print:started"]
+    assert len(spurious_started) == 0, (
+        f"Spurious print:started event after token renewal! "
+        f"_last_print_state={publisher._orchestrator._last_print_state}"
+    )
 
 
 @pytest.mark.asyncio

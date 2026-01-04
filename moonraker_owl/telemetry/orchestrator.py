@@ -139,19 +139,48 @@ class TelemetryOrchestrator:
         self._sensors_max_hz = 0.033
         self._watch_window_expires = None
         # Reset state tracking but preserve callbacks
-        self._last_klippy_state = None
-        self._last_print_state = None
-        self._last_filename = None
-        self._last_session_id = None
-        self._last_job_status = None
-        self._terminal_event_emitted = False
+        # When snapshot is provided (token renewal), initialize last states from
+        # the restored store to prevent spurious events (e.g., print:started when
+        # already printing). This is critical for token renewal during a print.
+        if snapshot is not None:
+            self._last_klippy_state = self.store.klippy_state
+            self._last_print_state = self.store.print_state
+            self._last_filename = self.store.print_filename
+            # Compute session to get session_id and job_status
+            session = self.session_tracker.compute(self.store)
+            self._last_session_id = session.session_id
+            self._last_job_status = (
+                session.job_status.lower()
+                if isinstance(session.job_status, str)
+                else None
+            )
+            self._last_moonraker_job_id = session.moonraker_job_id
+            # If we're in a terminal state, mark terminal event as already emitted
+            # to prevent duplicate events after token renewal
+            self._terminal_event_emitted = self._last_print_state in (
+                "complete", "completed", "cancelled", "error"
+            )
+            LOGGER.debug(
+                "Restored orchestrator state from snapshot: print_state=%s, "
+                "klippy_state=%s, session_id=%s, terminal_emitted=%s",
+                self._last_print_state,
+                self._last_klippy_state,
+                self._last_session_id,
+                self._terminal_event_emitted,
+            )
+        else:
+            self._last_klippy_state = None
+            self._last_print_state = None
+            self._last_filename = None
+            self._last_session_id = None
+            self._last_job_status = None
+            self._terminal_event_emitted = False
+            self._last_moonraker_job_id = None
         self._last_timelapse_filename = None
         # Reset completed job tracking (timelapse correlation)
         self._last_completed_job_session_id = None
         self._last_completed_job_filename = None
         self._last_completed_moonraker_job_id = None
-        # Track moonraker_job_id while printing (before terminal state)
-        self._last_moonraker_job_id = None
         # Reset timelapse polling state
         self._timelapse_poll_requested = False
         self._timelapse_poll_started_at = None
