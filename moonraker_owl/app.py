@@ -139,6 +139,8 @@ class MoonrakerOwlApp:
         started = await self._start_services()
         if not started:
             LOGGER.warning("Service startup incomplete; running in degraded mode")
+            # Start background retry loop for service initialization
+            asyncio.create_task(self._startup_retry_loop())
 
         try:
             await self._idle_loop()
@@ -147,6 +149,49 @@ class MoonrakerOwlApp:
             raise
         finally:
             await self._stop_services()
+
+    async def _startup_retry_loop(self) -> None:
+        """Retry service startup periodically when initial startup fails.
+
+        Uses exponential backoff with a maximum interval. Stops when services
+        start successfully or shutdown is requested.
+        """
+        base_delay = 5.0  # Start with 5 seconds
+        max_delay = 60.0  # Cap at 60 seconds
+        delay = base_delay
+
+        while not self._stopping:
+            LOGGER.info(
+                "Retrying service startup in %.1f seconds...", delay
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                LOGGER.debug("Startup retry loop cancelled")
+                return
+
+            if self._stopping:
+                return
+
+            LOGGER.info("Attempting to restart services...")
+            # Check stopping flag before and after _start_services
+            # because _start_services resets _stopping to False internally
+            stopping_before = self._stopping
+            started = await self._start_services()
+            if stopping_before:
+                self._stopping = True
+                return
+
+            if started:
+                LOGGER.info("Service startup succeeded on retry")
+                return
+
+            # Exponential backoff
+            delay = min(delay * 2, max_delay)
+            LOGGER.warning(
+                "Service startup still incomplete; next retry in %.1f seconds",
+                delay,
+            )
 
     async def _transition_state(
         self, state: AgentState, *, detail: Optional[str] = None
