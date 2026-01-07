@@ -588,3 +588,108 @@ def test_timelapse_polling_abandoned_cleared_by_render_success(baseline_snapshot
     assert orchestrator.should_poll_timelapse(), (
         "Polling should be re-enabled after render:success clears abandoned state"
     )
+
+
+def test_timelapse_polling_abandoned_cleared_by_polling_success(baseline_snapshot: dict) -> None:
+    """emit_timelapse_from_polling should clear the abandoned state for next timelapse."""
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Start polling
+    render_running = {
+        "method": "notify_timelapse_event",
+        "params": [{"action": "render", "status": "running"}],
+    }
+    orchestrator.ingest(render_running)
+    assert orchestrator.should_poll_timelapse()
+    
+    # Advance past timeout - polling gets abandoned
+    clock._current = now + timedelta(minutes=6)
+    assert not orchestrator.should_poll_timelapse()
+    assert orchestrator._timelapse_poll_abandoned
+    
+    # Polling finds the file anyway (success path)
+    orchestrator.emit_timelapse_from_polling("timelapse_20250501_120600.mp4")
+    
+    # Abandoned flag should be cleared
+    assert not orchestrator._timelapse_poll_abandoned, (
+        "emit_timelapse_from_polling should clear abandoned state"
+    )
+    
+    # A new timelapse starts rendering
+    orchestrator.ingest(render_running)
+    
+    # Polling should now be enabled again
+    assert orchestrator.should_poll_timelapse(), (
+        "Polling should be re-enabled after successful polling detection"
+    )
+
+
+def test_timelapse_event_dedup_by_observed_at(baseline_snapshot: dict) -> None:
+    """Same timelapse event should not be reprocessed on every ingest.
+
+    This tests that the observed_at timestamp deduplication prevents the
+    same timelapse event from being processed multiple times. Without this
+    fix, every ingest() call would re-read the stored event and cause log spam.
+    """
+    now = datetime(2025, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(milliseconds=60))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+
+    # Send render:running event
+    render_running = {
+        "method": "notify_timelapse_event",
+        "params": [{"action": "render", "status": "running"}],
+    }
+    orchestrator.ingest(render_running)
+
+    # First ingest enables polling
+    assert orchestrator.should_poll_timelapse()
+    poll_started_at = orchestrator._timelapse_poll_started_at
+
+    # Multiple subsequent ingests should NOT re-enable or modify polling state
+    # because the same event (same observed_at) should be skipped
+    for _ in range(10):
+        # Ingest another status update (not a new timelapse event)
+        orchestrator.ingest({
+            "result": {
+                "status": {
+                    "print_stats": {"state": "printing"},
+                }
+            }
+        })
+
+    # Poll state should be unchanged - not re-triggered
+    assert orchestrator.should_poll_timelapse()
+    assert orchestrator._timelapse_poll_started_at == poll_started_at, (
+        "Polling start time should not change from repeated ingests of same event"
+    )
+
+    # Now simulate timeout and verify no log spam scenario
+    # Advance past timeout
+    clock._current = now + timedelta(minutes=6)
+    assert not orchestrator.should_poll_timelapse()
+    assert orchestrator._timelapse_poll_abandoned
+
+    # Multiple ingests should NOT process the same render:running event again
+    # (this is what was causing the log spam bug)
+    for _ in range(5):
+        orchestrator.ingest({
+            "result": {
+                "status": {
+                    "print_stats": {"state": "printing"},
+                }
+            }
+        })
+
+    # Abandoned flag should remain True - not being reset by stale events
+    assert orchestrator._timelapse_poll_abandoned, (
+        "Abandoned flag should not be affected by repeated ingests"
+    )

@@ -103,6 +103,9 @@ class TelemetryOrchestrator:
         self._timelapse_poll_started_at: Optional[datetime] = None
         self._timelapse_poll_abandoned: bool = False  # True after timeout, prevents restart
         self._timelapse_known_files: Set[str] = set()
+        # Track the last processed timelapse event timestamp to avoid re-processing
+        # the same event on every ingest() call (state store keeps events until replaced)
+        self._last_timelapse_event_observed_at: Optional[datetime] = None
 
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
@@ -187,6 +190,7 @@ class TelemetryOrchestrator:
         self._timelapse_poll_started_at = None
         self._timelapse_poll_abandoned = False  # Allow polling for new jobs
         self._timelapse_known_files = set()
+        self._last_timelapse_event_observed_at = None
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
         # Note: _on_print_state_changed is preserved
@@ -740,6 +744,13 @@ class TelemetryOrchestrator:
         if timelapse_event is None:
             return
 
+        # Skip if we already processed this exact event (same observed_at timestamp).
+        # The state store keeps events until replaced by a new one, so the same
+        # event would be re-read on every ingest() call without this check.
+        if timelapse_event.observed_at == self._last_timelapse_event_observed_at:
+            return
+        self._last_timelapse_event_observed_at = timelapse_event.observed_at
+
         event_data = timelapse_event.data
         action = event_data.get("action")
         status = event_data.get("status")
@@ -752,10 +763,6 @@ class TelemetryOrchestrator:
         if action == "render" and status in ("started", "running"):
             # Don't restart polling if it was abandoned due to timeout
             if self._timelapse_poll_abandoned:
-                LOGGER.debug(
-                    "Ignoring timelapse render %s event - polling was abandoned due to timeout",
-                    status,
-                )
                 return
             if not self._timelapse_poll_requested:
                 LOGGER.info(
@@ -910,9 +917,10 @@ class TelemetryOrchestrator:
         Called when polling detects a new timelapse video file,
         bypassing the unreliable notify_timelapse_event mechanism.
         """
-        # Stop polling
+        # Stop polling and reset all timelapse state
         self._timelapse_poll_requested = False
         self._timelapse_poll_started_at = None
+        self._timelapse_poll_abandoned = False  # Reset for next timelapse
 
         # Deduplicate
         if filename == self._last_timelapse_filename:
