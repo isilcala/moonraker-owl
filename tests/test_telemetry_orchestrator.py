@@ -509,3 +509,82 @@ def test_timelapse_render_running_enables_polling_fallback(baseline_snapshot: di
     assert orchestrator.should_poll_timelapse(), (
         "Polling should be enabled when render status is 'running'"
     )
+
+
+def test_timelapse_polling_abandoned_after_timeout_not_re_enabled(baseline_snapshot: dict) -> None:
+    """Once timelapse polling times out, it should stay abandoned until render:success.
+    
+    This test verifies that after polling times out (5 minutes), subsequent
+    render:running events do NOT re-enable polling. Only render:success or
+    reset() should clear the abandoned state.
+    """
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    # Use incrementing clock with 1 second steps for initial setup
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Simulate timelapse render running event
+    render_running = {
+        "method": "notify_timelapse_event",
+        "params": [{"action": "render", "status": "running"}],
+    }
+    orchestrator.ingest(render_running)
+    
+    # Polling should be enabled initially
+    assert orchestrator.should_poll_timelapse(), "Polling should be enabled initially"
+    
+    # Advance clock past the 5-minute timeout
+    clock._current = now + timedelta(minutes=6)
+    
+    # Now polling should time out
+    assert not orchestrator.should_poll_timelapse(), "Polling should time out after 5 minutes"
+    
+    # Another render:running event comes in - should NOT re-enable polling
+    orchestrator.ingest(render_running)
+    
+    # Polling should remain abandoned
+    assert not orchestrator.should_poll_timelapse(), (
+        "Polling should remain abandoned after timeout, even with new render:running event"
+    )
+
+
+def test_timelapse_polling_abandoned_cleared_by_render_success(baseline_snapshot: dict) -> None:
+    """render:success should clear the abandoned state and allow re-enabling."""
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Start polling
+    render_running = {
+        "method": "notify_timelapse_event",
+        "params": [{"action": "render", "status": "running"}],
+    }
+    orchestrator.ingest(render_running)
+    assert orchestrator.should_poll_timelapse()
+    
+    # Advance past timeout
+    clock._current = now + timedelta(minutes=6)
+    
+    # Time out
+    assert not orchestrator.should_poll_timelapse()
+    
+    # render:success comes in (from notification or fallback detection)
+    render_success = {
+        "method": "notify_timelapse_event",
+        "params": [{"action": "render", "status": "success"}],
+    }
+    orchestrator.ingest(render_success)
+    
+    # A new timelapse starts rendering
+    orchestrator.ingest(render_running)
+    
+    # Polling should now be enabled again
+    assert orchestrator.should_poll_timelapse(), (
+        "Polling should be re-enabled after render:success clears abandoned state"
+    )

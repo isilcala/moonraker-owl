@@ -101,6 +101,7 @@ class TelemetryOrchestrator:
         # new timelapse files to detect render completion.
         self._timelapse_poll_requested: bool = False
         self._timelapse_poll_started_at: Optional[datetime] = None
+        self._timelapse_poll_abandoned: bool = False  # True after timeout, prevents restart
         self._timelapse_known_files: Set[str] = set()
 
         # Deduplication for job update logging
@@ -184,6 +185,7 @@ class TelemetryOrchestrator:
         # Reset timelapse polling state
         self._timelapse_poll_requested = False
         self._timelapse_poll_started_at = None
+        self._timelapse_poll_abandoned = False  # Allow polling for new jobs
         self._timelapse_known_files = set()
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
@@ -748,6 +750,13 @@ class TelemetryOrchestrator:
         # "started" to completion without sending "success" notification.
         # We start polling as early as possible to catch the new file.
         if action == "render" and status in ("started", "running"):
+            # Don't restart polling if it was abandoned due to timeout
+            if self._timelapse_poll_abandoned:
+                LOGGER.debug(
+                    "Ignoring timelapse render %s event - polling was abandoned due to timeout",
+                    status,
+                )
+                return
             if not self._timelapse_poll_requested:
                 LOGGER.info(
                     "Timelapse render %s, enabling polling fallback for completion detection",
@@ -764,6 +773,7 @@ class TelemetryOrchestrator:
         # Disable polling since we got the success event
         self._timelapse_poll_requested = False
         self._timelapse_poll_started_at = None
+        self._timelapse_poll_abandoned = False  # Reset for next timelapse
 
         # Deduplicate: skip if we already processed this timelapse
         if filename and filename == self._last_timelapse_filename:
@@ -853,10 +863,12 @@ class TelemetryOrchestrator:
             elapsed = (self._clock() - self._timelapse_poll_started_at).total_seconds()
             if elapsed > 300:  # 5 minutes
                 LOGGER.warning(
-                    "Timelapse polling timed out after %.0f seconds", elapsed
+                    "Timelapse polling timed out after %.0f seconds - abandoning",
+                    elapsed,
                 )
                 self._timelapse_poll_requested = False
                 self._timelapse_poll_started_at = None
+                self._timelapse_poll_abandoned = True  # Prevent restart from render:running events
                 return False
 
         return True
