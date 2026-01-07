@@ -1051,13 +1051,25 @@ class TelemetryPublisher:
                     )
                     continue
 
-                # Set file metadata for accurate progress calculation (Mainsail file-relative method)
+                # Set file metadata for accurate progress and ETA calculation
+                # (Mainsail file-relative progress + Mainsail ETA algorithm)
                 gcode_start_byte = metadata.get("gcode_start_byte")
                 gcode_end_byte = metadata.get("gcode_end_byte")
+                # Slicer metadata for ETA calculation (Mainsail-compatible)
+                filament_total = metadata.get("filament_total")  # mm
+                slicer_estimated_time = metadata.get("estimated_time")  # seconds
+                # Convert estimated_time to int if present (slicer may return float)
+                if slicer_estimated_time is not None:
+                    try:
+                        slicer_estimated_time = int(slicer_estimated_time)
+                    except (ValueError, TypeError):
+                        slicer_estimated_time = None
                 self._orchestrator.session_tracker.set_file_metadata(
                     filename=filename,
                     gcode_start_byte=gcode_start_byte,
                     gcode_end_byte=gcode_end_byte,
+                    filament_total=filament_total,
+                    slicer_estimated_time=slicer_estimated_time,
                 )
 
                 thumbnails = metadata.get("thumbnails", [])

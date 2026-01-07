@@ -270,3 +270,294 @@ def test_file_metadata_cleared_on_job_end() -> None:
     assert tracker._current_filename is None
     assert tracker._gcode_start_byte is None
     assert tracker._gcode_end_byte is None
+    assert tracker._filament_total is None
+    assert tracker._slicer_estimated_time is None
+
+
+# ============================================================================
+# Mainsail-compatible ETA Calculation Tests
+# ============================================================================
+
+
+def test_mainsail_eta_file_based_only() -> None:
+    """Test ETA calculation using only file-based method.
+    
+    Mainsail formula: elapsed / progress - elapsed
+    Example: 600s elapsed, 30% progress -> 600/0.3 - 600 = 1400s remaining
+    """
+    tracker = PrintSessionTracker()
+    store = MoonrakerStateStore()
+
+    # Set file metadata without filament info
+    tracker.set_file_metadata(
+        filename="test.gcode",
+        gcode_start_byte=0,
+        gcode_end_byte=10000,
+    )
+
+    # 30% progress, 600 seconds elapsed
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "test.gcode",
+                        "print_duration": 600,
+                    },
+                    "virtual_sdcard": {
+                        "is_active": True,
+                        "file_position": 3000,  # 30% of 10000
+                    },
+                }
+            ],
+        }
+    )
+
+    session = tracker.compute(store)
+    assert session.remaining_seconds is not None
+    # File-based: 600 / 0.3 - 600 = 1400
+    assert 1350 <= session.remaining_seconds <= 1450
+
+
+def test_mainsail_eta_filament_based_only() -> None:
+    """Test ETA calculation using only filament-based method.
+    
+    Mainsail formula: elapsed / (filament_used / filament_total) - elapsed
+    Example: 600s elapsed, 200mm used, 1000mm total -> 600/(200/1000) - 600 = 2400s remaining
+    """
+    tracker = PrintSessionTracker()
+    store = MoonrakerStateStore()
+
+    # Set file metadata with filament info but NO gcode byte range
+    # This forces fallback to virtual_sdcard.progress which we set to 0 to disable file-based
+    tracker.set_file_metadata(
+        filename="test.gcode",
+        gcode_start_byte=None,  # No byte range - disables file-relative progress
+        gcode_end_byte=None,
+        filament_total=1000.0,  # 1000mm total
+    )
+
+    # 20% filament used (200mm), 600 seconds elapsed
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "test.gcode",
+                        "print_duration": 600,
+                        "filament_used": 200.0,  # 20% of 1000
+                    },
+                    "virtual_sdcard": {
+                        "is_active": True,
+                        "progress": 0.0,  # Zero progress disables file-based
+                    },
+                }
+            ],
+        }
+    )
+
+    session = tracker.compute(store)
+    assert session.remaining_seconds is not None
+    # Filament-based: 600 / (200/1000) - 600 = 600/0.2 - 600 = 2400
+    assert 2350 <= session.remaining_seconds <= 2450
+
+
+def test_mainsail_eta_combined_file_and_filament() -> None:
+    """Test ETA calculation using average of file-based and filament-based.
+    
+    This is Mainsail's default behavior (calcEstimateTime: ['file', 'filament']).
+    """
+    tracker = PrintSessionTracker()
+    store = MoonrakerStateStore()
+
+    # Set file metadata with both byte range and filament info
+    tracker.set_file_metadata(
+        filename="test.gcode",
+        gcode_start_byte=0,
+        gcode_end_byte=10000,
+        filament_total=1000.0,
+    )
+
+    # 30% file progress, 20% filament used, 600 seconds elapsed
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "test.gcode",
+                        "print_duration": 600,
+                        "filament_used": 200.0,  # 20%
+                    },
+                    "virtual_sdcard": {
+                        "is_active": True,
+                        "file_position": 3000,  # 30%
+                    },
+                }
+            ],
+        }
+    )
+
+    session = tracker.compute(store)
+    assert session.remaining_seconds is not None
+    # File-based: 600/0.3 - 600 = 1400
+    # Filament-based: 600/0.2 - 600 = 2400
+    # Average: (1400 + 2400) / 2 = 1900
+    assert 1850 <= session.remaining_seconds <= 1950
+
+
+def test_mainsail_eta_slicer_fallback() -> None:
+    """Test ETA falls back to slicer estimate when no other data available."""
+    tracker = PrintSessionTracker()
+    store = MoonrakerStateStore()
+
+    # Set only slicer estimated time, no byte range or filament
+    tracker.set_file_metadata(
+        filename="test.gcode",
+        gcode_start_byte=None,
+        gcode_end_byte=None,
+        filament_total=None,
+        slicer_estimated_time=3600,  # 1 hour total
+    )
+
+    # 600 seconds elapsed, no progress or filament data
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "test.gcode",
+                        "print_duration": 600,
+                    },
+                    "virtual_sdcard": {
+                        "is_active": True,
+                        "progress": 0.0,  # No progress
+                    },
+                }
+            ],
+        }
+    )
+
+    session = tracker.compute(store)
+    assert session.remaining_seconds is not None
+    # Slicer fallback: 3600 - 600 = 3000
+    assert session.remaining_seconds == 3000
+
+
+def test_mainsail_eta_no_data_returns_none() -> None:
+    """Test ETA returns None when no calculation method has valid data."""
+    tracker = PrintSessionTracker()
+    store = MoonrakerStateStore()
+
+    # No metadata at all
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "test.gcode",
+                        "print_duration": 600,
+                    },
+                    "virtual_sdcard": {
+                        "is_active": True,
+                        "progress": 0.0,  # No progress
+                    },
+                }
+            ],
+        }
+    )
+
+    session = tracker.compute(store)
+    # No valid data for any method - should return None
+    assert session.remaining_seconds is None
+
+
+def test_mainsail_eta_zero_elapsed_returns_none() -> None:
+    """Test ETA returns None when elapsed time is zero (just started)."""
+    tracker = PrintSessionTracker()
+    store = MoonrakerStateStore()
+
+    tracker.set_file_metadata(
+        filename="test.gcode",
+        gcode_start_byte=0,
+        gcode_end_byte=10000,
+    )
+
+    # Just started - 0 elapsed time
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "test.gcode",
+                        "print_duration": 0,
+                    },
+                    "virtual_sdcard": {
+                        "is_active": True,
+                        "file_position": 100,
+                    },
+                }
+            ],
+        }
+    )
+
+    session = tracker.compute(store)
+    # Zero elapsed time - can't calculate
+    assert session.remaining_seconds is None
+
+
+def test_session_includes_filament_data() -> None:
+    """Test that SessionInfo includes filament data for downstream use."""
+    tracker = PrintSessionTracker()
+    store = MoonrakerStateStore()
+
+    tracker.set_file_metadata(
+        filename="test.gcode",
+        gcode_start_byte=0,
+        gcode_end_byte=10000,
+        filament_total=1500.0,
+        slicer_estimated_time=7200,
+    )
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "test.gcode",
+                        "print_duration": 300,
+                        "filament_used": 150.0,
+                    },
+                    "virtual_sdcard": {
+                        "is_active": True,
+                        "file_position": 1000,
+                    },
+                }
+            ],
+        }
+    )
+
+    session = tracker.compute(store)
+    assert session.filament_used == 150.0
+    assert session.filament_total == 1500.0
+    assert session.slicer_estimated_time == 7200

@@ -42,6 +42,13 @@ class SessionInfo:
     layer_current: Optional[int]
     layer_total: Optional[int]
 
+    # Filament data (for Mainsail-compatible ETA calculation)
+    filament_used: Optional[float]  # mm, from print_stats.filament_used
+    filament_total: Optional[float]  # mm, from gcode metadata
+
+    # Slicer estimated time (for Mainsail-compatible ETA calculation)
+    slicer_estimated_time: Optional[int]  # seconds, from gcode metadata
+
     # Special states
     timelapse_paused: bool
     message: Optional[str]
@@ -58,6 +65,7 @@ class PrintSessionTracker:
     - Active job detection is simple: print_stats.state in {printing, paused}
     - Terminal states from history_event take precedence
     - Progress calculation uses file-relative method (like Mainsail's default)
+    - ETA calculation uses Mainsail algorithm: avg(file-based, filament-based)
     """
 
     def __init__(self) -> None:
@@ -66,36 +74,57 @@ class PrintSessionTracker:
         self._gcode_start_byte: Optional[int] = None
         self._gcode_end_byte: Optional[int] = None
         self._current_filename: Optional[str] = None
+        # Slicer metadata for Mainsail-compatible ETA calculation
+        self._filament_total: Optional[float] = None  # mm
+        self._slicer_estimated_time: Optional[int] = None  # seconds
 
     def set_file_metadata(
         self,
         filename: str,
         gcode_start_byte: Optional[int],
         gcode_end_byte: Optional[int],
+        filament_total: Optional[float] = None,
+        slicer_estimated_time: Optional[int] = None,
     ) -> None:
-        """Set file metadata for accurate progress calculation.
+        """Set file metadata for accurate progress and ETA calculation.
 
-        Called when a new print job starts. These values are used to calculate
-        progress using the file-relative method (excluding slicer headers).
+        Called when a new print job starts. These values are used to calculate:
+        - Progress using the file-relative method (excluding slicer headers)
+        - ETA using Mainsail algorithm: avg(file-based, filament-based)
+
+        Args:
+            filename: The gcode filename
+            gcode_start_byte: Start byte of actual gcode (after slicer header)
+            gcode_end_byte: End byte of gcode content
+            filament_total: Total filament in mm from slicer metadata
+            slicer_estimated_time: Slicer's estimated print time in seconds
         """
         self._current_filename = filename
         self._gcode_start_byte = gcode_start_byte
         self._gcode_end_byte = gcode_end_byte
+        self._filament_total = filament_total
+        self._slicer_estimated_time = slicer_estimated_time
+
+        metadata_parts = []
         if gcode_start_byte is not None and gcode_end_byte is not None:
-            LOGGER.debug(
-                "File metadata set: %s (gcode: %d-%d bytes)",
-                filename,
-                gcode_start_byte,
-                gcode_end_byte,
-            )
+            metadata_parts.append(f"gcode: {gcode_start_byte}-{gcode_end_byte} bytes")
+        if filament_total is not None:
+            metadata_parts.append(f"filament: {filament_total:.1f}mm")
+        if slicer_estimated_time is not None:
+            metadata_parts.append(f"eta: {slicer_estimated_time}s")
+
+        if metadata_parts:
+            LOGGER.debug("File metadata set: %s (%s)", filename, ", ".join(metadata_parts))
         else:
-            LOGGER.debug("File metadata set: %s (no byte range)", filename)
+            LOGGER.debug("File metadata set: %s (no metadata)", filename)
 
     def clear_file_metadata(self) -> None:
         """Clear file metadata when job ends."""
         self._current_filename = None
         self._gcode_start_byte = None
         self._gcode_end_byte = None
+        self._filament_total = None
+        self._slicer_estimated_time = None
 
     def compute(self, store: MoonrakerStateStore) -> SessionInfo:
         print_stats = _coerce_section(store.get("print_stats"))
@@ -154,7 +183,21 @@ class PrintSessionTracker:
             gcode_end_byte=self._gcode_end_byte if use_file_metadata else None,
         )
         elapsed_seconds = _as_int(print_stats.get("print_duration"))
-        remaining_seconds = _as_int(print_stats.get("print_duration_remaining"))
+
+        # Extract filament used from print_stats
+        filament_used = _to_float(print_stats.get("filament_used"))
+        filament_total = self._filament_total if use_file_metadata else None
+        slicer_estimated_time = self._slicer_estimated_time if use_file_metadata else None
+
+        # Calculate remaining time using Mainsail algorithm
+        remaining_seconds = _calculate_remaining_seconds_mainsail(
+            elapsed_seconds=elapsed_seconds,
+            progress_percent=progress_percent,
+            filament_used=filament_used,
+            filament_total=filament_total,
+            slicer_estimated_time=slicer_estimated_time,
+        )
+
         layer_current, layer_total = _extract_layers(print_stats)
 
         message = _extract_message(display_status, print_stats)
@@ -186,6 +229,9 @@ class PrintSessionTracker:
             remaining_seconds=remaining_seconds,
             layer_current=layer_current,
             layer_total=layer_total,
+            filament_used=filament_used,
+            filament_total=filament_total,
+            slicer_estimated_time=slicer_estimated_time,
             timelapse_paused=timelapse_paused,
             message=message,
         )
@@ -416,6 +462,82 @@ def _normalise_message(
         return None
 
     return cleaned
+
+
+def _calculate_remaining_seconds_mainsail(
+    *,
+    elapsed_seconds: Optional[int],
+    progress_percent: Optional[float],
+    filament_used: Optional[float],
+    filament_total: Optional[float],
+    slicer_estimated_time: Optional[int],
+) -> Optional[int]:
+    """Calculate remaining print time using Mainsail's algorithm.
+
+    Mainsail uses a combination of methods (configurable by user):
+    - File-based: elapsed / (progress / 100) - elapsed
+    - Filament-based: elapsed / (filament_used / filament_total) - elapsed
+    - Slicer-based: slicer_estimated_time - elapsed
+
+    Default config in Mainsail: calcEstimateTime: ['file', 'filament']
+    We implement the same default: average of file-based and filament-based.
+
+    Reference: Mainsail src/store/printer/getters.ts
+    - getEstimatedTimeFile
+    - getEstimatedTimeFilament
+    - getEstimatedTimeSlicer
+    - getEstimatedTimeAvg
+    """
+    if elapsed_seconds is None or elapsed_seconds <= 0:
+        return None
+
+    estimates: list[int] = []
+
+    # File-based estimation (Mainsail getEstimatedTimeFile)
+    if progress_percent is not None and progress_percent > 0:
+        # progress_percent is 0-100 scale, convert to 0-1
+        progress_ratio = progress_percent / 100.0
+        if progress_ratio > 0:
+            total_estimated = elapsed_seconds / progress_ratio
+            file_remaining = int(total_estimated - elapsed_seconds)
+            if file_remaining > 0:
+                estimates.append(file_remaining)
+
+    # Filament-based estimation (Mainsail getEstimatedTimeFilament)
+    if (
+        filament_used is not None
+        and filament_total is not None
+        and filament_used > 0
+        and filament_total > 0
+        and filament_total > filament_used
+    ):
+        filament_ratio = filament_used / filament_total
+        if filament_ratio > 0:
+            total_estimated = elapsed_seconds / filament_ratio
+            filament_remaining = int(total_estimated - elapsed_seconds)
+            if filament_remaining > 0:
+                estimates.append(filament_remaining)
+
+    # Slicer-based estimation (Mainsail getEstimatedTimeSlicer) - not used by default
+    # but available if no other estimates work
+    slicer_remaining: Optional[int] = None
+    if slicer_estimated_time is not None and slicer_estimated_time > 0:
+        slicer_remaining = max(0, slicer_estimated_time - elapsed_seconds)
+
+    # Mainsail default: average of file + filament
+    if estimates:
+        return int(sum(estimates) / len(estimates))
+
+    # Fallback to slicer estimate if no other method works
+    if slicer_remaining is not None and slicer_remaining > 0:
+        return slicer_remaining
+
+    return None
+
+
+def _to_float(value: Any) -> Optional[float]:
+    """Convert value to float, alias for _as_float for compatibility."""
+    return _as_float(value)
 
 
 def _extract_progress_percent(
