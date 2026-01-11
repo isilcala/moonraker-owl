@@ -693,3 +693,194 @@ def test_timelapse_event_dedup_by_observed_at(baseline_snapshot: dict) -> None:
     assert orchestrator._timelapse_poll_abandoned, (
         "Abandoned flag should not be affected by repeated ingests"
     )
+
+
+class TestPrintEventPayloads:
+    """Tests for print event payload generation ensuring all statistics fields are populated."""
+
+    def _setup_active_job(self) -> TelemetryOrchestrator:
+        """Create an orchestrator with an active print job following the production flow."""
+        now = datetime(2025, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
+        clock = IncrementingClock(now, step=timedelta(seconds=1))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Step 1: Job starts - action:added (like production)
+        orchestrator.ingest({
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [{
+                "action": "added",
+                "job": {
+                    "job_id": "0000ABCD",
+                    "filename": "test_model.gcode",
+                },
+            }],
+        })
+
+        # Step 2: print_stats shows printing state with statistics
+        orchestrator.ingest({
+            "result": {
+                "status": {
+                    "print_stats": {
+                        "state": "printing",
+                        "filename": "test_model.gcode",
+                        "print_duration": 3600.0,  # 1 hour
+                        "filament_used": 1234.56,  # mm
+                        "message": "",
+                    },
+                    "virtual_sdcard": {
+                        "progress": 0.75,
+                    },
+                },
+            },
+        })
+
+        # Harvest initial events (print:started)
+        orchestrator.events.harvest()
+        return orchestrator
+
+    def test_print_completed_event_has_all_statistics(self) -> None:
+        """print:completed event should include printDuration, filamentUsedMm, progressPercent."""
+        orchestrator = self._setup_active_job()
+
+        # Update stats to final values
+        orchestrator.ingest({
+            "result": {
+                "status": {
+                    "print_stats": {
+                        "state": "complete",
+                        "filename": "test_model.gcode",
+                        "print_duration": 4200.0,
+                        "filament_used": 1600.0,
+                        "message": "",
+                    },
+                    "virtual_sdcard": {
+                        "progress": 1.0,
+                    },
+                },
+            },
+        })
+
+        # Job finishes with status = completed
+        orchestrator.ingest({
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [{
+                "action": "finished",
+                "job": {
+                    "job_id": "0000ABCD",
+                    "filename": "test_model.gcode",
+                    "status": "completed",
+                },
+            }],
+        })
+
+        events = orchestrator.events.harvest()
+        completed_events = [e for e in events if e.event_name.value == "print:completed"]
+        
+        assert len(completed_events) >= 1, f"Expected completed event, got: {[e.event_name.value for e in events]}"
+        event = completed_events[0]
+
+        # Verify all statistics fields
+        assert "printDuration" in event.data, f"printDuration missing. Got: {event.data}"
+        assert "filamentUsedMm" in event.data, f"filamentUsedMm missing. Got: {event.data}"
+        assert "progressPercent" in event.data, f"progressPercent missing. Got: {event.data}"
+
+        assert event.data["printDuration"] > 0
+        assert event.data["filamentUsedMm"] > 0
+        assert 0 <= event.data["progressPercent"] <= 100
+
+    def test_print_cancelled_event_has_all_statistics(self) -> None:
+        """print:cancelled event should include printDuration, filamentUsedMm, progressPercent."""
+        orchestrator = self._setup_active_job()
+
+        # Update stats at cancellation point
+        orchestrator.ingest({
+            "result": {
+                "status": {
+                    "print_stats": {
+                        "state": "cancelled",
+                        "filename": "test_model.gcode",
+                        "print_duration": 1800.0,
+                        "filament_used": 600.0,
+                        "message": "",
+                    },
+                    "virtual_sdcard": {
+                        "progress": 0.5,
+                    },
+                },
+            },
+        })
+
+        # Job finishes with status = cancelled
+        orchestrator.ingest({
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [{
+                "action": "finished",
+                "job": {
+                    "job_id": "0000ABCD",
+                    "filename": "test_model.gcode",
+                    "status": "cancelled",
+                },
+            }],
+        })
+
+        events = orchestrator.events.harvest()
+        cancelled_events = [e for e in events if e.event_name.value == "print:cancelled"]
+        
+        assert len(cancelled_events) >= 1, f"Expected cancelled event, got: {[e.event_name.value for e in events]}"
+        event = cancelled_events[0]
+
+        assert "printDuration" in event.data, f"printDuration missing. Got: {event.data}"
+        assert "filamentUsedMm" in event.data, f"filamentUsedMm missing. Got: {event.data}"
+        assert "progressPercent" in event.data, f"progressPercent missing. Got: {event.data}"
+
+    def test_print_failed_event_has_all_statistics(self) -> None:
+        """print:failed event should include printDuration, filamentUsedMm, progressPercent, errorMessage."""
+        orchestrator = self._setup_active_job()
+
+        # Update stats with error
+        orchestrator.ingest({
+            "result": {
+                "status": {
+                    "print_stats": {
+                        "state": "error",
+                        "filename": "test_model.gcode",
+                        "print_duration": 900.0,
+                        "filament_used": 300.0,
+                        "message": "Heater timeout on extruder",
+                    },
+                    "virtual_sdcard": {
+                        "progress": 0.25,
+                    },
+                },
+            },
+        })
+
+        # Job finishes with status = error
+        orchestrator.ingest({
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [{
+                "action": "finished",
+                "job": {
+                    "job_id": "0000ABCD",
+                    "filename": "test_model.gcode",
+                    "status": "error",
+                },
+            }],
+        })
+
+        events = orchestrator.events.harvest()
+        failed_events = [e for e in events if e.event_name.value == "print:failed"]
+        
+        assert len(failed_events) >= 1, f"Expected failed event, got: {[e.event_name.value for e in events]}"
+        event = failed_events[0]
+
+        assert "printDuration" in event.data, f"printDuration missing. Got: {event.data}"
+        assert "filamentUsedMm" in event.data, f"filamentUsedMm missing. Got: {event.data}"
+        assert "progressPercent" in event.data, f"progressPercent missing. Got: {event.data}"
+        assert "errorMessage" in event.data, f"errorMessage missing. Got: {event.data}"
+        assert event.data["errorMessage"] == "Heater timeout on extruder"
+

@@ -692,14 +692,19 @@ class TelemetryOrchestrator:
                 base_data["printDuration"] = session.elapsed_seconds
             filament_used = print_data.get("filament_used")
             if filament_used is not None:
-                base_data["filamentUsed"] = filament_used
+                base_data["filamentUsedMm"] = filament_used
+            if session.progress_percent is not None:
+                base_data["progressPercent"] = session.progress_percent
             return base_data
 
         if event_name == EventName.PRINT_FAILED:
             if session.elapsed_seconds is not None:
                 base_data["printDuration"] = session.elapsed_seconds
             if session.progress_percent is not None:
-                base_data["progress"] = session.progress_percent
+                base_data["progressPercent"] = session.progress_percent
+            filament_used = print_data.get("filament_used")
+            if filament_used is not None:
+                base_data["filamentUsedMm"] = filament_used
             error_message = print_data.get("message", "")
             if error_message:
                 base_data["errorMessage"] = error_message
@@ -709,12 +714,15 @@ class TelemetryOrchestrator:
             if session.elapsed_seconds is not None:
                 base_data["printDuration"] = session.elapsed_seconds
             if session.progress_percent is not None:
-                base_data["progress"] = session.progress_percent
+                base_data["progressPercent"] = session.progress_percent
+            filament_used = print_data.get("filament_used")
+            if filament_used is not None:
+                base_data["filamentUsedMm"] = filament_used
             return base_data
 
         if event_name in (EventName.PRINT_PAUSED, EventName.PRINT_RESUMED):
             if session.progress_percent is not None:
-                base_data["progress"] = session.progress_percent
+                base_data["progressPercent"] = session.progress_percent
             return base_data
 
         return base_data
