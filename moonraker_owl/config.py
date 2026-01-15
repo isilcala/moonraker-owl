@@ -133,8 +133,11 @@ class CameraConfig:
     enabled: bool = False
     """Whether camera capture is enabled."""
 
-    snapshot_url: str = "http://localhost/webcam/?action=snapshot"
-    """URL for webcam snapshot capture."""
+    snapshot_url: str = "auto"
+    """URL for webcam snapshot capture. Use 'auto' for automatic discovery via Moonraker API."""
+
+    camera_name: str = "auto"
+    """Webcam name to use when snapshot_url is 'auto'. Use 'auto' for first available."""
 
     capture_timeout_seconds: float = 10.0
     """Timeout for camera capture requests."""
@@ -238,7 +241,8 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             },
             "camera": {
                 "enabled": "false",
-                "snapshot_url": "http://localhost/webcam/?action=snapshot",
+                "snapshot_url": "auto",
+                "camera_name": "auto",
                 "capture_timeout_seconds": "10.0",
                 "max_retries": "2",
                 "preprocess_enabled": "true",
@@ -425,6 +429,9 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         enabled=parser.getboolean("camera", "enabled", fallback=camera_defaults.enabled),
         snapshot_url=parser.get(
             "camera", "snapshot_url", fallback=camera_defaults.snapshot_url
+        ),
+        camera_name=parser.get(
+            "camera", "camera_name", fallback=camera_defaults.camera_name
         ),
         capture_timeout_seconds=parser.getfloat(
             "camera", "capture_timeout_seconds", fallback=camera_defaults.capture_timeout_seconds

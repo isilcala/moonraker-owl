@@ -424,6 +424,21 @@ class MoonrakerOwlApp:
             await self._moonraker_monitor_task
         self._moonraker_monitor_task = None
 
+    def _invalidate_camera_discovery_cache(self) -> None:
+        """Invalidate camera discovery cache on Moonraker reconnect.
+
+        Call this when Moonraker connection recovers, as webcam configuration
+        may have changed while disconnected.
+        """
+        backend = self._printer_backend
+        if backend is None:
+            return
+
+        # MoonrakerBackend has invalidate_camera_cache method
+        invalidate_method = getattr(backend, "invalidate_camera_cache", None)
+        if invalidate_method is not None:
+            invalidate_method()
+
     async def _register_moonraker_failure(
         self,
         reason: str,
@@ -462,6 +477,9 @@ class MoonrakerOwlApp:
     async def _register_moonraker_recovery(self) -> None:
         self._moonraker_failures = 0
         await self._health.update("moonraker", True, None)
+
+        # Invalidate camera discovery cache - webcam config may have changed
+        self._invalidate_camera_discovery_cache()
 
         lock = self._moonraker_recovery_lock
         if lock is None:
@@ -649,7 +667,7 @@ class MoonrakerOwlApp:
         processor = self._command_processor
         if processor is None and self._telemetry_publisher is not None:
             # Use backend factory for command processor
-            processor = self._printer_backend.create_command_processor(
+            processor = await self._printer_backend.create_command_processor(
                 self._config,
                 self._mqtt_client,
                 self._telemetry_publisher,

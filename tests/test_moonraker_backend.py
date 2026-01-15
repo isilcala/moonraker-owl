@@ -324,9 +324,12 @@ class TestFactoryMethods:
                 mock_owl_config, backend._client, mock_mqtt, job_registry=None
             )
 
-    def test_create_command_processor(self, backend: MoonrakerBackend) -> None:
+    @pytest.mark.asyncio
+    async def test_create_command_processor(self, backend: MoonrakerBackend) -> None:
         """create_command_processor should return a CommandProcessor."""
         mock_owl_config = MagicMock()
+        # Configure camera as disabled to avoid auto-discovery path
+        mock_owl_config.camera.enabled = False
         mock_mqtt = MagicMock()
         mock_telemetry = MagicMock()
 
@@ -334,12 +337,8 @@ class TestFactoryMethods:
             "moonraker_owl.backends.moonraker.CommandProcessor"
         ) as MockProcessor, patch(
             "moonraker_owl.backends.moonraker.S3UploadClient"
-        ) as MockS3Client, patch(
-            "moonraker_owl.backends.moonraker.CameraClient"
-        ) as MockCameraClient, patch(
-            "moonraker_owl.backends.moonraker.ImagePreprocessor"
-        ) as MockImagePreprocessor:
-            result = backend.create_command_processor(
+        ) as MockS3Client:
+            result = await backend.create_command_processor(
                 mock_owl_config, mock_mqtt, mock_telemetry
             )
 
@@ -349,7 +348,105 @@ class TestFactoryMethods:
                 mock_mqtt,
                 telemetry=mock_telemetry,
                 s3_upload=MockS3Client.return_value,
-                camera=MockCameraClient.return_value,
-                image_preprocessor=MockImagePreprocessor.return_value,
+                camera=None,
+                image_preprocessor=None,
                 job_registry=None,
             )
+
+    @pytest.mark.asyncio
+    async def test_create_command_processor_with_auto_discovery(
+        self, backend: MoonrakerBackend
+    ) -> None:
+        """create_command_processor should use CameraDiscovery when snapshot_url is 'auto'."""
+        mock_owl_config = MagicMock()
+        mock_owl_config.camera.enabled = True
+        mock_owl_config.camera.snapshot_url = "auto"
+        mock_owl_config.camera.camera_name = "auto"
+        mock_owl_config.camera.capture_timeout_seconds = 5
+        mock_owl_config.camera.max_retries = 3
+        mock_owl_config.camera.preprocess_enabled = False
+        mock_mqtt = MagicMock()
+        mock_telemetry = MagicMock()
+
+        with patch(
+            "moonraker_owl.backends.moonraker.CommandProcessor"
+        ) as MockProcessor, patch(
+            "moonraker_owl.backends.moonraker.S3UploadClient"
+        ), patch(
+            "moonraker_owl.backends.moonraker.CameraClient"
+        ) as MockCameraClient, patch(
+            "moonraker_owl.backends.moonraker.CameraDiscovery"
+        ) as MockCameraDiscovery:
+            # Configure mock discovery to return a URL
+            mock_discovery_instance = MockCameraDiscovery.return_value
+            mock_discovery_instance.discover_snapshot_url = AsyncMock(
+                return_value="http://localhost:8080/snapshot"
+            )
+
+            await backend.create_command_processor(
+                mock_owl_config, mock_mqtt, mock_telemetry
+            )
+
+            # Verify CameraDiscovery was created and called
+            MockCameraDiscovery.assert_called_once()
+            mock_discovery_instance.discover_snapshot_url.assert_called_once_with(
+                camera_name=None
+            )
+
+            # Verify CameraClient was created with the discovered URL
+            MockCameraClient.assert_called_once_with(
+                snapshot_url="http://localhost:8080/snapshot",
+                timeout=5,
+                max_retries=3,
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_command_processor_with_explicit_url(
+        self, backend: MoonrakerBackend
+    ) -> None:
+        """create_command_processor should use explicit snapshot_url without auto-discovery."""
+        mock_owl_config = MagicMock()
+        mock_owl_config.camera.enabled = True
+        mock_owl_config.camera.snapshot_url = "http://custom:8080/snap"
+        mock_owl_config.camera.capture_timeout_seconds = 5
+        mock_owl_config.camera.max_retries = 3
+        mock_owl_config.camera.preprocess_enabled = False
+        mock_mqtt = MagicMock()
+        mock_telemetry = MagicMock()
+
+        with patch(
+            "moonraker_owl.backends.moonraker.CommandProcessor"
+        ), patch(
+            "moonraker_owl.backends.moonraker.S3UploadClient"
+        ), patch(
+            "moonraker_owl.backends.moonraker.CameraClient"
+        ) as MockCameraClient, patch(
+            "moonraker_owl.backends.moonraker.CameraDiscovery"
+        ) as MockCameraDiscovery:
+            await backend.create_command_processor(
+                mock_owl_config, mock_mqtt, mock_telemetry
+            )
+
+            # Verify CameraDiscovery was NOT called
+            MockCameraDiscovery.assert_not_called()
+
+            # Verify CameraClient was created with explicit URL
+            MockCameraClient.assert_called_once_with(
+                snapshot_url="http://custom:8080/snap",
+                timeout=5,
+                max_retries=3,
+            )
+
+    def test_invalidate_camera_cache(self, backend: MoonrakerBackend) -> None:
+        """invalidate_camera_cache should call discovery.invalidate() if discovery exists."""
+        from moonraker_owl.adapters.camera_discovery import CameraDiscovery
+
+        with patch.object(CameraDiscovery, "invalidate") as mock_invalidate:
+            # First, no discovery exists
+            backend.invalidate_camera_cache()
+            mock_invalidate.assert_not_called()
+
+            # Now set up a discovery instance
+            backend._camera_discovery = MagicMock()
+            backend.invalidate_camera_cache()
+            backend._camera_discovery.invalidate.assert_called_once()

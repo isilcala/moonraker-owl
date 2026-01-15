@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from ..adapters import MoonrakerClient
 from ..adapters.camera import CameraClient
+from ..adapters.camera_discovery import CameraDiscovery
 from ..adapters.image_preprocessor import ImagePreprocessor
 from ..adapters.s3_upload import S3UploadClient
 from ..commands import CommandProcessor
@@ -60,6 +61,7 @@ class MoonrakerBackend(PrinterBackend):
         self._client = client or MoonrakerClient(config)
         self._on_status: Optional[StatusCallback] = None
         self._started = False
+        self._camera_discovery: Optional[CameraDiscovery] = None
 
     @property
     def client(self) -> MoonrakerClient:
@@ -157,7 +159,7 @@ class MoonrakerBackend(PrinterBackend):
             config, self._client, mqtt_client, job_registry=job_registry
         )
 
-    def create_command_processor(
+    async def create_command_processor(
         self,
         config: "OwlConfig",
         mqtt_client: "MQTTClient",
@@ -183,27 +185,32 @@ class MoonrakerBackend(PrinterBackend):
         camera: CameraClient | None = None
         image_preprocessor: ImagePreprocessor | None = None
         if config.camera.enabled:
-            camera = CameraClient(
-                snapshot_url=config.camera.snapshot_url,
-                timeout=config.camera.capture_timeout_seconds,
-                max_retries=config.camera.max_retries,
-            )
-            LOGGER.info(
-                "Camera capture enabled: %s",
-                config.camera.snapshot_url,
-            )
+            # Resolve snapshot URL - use auto-discovery if configured as "auto"
+            snapshot_url = await self._resolve_snapshot_url(config)
 
-            # Create image preprocessor for resizing/compressing captures (ADR-0024)
-            if config.camera.preprocess_enabled:
-                image_preprocessor = ImagePreprocessor(
-                    target_width=config.camera.preprocess_target_width,
-                    jpeg_quality=config.camera.preprocess_jpeg_quality,
-                    enabled=True,
+            if snapshot_url:
+                camera = CameraClient(
+                    snapshot_url=snapshot_url,
+                    timeout=config.camera.capture_timeout_seconds,
+                    max_retries=config.camera.max_retries,
                 )
-                LOGGER.info(
-                    "Image preprocessing enabled: target_width=%d, jpeg_quality=%d",
-                    config.camera.preprocess_target_width,
-                    config.camera.preprocess_jpeg_quality,
+                LOGGER.info("Camera capture enabled: %s", snapshot_url)
+
+                # Create image preprocessor for resizing/compressing captures (ADR-0024)
+                if config.camera.preprocess_enabled:
+                    image_preprocessor = ImagePreprocessor(
+                        target_width=config.camera.preprocess_target_width,
+                        jpeg_quality=config.camera.preprocess_jpeg_quality,
+                        enabled=True,
+                    )
+                    LOGGER.info(
+                        "Image preprocessing enabled: target_width=%d, jpeg_quality=%d",
+                        config.camera.preprocess_target_width,
+                        config.camera.preprocess_jpeg_quality,
+                    )
+            else:
+                LOGGER.warning(
+                    "Camera enabled but no snapshot URL available - camera capture disabled"
                 )
 
         return CommandProcessor(
@@ -216,6 +223,64 @@ class MoonrakerBackend(PrinterBackend):
             image_preprocessor=image_preprocessor,
             job_registry=job_registry,
         )
+
+    # -------------------------------------------------------------------------
+    # Camera auto-discovery
+    # -------------------------------------------------------------------------
+
+    async def _resolve_snapshot_url(self, config: "OwlConfig") -> Optional[str]:
+        """Resolve the camera snapshot URL, using auto-discovery if configured.
+
+        Args:
+            config: Application configuration.
+
+        Returns:
+            Resolved snapshot URL, or None if discovery fails.
+        """
+        camera_config = config.camera
+
+        # If explicitly configured, use as-is
+        if camera_config.snapshot_url.lower() != "auto":
+            return camera_config.snapshot_url
+
+        # Auto-discovery via Moonraker webcams API
+        if self._camera_discovery is None:
+            self._camera_discovery = CameraDiscovery(
+                moonraker_base_url=self._config.url,
+            )
+
+        # Determine camera name preference
+        camera_name: Optional[str] = None
+        if camera_config.camera_name.lower() != "auto":
+            camera_name = camera_config.camera_name
+
+        discovered_url = await self._camera_discovery.discover_snapshot_url(
+            camera_name=camera_name
+        )
+
+        if discovered_url:
+            LOGGER.info(
+                "Camera auto-discovery successful: %s (camera: %s)",
+                discovered_url,
+                camera_name or "default",
+            )
+        else:
+            LOGGER.warning(
+                "Camera auto-discovery failed - no webcam found (camera: %s)",
+                camera_name or "default",
+            )
+
+        return discovered_url
+
+    def invalidate_camera_cache(self) -> None:
+        """Invalidate the camera discovery cache.
+
+        Call this when the Moonraker connection is re-established, as webcam
+        configuration may have changed.
+        """
+        if self._camera_discovery is not None:
+            self._camera_discovery.invalidate()
+            LOGGER.debug("Camera discovery cache invalidated")
 
     # -------------------------------------------------------------------------
     # Moonraker-specific health analysis

@@ -145,7 +145,7 @@ class PrinterBackend(Protocol):
         """
         ...
 
-    def create_command_processor(
+    async def create_command_processor(
         self,
         config: "OwlConfig",
         mqtt_client: Any,
@@ -157,6 +157,9 @@ class PrinterBackend(Protocol):
 
         Each backend may have specific command handling requirements.
         This factory allows backends to customize command processing.
+
+        Note: This method is async to allow for camera auto-discovery
+        which may involve network requests.
 
         Args:
             config: Application configuration.

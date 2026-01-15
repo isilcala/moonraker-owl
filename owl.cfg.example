@@ -1,0 +1,188 @@
+# =============================================================================
+# moonraker-owl Configuration
+# =============================================================================
+# Copy this file to ~/printer_data/config/moonraker-owl.cfg and customize.
+# After installation, run `moonraker-owl link` to connect to Owl Cloud.
+#
+# Documentation: https://github.com/project-owl/agent
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# [cloud] - Owl Cloud Connection
+# -----------------------------------------------------------------------------
+# These settings are populated automatically after running `moonraker-owl link`.
+# DO NOT manually edit device credentials unless instructed.
+[cloud]
+# Owl Cloud API endpoint
+base_url = https://api.owl.dev
+
+# MQTT broker for real-time communication
+broker_host = mqtt.owl.dev
+broker_port = 8883
+
+# === Device Credentials (auto-populated by `moonraker-owl link`) ===
+# device_id = <auto>
+# printer_id = <auto>
+# tenant_id = <auto>
+# device_private_key = <auto>
+# username = <auto>
+
+# -----------------------------------------------------------------------------
+# [moonraker] - Local Moonraker Connection
+# -----------------------------------------------------------------------------
+[moonraker]
+# Moonraker API URL (usually localhost on the same machine)
+url = http://127.0.0.1:7125
+
+# Transport protocol: websocket (recommended) or http
+transport = websocket
+
+# Optional: Moonraker API key (if authentication is enabled)
+# api_key =
+
+# -----------------------------------------------------------------------------
+# [telemetry] - Telemetry Publishing Settings
+# -----------------------------------------------------------------------------
+[telemetry]
+# Base telemetry rate in Hz (messages per second)
+# Default: 0.033 (~1 message per 30 seconds)
+# Range: 0.01 - 10.0
+rate_hz = 0.033
+
+# Moonraker objects to subscribe for telemetry
+# Comma-separated list of Moonraker object names
+include_fields = print_stats,webhooks.state,webhooks.state_message,gcode_move.speed_factor,gcode_move.extrude_factor,history,gcode_macro _OBICO_LAYER_CHANGE,fan.speed,toolhead,virtual_sdcard,display_status,idle_timeout,gcode_macro TIMELAPSE_TAKE_FRAME,extruder,heater_bed,exclude_object
+
+# Objects to exclude from telemetry (overrides include_fields)
+exclude_fields =
+
+# Include raw Moonraker payload in telemetry (adds ~450 bytes per message)
+# Only enable for debugging
+include_raw_payload = false
+
+# -----------------------------------------------------------------------------
+# [telemetry_cadence] - Channel-Specific Timing
+# -----------------------------------------------------------------------------
+[telemetry_cadence]
+# Status channel heartbeat (seconds between forced publishes)
+status_heartbeat_seconds = 60
+
+# Status publish interval when printer is idle (seconds)
+status_idle_interval_seconds = 60
+
+# Status publish interval when printer is active/printing (seconds)
+status_active_interval_seconds = 15
+
+# Maximum seconds without sensor publish before forcing one
+sensors_force_publish_seconds = 300
+
+# Event rate limiting
+events_max_per_second = 1
+events_max_per_minute = 20
+
+# Timeout for fetching GCode metadata/thumbnail info (milliseconds)
+thumbnail_fetch_timeout_ms = 1000
+
+# -----------------------------------------------------------------------------
+# [commands] - Cloud Command Handling
+# -----------------------------------------------------------------------------
+[commands]
+# Timeout for command acknowledgment (seconds)
+ack_timeout_seconds = 30.0
+
+# -----------------------------------------------------------------------------
+# [camera] - Camera Capture for AI Detection
+# -----------------------------------------------------------------------------
+[camera]
+# Enable camera capture functionality
+enabled = true
+
+# Webcam snapshot URL
+# - Use 'auto' for automatic discovery via Moonraker's webcam API (recommended)
+# - Or specify a manual URL for external cameras not configured in Moonraker
+# Examples:
+#   auto                                          (auto-detect from Moonraker)
+#   http://localhost/webcam/?action=snapshot      (crowsnest via nginx)
+#   http://192.168.1.100:8080/snapshot            (external IP camera)
+snapshot_url = auto
+
+# Camera name to use when snapshot_url is 'auto'
+# - Use 'auto' to select the first available webcam
+# - Or specify a name matching your moonraker.conf [webcam name] section
+# Examples:
+#   auto        (use first available)
+#   bed_cam     (use webcam named 'bed_cam')
+#   nozzle_cam  (use webcam named 'nozzle_cam')
+camera_name = auto
+
+# Capture request timeout (seconds)
+capture_timeout_seconds = 10.0
+
+# Retry attempts for failed captures
+max_retries = 2
+
+# Image preprocessing before upload
+preprocess_enabled = true
+
+# Target width for image resizing (preserves aspect ratio)
+# Images wider than this will be resized
+preprocess_target_width = 800
+
+# JPEG compression quality (1-100, higher = better quality, larger file)
+preprocess_jpeg_quality = 85
+
+# -----------------------------------------------------------------------------
+# [compression] - Telemetry Compression
+# -----------------------------------------------------------------------------
+[compression]
+# Enable payload compression for bandwidth reduction
+enabled = true
+
+# Channels to compress (comma-separated)
+channels = sensors,objects
+
+# Minimum payload size to trigger compression (bytes)
+min_size_bytes = 1024
+
+# -----------------------------------------------------------------------------
+# [logging] - Logging Configuration
+# -----------------------------------------------------------------------------
+[logging]
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+level = INFO
+
+# Log file path (use ~ for home directory)
+path = ~/printer_data/logs/moonraker-owl.log
+
+# Enable detailed network logging (verbose, for debugging only)
+log_network = false
+
+# -----------------------------------------------------------------------------
+# [resilience] - Connection Resilience & Health
+# -----------------------------------------------------------------------------
+[resilience]
+# Initial reconnection delay (seconds)
+reconnect_initial_seconds = 1.0
+
+# Maximum reconnection delay (seconds, with exponential backoff)
+reconnect_max_seconds = 30.0
+
+# Jitter ratio for reconnection timing (0.0 - 1.0)
+reconnect_jitter_ratio = 0.5
+
+# MQTT session expiry (seconds)
+session_expiry_seconds = 86400
+
+# Buffer window for offline message queuing (seconds)
+buffer_window_seconds = 60.0
+
+# Moonraker circuit breaker threshold (consecutive failures before trip)
+moonraker_breaker_threshold = 5
+
+# MQTT keepalive/heartbeat interval (seconds)
+heartbeat_interval_seconds = 30
+
+# Health check HTTP endpoint (for monitoring/orchestration)
+health_enabled = false
+health_host = 127.0.0.1
+health_port = 3333
