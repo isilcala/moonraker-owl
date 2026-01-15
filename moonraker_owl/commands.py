@@ -758,6 +758,16 @@ class CommandProcessor:
                     code="moonraker_error",
                     command_id=message.command_id,
                 ) from exc
+
+            # Trigger immediate print_stats query to detect state change.
+            # Moonraker may not push state changes via WebSocket for these commands,
+            # so we actively query to ensure the orchestrator sees the transition.
+            if self._telemetry is not None:
+                try:
+                    await self._telemetry.request_print_state_query()
+                except Exception as exc:  # pragma: no cover - non-critical
+                    LOGGER.debug("Failed to request print state query: %s", exc)
+
             return {"command": message.command}
 
         # Unknown command

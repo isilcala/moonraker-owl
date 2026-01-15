@@ -182,6 +182,10 @@ class FakeTelemetry:
             self._watch_window_expires = None
         return self.next_expires_at
 
+    async def request_print_state_query(self) -> None:
+        """Record that print state query was requested."""
+        self.records.append({"type": "print_state_query"})
+
 
 @pytest.fixture
 def config() -> OwlConfig:
@@ -770,6 +774,56 @@ async def test_state_based_completion_cancel_command(config):
 
 
 @pytest.mark.asyncio
+async def test_print_control_commands_trigger_state_query(config):
+    """Test that pause/resume/cancel commands trigger immediate print_stats query."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    telemetry = FakeTelemetry()
+    processor = CommandProcessor(config, moonraker, mqtt, telemetry=telemetry)
+
+    await processor.start()
+
+    # Test pause command
+    message = {
+        "commandId": "cmd-pause",
+        "command": "print:pause",
+        "payload": {},
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
+
+    # Should have triggered a print state query
+    query_records = [r for r in telemetry.records if r.get("type") == "print_state_query"]
+    assert len(query_records) == 1, "Pause command should trigger print_stats query"
+
+    # Test resume command
+    message = {
+        "commandId": "cmd-resume",
+        "command": "print:resume",
+        "payload": {},
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/print:resume", message)
+
+    query_records = [r for r in telemetry.records if r.get("type") == "print_state_query"]
+    assert len(query_records) == 2, "Resume command should trigger print_stats query"
+
+    # Test cancel command
+    message = {
+        "commandId": "cmd-cancel",
+        "command": "print:cancel",
+        "payload": {},
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/print:cancel", message)
+
+    query_records = [r for r in telemetry.records if r.get("type") == "print_state_query"]
+    assert len(query_records) == 3, "Cancel command should trigger print_stats query"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
 async def test_state_change_wrong_state_does_not_complete(config):
     """Test that wrong state change does not trigger completion."""
     moonraker = FakeMoonraker()
@@ -906,7 +960,11 @@ async def test_abandon_pending_commands_on_stop(config):
     await asyncio.sleep(0.01)
 
     # Should have abandoned the pending command
-    abandoned_records = [r for r in telemetry.records if r["state"] == "abandoned"]
+    # Filter out print_state_query records which don't have 'state' key
+    abandoned_records = [
+        r for r in telemetry.records
+        if r.get("state") == "abandoned"
+    ]
     assert len(abandoned_records) >= 1
 
 

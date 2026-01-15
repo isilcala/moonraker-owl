@@ -545,6 +545,16 @@ class TelemetryOrchestrator:
                     effective_job_id,
                     self._last_filename,
                 )
+
+            # Proactively start timelapse polling after print completion.
+            # moonraker-timelapse may not send render:started/running events reliably,
+            # so we start polling immediately when a print ends to detect new .mp4 files.
+            if not self._timelapse_poll_requested and not self._timelapse_poll_abandoned:
+                LOGGER.info(
+                    "Print ended (via state) - enabling proactive timelapse polling"
+                )
+                self._timelapse_poll_requested = True
+                self._timelapse_poll_started_at = self._clock()
         elif event_name == EventName.PRINT_STARTED:
             # Reset terminal event flag when a new print starts
             self._terminal_event_emitted = False
@@ -640,6 +650,16 @@ class TelemetryOrchestrator:
                 effective_job_id,
                 self._last_filename,
             )
+
+        # Proactively start timelapse polling after print completion.
+        # moonraker-timelapse may not send render:started/running events reliably,
+        # so we start polling immediately when a print ends to detect new .mp4 files.
+        if not self._timelapse_poll_requested and not self._timelapse_poll_abandoned:
+            LOGGER.info(
+                "Print ended (via job_status) - enabling proactive timelapse polling"
+            )
+            self._timelapse_poll_requested = True
+            self._timelapse_poll_started_at = self._clock()
 
         event = Event(
             event_name=event_name,

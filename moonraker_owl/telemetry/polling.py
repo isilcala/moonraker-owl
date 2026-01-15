@@ -51,25 +51,19 @@ class _PollGroup:
 
 # Default polling specs for common Moonraker objects
 DEFAULT_POLL_SPECS: tuple[PollSpec, ...] = (
-    # NOTE: print-state-sync polling DISABLED for testing.
-    # We're verifying if the state normalization fix in state_store.py
-    # resolves the missed state transition issue without needing polling.
-    # Re-enable after confirming root cause.
-    #
-    # PollSpec(
-    #     name="print-state-sync",
-    #     fields=(
-    #         "print_stats.state",
-    #         "print_stats.filename",
-    #         "print_stats.message",
-    #         "print_stats.print_duration",
-    #         "virtual_sdcard.is_active",
-    #         "virtual_sdcard.progress",
-    #     ),
-    #     interval_seconds=15.0,
-    #     initial_delay_seconds=5.0,
-    #     force_poll=True,
-    # ),
+    # Progress sync polling - ensures file_position is available for accurate
+    # file-relative progress calculation (Mainsail algorithm).
+    # Moonraker WebSocket may not push file_position updates, so we poll it.
+    PollSpec(
+        name="progress-sync",
+        fields=(
+            "virtual_sdcard.file_position",
+            "virtual_sdcard.progress",
+        ),
+        interval_seconds=5.0,
+        initial_delay_seconds=2.0,
+        force_poll=True,
+    ),
     PollSpec(
         name="environment-sensors",
         fields=(

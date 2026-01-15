@@ -389,6 +389,32 @@ class TelemetryPublisher:
             resubscribe_task.cancel()
             self._resubscribe_task = None
 
+    async def request_print_state_query(self) -> None:
+        """Request an immediate print_stats query to refresh state.
+
+        This method is called by CommandProcessor after executing print control
+        commands (pause, resume, cancel) to ensure the state store is updated
+        with the actual print_stats.state.
+
+        Moonraker may not push state changes via WebSocket for these commands
+        (the notify_status_update may omit print_stats.state if Moonraker
+        considers it unchanged at the protocol level). By actively querying,
+        we ensure the orchestrator sees the state transition and can complete
+        pending commands waiting for state confirmation.
+
+        This implements the ADR-0003 query-on-notification pattern for commands.
+        """
+        try:
+            LOGGER.debug("Querying print_stats after print control command")
+            snapshot = await self._moonraker.fetch_printer_state(
+                {"print_stats": None}  # None = all fields
+            )
+            await self._enqueue(snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.debug("Failed to query print_stats after command: %s", exc)
+
     @property
     def topic(self) -> str:
         return self._channel_topics["sensors"]
