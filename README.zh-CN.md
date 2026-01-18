@@ -111,6 +111,16 @@ sudo systemctl restart moonraker
 
 查看 `owl.cfg.example` 获取所有可用选项及详细说明。
 
+### 默认环境
+
+Agent 默认配置连接到**测试环境（Staging）**：
+
+| 设置项 | 默认值 |
+|--------|--------|
+| API 地址 | `https://owl.elencala.com` |
+| MQTT 服务器 | `mqtt.owl.elencala.com:8883` (TLS) |
+| Web 界面 | `https://owl.elencala.com` |
+
 ### 摄像头设置
 
 摄像头捕获默认**零配置**。Agent 会自动从 Moonraker 配置中发现摄像头 - 无需手动设置 URL！

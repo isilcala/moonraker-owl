@@ -111,6 +111,16 @@ The configuration file is located at `~/printer_data/config/moonraker-owl.cfg`.
 
 See `owl.cfg.example` for all available options with descriptions.
 
+### Default Environment
+
+The agent is pre-configured to connect to the **Staging environment**:
+
+| Setting | Default Value |
+|---------|---------------|
+| API Endpoint | `https://owl.elencala.com` |
+| MQTT Broker | `mqtt.owl.elencala.com:8883` (TLS) |
+| Web Interface | `https://owl.elencala.com` |
+
 ### Camera Setup
 
 Camera capture is **zero-configuration** by default. The agent automatically discovers

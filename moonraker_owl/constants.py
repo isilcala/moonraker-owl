@@ -12,10 +12,11 @@ DEFAULT_VENV_PATH = Path.home() / f"{APP_NAME}-env"
 
 DEFAULT_LOG_PATH = Path.home() / "printer_data" / "logs" / f"{APP_NAME}.log"
 
-DEFAULT_MOONRAKER_HOST = "192.168.50.231"
+DEFAULT_MOONRAKER_HOST = "127.0.0.1"
 DEFAULT_MOONRAKER_PORT = 7125
 
-DEFAULT_BROKER_HOST = "localhost:51979"
-DEFAULT_LINK_BASE_URL = "http://localhost:5024"
+# Staging environment defaults
+DEFAULT_BROKER_HOST = "mqtt.owl.elencala.com"
+DEFAULT_LINK_BASE_URL = "https://owl.elencala.com"
 
 # Legacy: DEVICE_TOKEN_MQTT_PROPERTY_NAME = "x-device-token" - No longer used with JWT auth

@@ -13,11 +13,12 @@
 # These settings are populated automatically after running `moonraker-owl link`.
 # DO NOT manually edit device credentials unless instructed.
 [cloud]
-# Owl Cloud API endpoint
-base_url = https://api.owl.dev
+# Owl Cloud API endpoint (Staging environment)
+base_url = https://owl.elencala.com
 
-# MQTT broker for real-time communication
-broker_host = mqtt.owl.dev
+# MQTT broker for real-time communication (Staging environment)
+# Uses TLS on port 8883 for secure communication
+broker_host = mqtt.owl.elencala.com
 broker_port = 8883
 
 # === Device Credentials (auto-populated by `moonraker-owl link`) ===
