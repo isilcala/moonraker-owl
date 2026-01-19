@@ -546,12 +546,16 @@ class TelemetryOrchestrator:
                     self._last_filename,
                 )
 
-            # Proactively start timelapse polling after print completion.
-            # moonraker-timelapse may not send render:started/running events reliably,
-            # so we start polling immediately when a print ends to detect new .mp4 files.
-            if not self._timelapse_poll_requested and not self._timelapse_poll_abandoned:
+            # Proactively start timelapse polling after SUCCESSFUL print completion only.
+            # moonraker-timelapse only renders when print completes successfully,
+            # so we don't poll for cancelled/failed prints.
+            if (
+                event_name == EventName.PRINT_COMPLETED
+                and not self._timelapse_poll_requested
+                and not self._timelapse_poll_abandoned
+            ):
                 LOGGER.info(
-                    "Print ended (via state) - enabling proactive timelapse polling"
+                    "Print completed successfully (via state) - enabling proactive timelapse polling"
                 )
                 self._timelapse_poll_requested = True
                 self._timelapse_poll_started_at = self._clock()
@@ -651,12 +655,16 @@ class TelemetryOrchestrator:
                 self._last_filename,
             )
 
-        # Proactively start timelapse polling after print completion.
-        # moonraker-timelapse may not send render:started/running events reliably,
-        # so we start polling immediately when a print ends to detect new .mp4 files.
-        if not self._timelapse_poll_requested and not self._timelapse_poll_abandoned:
+        # Proactively start timelapse polling after SUCCESSFUL print completion only.
+        # moonraker-timelapse only renders when print completes successfully,
+        # so we don't poll for cancelled/failed prints.
+        if (
+            event_name == EventName.PRINT_COMPLETED
+            and not self._timelapse_poll_requested
+            and not self._timelapse_poll_abandoned
+        ):
             LOGGER.info(
-                "Print ended (via job_status) - enabling proactive timelapse polling"
+                "Print completed successfully (via job_status) - enabling proactive timelapse polling"
             )
             self._timelapse_poll_requested = True
             self._timelapse_poll_started_at = self._clock()

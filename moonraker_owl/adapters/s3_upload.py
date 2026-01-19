@@ -58,17 +58,19 @@ class S3UploadClient:
         self,
         *,
         session: Optional[aiohttp.ClientSession] = None,
-        max_retries: int = 3,
+        max_retries: int = 2,
         base_retry_delay: float = 1.0,
-        timeout: float = 60.0,
+        timeout: float = 10.0,
     ) -> None:
         """Initialize the S3 upload client.
 
         Args:
             session: Optional aiohttp session to use. If None, creates one.
             max_retries: Maximum number of retry attempts for failed uploads.
+                Default is 2 to keep total time under 30s (capture interval).
             base_retry_delay: Base delay between retries (exponential backoff).
             timeout: Request timeout in seconds.
+                Default is 10s - sufficient for typical 100-500KB images.
         """
         self._session = session
         self._owns_session = session is None

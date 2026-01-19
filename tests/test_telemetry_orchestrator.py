@@ -884,3 +884,158 @@ class TestPrintEventPayloads:
         assert "errorMessage" in event.data, f"errorMessage missing. Got: {event.data}"
         assert event.data["errorMessage"] == "Heater timeout on extruder"
 
+
+# =============================================================================
+# Timelapse Polling Trigger Tests
+# =============================================================================
+
+
+def test_timelapse_polling_enabled_only_on_print_completed(baseline_snapshot: dict) -> None:
+    """Timelapse polling should only be enabled when print completes successfully.
+    
+    moonraker-timelapse only renders videos when prints complete successfully,
+    so we should not poll for cancelled or failed prints.
+    """
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Verify polling not enabled initially
+    assert not orchestrator._timelapse_poll_requested, "Polling should not be requested initially"
+    
+    # Simulate print completion (completed state via print_stats)
+    orchestrator.ingest({
+        "result": {
+            "status": {
+                "print_stats": {
+                    "state": "complete",
+                    "filename": "test_model.gcode",
+                },
+            },
+        },
+    })
+    
+    # Polling should now be enabled for completed print
+    assert orchestrator._timelapse_poll_requested, (
+        "Timelapse polling should be enabled after successful print completion"
+    )
+
+
+def test_timelapse_polling_not_enabled_on_print_cancelled(baseline_snapshot: dict) -> None:
+    """Timelapse polling should NOT be enabled when print is cancelled."""
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Verify polling not enabled initially
+    assert not orchestrator._timelapse_poll_requested
+    
+    # Simulate print cancellation via print_stats state
+    orchestrator.ingest({
+        "result": {
+            "status": {
+                "print_stats": {
+                    "state": "cancelled",
+                    "filename": "test_model.gcode",
+                },
+            },
+        },
+    })
+    
+    # Polling should NOT be enabled for cancelled print
+    assert not orchestrator._timelapse_poll_requested, (
+        "Timelapse polling should NOT be enabled for cancelled prints - "
+        "moonraker-timelapse only renders on successful completion"
+    )
+
+
+def test_timelapse_polling_not_enabled_on_print_failed(baseline_snapshot: dict) -> None:
+    """Timelapse polling should NOT be enabled when print fails."""
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Verify polling not enabled initially
+    assert not orchestrator._timelapse_poll_requested
+    
+    # Simulate print failure via print_stats state
+    orchestrator.ingest({
+        "result": {
+            "status": {
+                "print_stats": {
+                    "state": "error",
+                    "filename": "test_model.gcode",
+                    "message": "Heater timeout",
+                },
+            },
+        },
+    })
+    
+    # Polling should NOT be enabled for failed print
+    assert not orchestrator._timelapse_poll_requested, (
+        "Timelapse polling should NOT be enabled for failed prints - "
+        "moonraker-timelapse only renders on successful completion"
+    )
+
+
+def test_timelapse_polling_via_job_status_only_on_completed(baseline_snapshot: dict) -> None:
+    """Timelapse polling via job_status detection should only trigger on 'completed'."""
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+    
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Verify polling not enabled initially
+    assert not orchestrator._timelapse_poll_requested
+    
+    # First test: cancelled via job_status should NOT enable polling
+    orchestrator.ingest({
+        "jsonrpc": "2.0",
+        "method": "notify_history_changed",
+        "params": [{
+            "action": "finished",
+            "job": {
+                "job_id": "0000ABCD",
+                "filename": "test_model.gcode",
+                "status": "cancelled",
+            },
+        }],
+    })
+    
+    assert not orchestrator._timelapse_poll_requested, (
+        "Timelapse polling should NOT be enabled for cancelled job via job_status"
+    )
+    
+    # Reset for next test
+    orchestrator.reset()
+    orchestrator.ingest(baseline_snapshot)
+    
+    # Second test: completed via job_status SHOULD enable polling
+    orchestrator.ingest({
+        "jsonrpc": "2.0",
+        "method": "notify_history_changed",
+        "params": [{
+            "action": "finished",
+            "job": {
+                "job_id": "0000EFGH",
+                "filename": "another_model.gcode",
+                "status": "completed",
+            },
+        }],
+    })
+    
+    assert orchestrator._timelapse_poll_requested, (
+        "Timelapse polling SHOULD be enabled for completed job via job_status"
+    )
+
