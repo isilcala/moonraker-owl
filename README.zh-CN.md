@@ -25,13 +25,14 @@ Owl Cloud 打印机代理程序，用于连接 Moonraker 驱动的 3D 打印机�
 
 ```bash
 cd ~
-git clone https://gitee.com/project-owl/agent.git moonraker-owl
+git clone git clone https://gitee.com/isilcala/moonraker-owl.git
 cd moonraker-owl
 ```
 
 ### 2. 运行安装脚本
 
 ```bash
+sudo chmod +x ./scripts/install.sh
 ./scripts/install.sh
 ```
 
