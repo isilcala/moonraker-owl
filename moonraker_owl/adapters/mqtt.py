@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 import paho.mqtt.client as mqtt
@@ -132,6 +133,12 @@ class MQTTClient:
 
         client = mqtt.Client(**client_kwargs)
         client.enable_logger(LOGGER)
+
+        # Configure TLS if enabled
+        if self.config.broker_use_tls:
+            LOGGER.info("Enabling TLS for MQTT connection")
+            # Use system CA certificates for server verification
+            client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
 
         if self._last_will is not None:
             client.will_set(**self._last_will)

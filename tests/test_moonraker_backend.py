@@ -389,8 +389,9 @@ class TestFactoryMethods:
 
             # Verify CameraDiscovery was created and called
             MockCameraDiscovery.assert_called_once()
+            # camera_name is passed through as-is (defaults to "auto" for auto-selection)
             mock_discovery_instance.discover_snapshot_url.assert_called_once_with(
-                camera_name=None
+                camera_name="auto"
             )
 
             # Verify CameraClient was created with the discovered URL

@@ -66,6 +66,9 @@ class FakeMqttClient:
     def will_set(self, topic, payload=None, qos=0, retain=False, properties=None):
         self._events["will_set"] = (topic, payload, qos, retain, properties)
 
+    def tls_set(self, ca_certs=None, certfile=None, keyfile=None, cert_reqs=None, tls_version=None, ciphers=None):
+        self._events["tls_set"] = {"cert_reqs": cert_reqs, "tls_version": tls_version}
+
     def disconnect(self):
         self._events["disconnect_called"] = True
         if self.on_disconnect:

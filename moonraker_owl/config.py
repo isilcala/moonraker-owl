@@ -57,6 +57,7 @@ class CloudConfig:
     base_url: str = constants.DEFAULT_LINK_BASE_URL
     broker_host: str = constants.DEFAULT_BROKER_HOST
     broker_port: int = 8883
+    broker_use_tls: bool = True  # Enable TLS for MQTT connection (default: True for port 8883)
     username: Optional[str] = None
     password: Optional[str] = None
     device_private_key: Optional[str] = None  # Base64-encoded Ed25519 private key for JWT authentication
@@ -270,10 +271,15 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             parser.set("cloud", "broker_host", host_part)
             parser.set("cloud", "broker_port", str(parsed_port))
 
+    # Default TLS to True for port 8883, False for 1883
+    default_use_tls = broker_port_value == 8883
+    broker_use_tls = parser.getboolean("cloud", "broker_use_tls", fallback=default_use_tls)
+
     cloud = CloudConfig(
         base_url=parser.get("cloud", "base_url"),
         broker_host=broker_host_value,
         broker_port=broker_port_value,
+        broker_use_tls=broker_use_tls,
         username=parser.get("cloud", "username", fallback=None),
         password=parser.get("cloud", "password", fallback=None),
         device_private_key=parser.get("cloud", "device_private_key", fallback=None),
