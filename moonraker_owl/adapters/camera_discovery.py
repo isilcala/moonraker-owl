@@ -258,8 +258,11 @@ class CameraDiscovery:
             LOGGER.debug("No webcams found in Moonraker configuration")
             return None
 
+        # Handle None or empty camera_name as "auto"
+        effective_name = camera_name.lower() if camera_name else "auto"
+
         # Find the requested camera
-        if camera_name.lower() == "auto":
+        if effective_name == "auto":
             # Use first available
             selected = webcams[0]
             LOGGER.info(
@@ -270,14 +273,14 @@ class CameraDiscovery:
         else:
             # Find by name
             selected = next(
-                (w for w in webcams if w.name.lower() == camera_name.lower()),
+                (w for w in webcams if w.name.lower() == effective_name),
                 None,
             )
             if selected is None:
                 available = [w.name for w in webcams]
                 LOGGER.warning(
                     "Webcam '%s' not found. Available: %s. Using first available.",
-                    camera_name,
+                    effective_name,
                     available,
                 )
                 selected = webcams[0]

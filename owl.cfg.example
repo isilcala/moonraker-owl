@@ -17,7 +17,7 @@
 base_url = https://owl.elencala.com
 
 # MQTT broker for real-time communication (Staging environment)
-# Uses TLS on port 8883 for secure communication
+# Uses TLS on port 8883 - Traefik terminates TLS and forwards to EMQX
 broker_host = mqtt.owl.elencala.com
 broker_port = 8883
 
@@ -127,7 +127,7 @@ preprocess_enabled = true
 
 # Target width for image resizing (preserves aspect ratio)
 # Images wider than this will be resized
-preprocess_target_width = 800
+preprocess_target_width = 1024
 
 # JPEG compression quality (1-100, higher = better quality, larger file)
 preprocess_jpeg_quality = 85

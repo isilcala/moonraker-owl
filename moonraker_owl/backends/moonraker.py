@@ -249,10 +249,8 @@ class MoonrakerBackend(PrinterBackend):
                 moonraker_base_url=self._config.url,
             )
 
-        # Determine camera name preference
-        camera_name: Optional[str] = None
-        if camera_config.camera_name.lower() != "auto":
-            camera_name = camera_config.camera_name
+        # Use camera_name from config (defaults to "auto" for auto-selection)
+        camera_name = camera_config.camera_name or "auto"
 
         discovered_url = await self._camera_discovery.discover_snapshot_url(
             camera_name=camera_name
