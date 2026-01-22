@@ -478,9 +478,6 @@ class MoonrakerOwlApp:
         self._moonraker_failures = 0
         await self._health.update("moonraker", True, None)
 
-        # Invalidate camera discovery cache - webcam config may have changed
-        self._invalidate_camera_discovery_cache()
-
         lock = self._moonraker_recovery_lock
         if lock is None:
             lock = asyncio.Lock()
@@ -489,6 +486,10 @@ class MoonrakerOwlApp:
         async with lock:
             if not self._moonraker_breaker_tripped and self._telemetry_ready:
                 return
+
+            # Invalidate camera discovery cache - webcam config may have changed
+            # Only do this when actually recovering from a tripped breaker
+            self._invalidate_camera_discovery_cache()
 
             try:
                 runtime_ready = await self._restart_components()
