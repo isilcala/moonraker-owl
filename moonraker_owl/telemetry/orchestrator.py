@@ -172,6 +172,10 @@ class TelemetryOrchestrator:
                 self._last_session_id,
                 self._terminal_event_emitted,
             )
+            # Preserve timelapse and job correlation state during token renewal
+            # This is critical because timelapse renders AFTER print completion,
+            # and we need to maintain polling state and job info across reconnection.
+            # Note: All timelapse-related fields are preserved (not reset) here.
         else:
             self._last_klippy_state = None
             self._last_print_state = None
@@ -180,17 +184,17 @@ class TelemetryOrchestrator:
             self._last_job_status = None
             self._terminal_event_emitted = False
             self._last_moonraker_job_id = None
-        self._last_timelapse_filename = None
-        # Reset completed job tracking (timelapse correlation)
-        self._last_completed_job_session_id = None
-        self._last_completed_job_filename = None
-        self._last_completed_moonraker_job_id = None
-        # Reset timelapse polling state
-        self._timelapse_poll_requested = False
-        self._timelapse_poll_started_at = None
-        self._timelapse_poll_abandoned = False  # Allow polling for new jobs
-        self._timelapse_known_files = set()
-        self._last_timelapse_event_observed_at = None
+            self._last_timelapse_filename = None
+            # Reset completed job tracking (timelapse correlation)
+            self._last_completed_job_session_id = None
+            self._last_completed_job_filename = None
+            self._last_completed_moonraker_job_id = None
+            # Reset timelapse polling state
+            self._timelapse_poll_requested = False
+            self._timelapse_poll_started_at = None
+            self._timelapse_poll_abandoned = False  # Allow polling for new jobs
+            self._timelapse_known_files = set()
+            self._last_timelapse_event_observed_at = None
         # Deduplication for job update logging
         self._last_job_update_signature: Optional[tuple] = None
         # Note: _on_print_state_changed is preserved

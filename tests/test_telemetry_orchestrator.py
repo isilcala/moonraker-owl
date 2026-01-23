@@ -695,6 +695,91 @@ def test_timelapse_event_dedup_by_observed_at(baseline_snapshot: dict) -> None:
     )
 
 
+def test_timelapse_polling_preserved_across_token_renewal(baseline_snapshot: dict) -> None:
+    """Timelapse polling state should be preserved during token renewal reset.
+
+    When token renewal triggers a reconnection, reset() is called with a snapshot
+    to preserve print state. Timelapse polling state must also be preserved because
+    timelapse renders AFTER print completion, and the render may still be in progress
+    when token renewal happens.
+
+    This test verifies the fix for the bug where timelapse polling was lost during
+    token renewal, causing timelapse uploads to fail.
+    """
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+
+    # Simulate print completion which enables proactive timelapse polling
+    completion_payload = {
+        "result": {
+            "status": {
+                "print_stats": {"state": "complete", "filename": "test.gcode"},
+            }
+        }
+    }
+    orchestrator.ingest(completion_payload)
+
+    # Polling should be enabled after successful print completion
+    assert orchestrator.should_poll_timelapse(), (
+        "Polling should be enabled after print completion"
+    )
+
+    # Store state before reset (for verification)
+    poll_started_at = orchestrator._timelapse_poll_started_at
+    last_completed_job_filename = orchestrator._last_completed_job_filename
+
+    # Simulate token renewal: reset with snapshot (preserving print state)
+    snapshot = orchestrator.store.export_state()
+    orchestrator.reset(snapshot=snapshot)
+
+    # Timelapse polling state should be preserved
+    assert orchestrator.should_poll_timelapse(), (
+        "Timelapse polling should be preserved across token renewal reset"
+    )
+    assert orchestrator._timelapse_poll_started_at == poll_started_at, (
+        "Poll start time should be preserved"
+    )
+    assert orchestrator._last_completed_job_filename == last_completed_job_filename, (
+        "Completed job filename should be preserved for timelapse correlation"
+    )
+
+
+def test_timelapse_polling_reset_on_full_reset(baseline_snapshot: dict) -> None:
+    """Timelapse polling state should be reset on full reset (no snapshot).
+
+    When reset() is called without a snapshot (e.g., agent restart, not token renewal),
+    all timelapse state should be cleared to start fresh.
+    """
+    now = datetime(2025, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+
+    # Initialize with printing state
+    orchestrator.ingest(baseline_snapshot)
+
+    # Enable timelapse polling
+    render_running = {
+        "method": "notify_timelapse_event",
+        "params": [{"action": "render", "status": "running"}],
+    }
+    orchestrator.ingest(render_running)
+    assert orchestrator.should_poll_timelapse()
+
+    # Full reset without snapshot
+    orchestrator.reset(snapshot=None)
+
+    # Timelapse polling should be cleared
+    assert not orchestrator.should_poll_timelapse(), (
+        "Timelapse polling should be cleared on full reset"
+    )
+    assert orchestrator._timelapse_poll_started_at is None
+    assert orchestrator._last_completed_job_filename is None
+
+
 class TestPrintEventPayloads:
     """Tests for print event payload generation ensuring all statistics fields are populated."""
 
