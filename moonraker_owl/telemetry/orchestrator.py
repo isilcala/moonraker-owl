@@ -725,8 +725,10 @@ class TelemetryOrchestrator:
             filament_used = print_data.get("filament_used")
             if filament_used is not None:
                 base_data["filamentUsedMm"] = filament_used
-            if session.progress_percent is not None:
-                base_data["progressPercent"] = session.progress_percent
+            # For completed prints, always report 100% progress regardless of what
+            # Moonraker reports. The print_stats.state transition to "complete"
+            # is the authoritative signal that the print finished successfully.
+            base_data["progressPercent"] = 100.0
             return base_data
 
         if event_name == EventName.PRINT_FAILED:

@@ -902,6 +902,17 @@ class CommandProcessor:
             )
 
         params = message.parameters or {}
+        
+        # Log current state before processing
+        current_mode, current_interval, current_expires = (
+            self._telemetry.get_current_sensors_state()
+        )
+        LOGGER.info(
+            "[SetTelemetryRate] Current state: mode=%s, interval=%.2fs, expires=%s",
+            current_mode,
+            current_interval or 0.0,
+            current_expires.isoformat() if current_expires else "none",
+        )
 
         mode = str(params.get("mode", "idle")).strip().lower() or "idle"
         max_hz_value = params.get("maxHz", 0.0)
@@ -974,6 +985,17 @@ class CommandProcessor:
             and mode == "watch"
             and duration_seconds is not None
             and duration_seconds > 0
+        )
+
+        LOGGER.info(
+            "[SetTelemetryRate] Request: mode=%s, maxHz=%.2f, duration=%s, target_interval=%.2fs, "
+            "intervals_match=%s, is_extend_only=%s",
+            mode,
+            max_hz,
+            duration_seconds,
+            target_interval or 0.0,
+            intervals_match,
+            is_extend_only,
         )
 
         if is_extend_only:

@@ -1345,6 +1345,13 @@ class TelemetryPublisher:
                 mode,
                 interval,
             )
+        elif interval != previous_interval:
+            LOGGER.info(
+                "Telemetry interval changed: %.2fs -> %.2fs (mode=%s)",
+                previous_interval,
+                interval,
+                mode,
+            )
 
         for channel in ("sensors", "status"):
             self._cadence_controller.reset_channel(channel)
@@ -1403,6 +1410,12 @@ class TelemetryPublisher:
                 max_interval=None,  # Sensors uses force_publish_seconds instead
                 forced_interval=sensors_forced_interval,
                 force_publish_seconds=sensors_force_publish,
+            )
+            LOGGER.debug(
+                "[CadenceConfig] sensors channel: interval=%.2fs, forced_interval=%.2fs, force_publish=%.1fs",
+                sensors_interval or 0.0,
+                sensors_forced_interval or 0.0,
+                sensors_force_publish or 0.0,
             )
 
         # Objects channel: event-driven like events, but uses cadence controller
