@@ -81,8 +81,10 @@ sensors_force_publish_seconds = 300
 events_max_per_second = 1
 events_max_per_minute = 20
 
-# Timeout for fetching GCode metadata/thumbnail info (milliseconds)
-thumbnail_fetch_timeout_ms = 1000
+# Timeout for fetching GCode metadata and moonrakerJobId from History API (milliseconds)
+# This affects print job correlation for thumbnails and timelapse uploads.
+# Increase this value if you experience timeouts (check agent logs).
+thumbnail_fetch_timeout_ms = 5000
 
 # -----------------------------------------------------------------------------
 # [commands] - Cloud Command Handling

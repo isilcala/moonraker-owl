@@ -49,7 +49,7 @@ class TelemetryCadenceConfig:
     sensors_force_publish_seconds: float = 300.0  # Maximum seconds without sensor publish before forcing one
     events_max_per_second: int = 1
     events_max_per_minute: int = 20
-    thumbnail_fetch_timeout_ms: int = 1000  # Timeout for fetching GCode metadata for hasThumbnail
+    thumbnail_fetch_timeout_ms: int = 5000  # Timeout for fetching GCode metadata and moonrakerJobId from History API
 
 
 @dataclass(slots=True)
