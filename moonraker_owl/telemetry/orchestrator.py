@@ -93,6 +93,10 @@ class TelemetryOrchestrator:
         self._last_completed_job_session_id: Optional[str] = None
         self._last_completed_job_filename: Optional[str] = None
         self._last_completed_moonraker_job_id: Optional[str] = None
+        # Print timing from Moonraker history API (for timelapse:ready event)
+        # These are set by TelemetryPublisher when print completes
+        self._last_completed_print_start_time: Optional[float] = None  # Unix timestamp
+        self._last_completed_print_end_time: Optional[float] = None  # Unix timestamp
         # Track moonraker_job_id while printing (before terminal state)
         self._last_moonraker_job_id: Optional[str] = None
 
@@ -125,6 +129,27 @@ class TelemetryOrchestrator:
             callback: Function accepting the new print state string.
         """
         self._on_print_state_changed = callback
+
+    def set_completed_job_timing(
+        self, start_time: Optional[float], end_time: Optional[float]
+    ) -> None:
+        """Set print timing from Moonraker history API for timelapse correlation.
+
+        Called by TelemetryPublisher after fetching job history when a print completes.
+        These timestamps are included in the timelapse:ready event for time-window
+        based job matching on the cloud side.
+
+        Args:
+            start_time: Unix timestamp when the print started (from history API)
+            end_time: Unix timestamp when the print ended (from history API)
+        """
+        self._last_completed_print_start_time = start_time
+        self._last_completed_print_end_time = end_time
+        LOGGER.debug(
+            "Set completed job timing: start_time=%s, end_time=%s",
+            start_time,
+            end_time,
+        )
 
     # Note: set_thumbnail_url has been removed.
     # Thumbnail URLs are now pushed via SignalR after upload ACK processing.
@@ -189,6 +214,8 @@ class TelemetryOrchestrator:
             self._last_completed_job_session_id = None
             self._last_completed_job_filename = None
             self._last_completed_moonraker_job_id = None
+            self._last_completed_print_start_time = None
+            self._last_completed_print_end_time = None
             # Reset timelapse polling state
             self._timelapse_poll_requested = False
             self._timelapse_poll_started_at = None
@@ -882,12 +909,20 @@ class TelemetryOrchestrator:
             data["moonrakerJobId"] = moonraker_job_id
         if print_job_id:
             data["printJobId"] = print_job_id
+        # Include print timing for cloud-side time-window job matching
+        if self._last_completed_print_start_time is not None:
+            data["printStartTime"] = self._last_completed_print_start_time
+        if self._last_completed_print_end_time is not None:
+            data["printEndTime"] = self._last_completed_print_end_time
 
         LOGGER.info(
-            "Timelapse render complete: %s (printJobId=%s, moonrakerJobId=%s)",
+            "Timelapse render complete: %s (printJobId=%s, moonrakerJobId=%s, "
+            "startTime=%s, endTime=%s)",
             filename,
             print_job_id or "none",
             moonraker_job_id or "none",
+            self._last_completed_print_start_time,
+            self._last_completed_print_end_time,
         )
 
         event = Event(
@@ -1010,12 +1045,20 @@ class TelemetryOrchestrator:
             data["moonrakerJobId"] = moonraker_job_id
         if print_job_id:
             data["printJobId"] = print_job_id
+        # Include print timing for cloud-side time-window job matching
+        if self._last_completed_print_start_time is not None:
+            data["printStartTime"] = self._last_completed_print_start_time
+        if self._last_completed_print_end_time is not None:
+            data["printEndTime"] = self._last_completed_print_end_time
 
         LOGGER.info(
-            "Timelapse detected via polling: %s (printJobId=%s, moonrakerJobId=%s)",
+            "Timelapse detected via polling: %s (printJobId=%s, moonrakerJobId=%s, "
+            "startTime=%s, endTime=%s)",
             filename,
             print_job_id or "none",
             moonraker_job_id or "none",
+            self._last_completed_print_start_time,
+            self._last_completed_print_end_time,
         )
 
         event = Event(

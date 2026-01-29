@@ -1154,6 +1154,19 @@ class TelemetryPublisher:
                     exc,
                 )
 
+        # Also handle print completion events to fetch timing for timelapse correlation
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+
+            event_name = event.get("eventName")
+            # Handle completed, cancelled, and failed events
+            if event_name not in ("print:completed", "print:cancelled", "print:failed"):
+                continue
+
+            # Fetch job timing from history API for timelapse correlation
+            await self._fetch_and_set_job_timing_for_timelapse()
+
     async def _fetch_and_set_moonraker_job_id(
         self, event_data: Dict[str, Any]
     ) -> None:
@@ -1203,6 +1216,54 @@ class TelemetryPublisher:
         except Exception as exc:
             LOGGER.warning(
                 "Error fetching moonrakerJobId from history: %s",
+                exc,
+            )
+
+    async def _fetch_and_set_job_timing_for_timelapse(self) -> None:
+        """Fetch job timing from History API for timelapse correlation.
+
+        When a print completes (completed, cancelled, or failed), this method
+        fetches the job's start_time and end_time from Moonraker's history API.
+        These timestamps are stored in the orchestrator and included in the
+        timelapse:ready event for time-window based job matching on the cloud side.
+
+        This is critical for the timelapse upload refactor (ADR proposal):
+        - The timelapse:ready event includes printStartTime and printEndTime
+        - Cloud uses these for time-window matching when printJobId is unavailable
+        - Moonraker's history API provides exact timestamps for reliable correlation
+        """
+        timeout_seconds = self._thumbnail_fetch_timeout_ms / 1000.0
+        try:
+            job = await asyncio.wait_for(
+                self._moonraker.fetch_most_recent_job(),
+                timeout=timeout_seconds,
+            )
+            if job:
+                start_time = job.get("start_time")  # Unix timestamp
+                end_time = job.get("end_time")  # Unix timestamp
+                
+                # Set timing in orchestrator for timelapse event enrichment
+                self._orchestrator.set_completed_job_timing(start_time, end_time)
+                
+                LOGGER.info(
+                    "Fetched job timing for timelapse: start_time=%.2f, end_time=%.2f, "
+                    "filename=%s",
+                    start_time or 0,
+                    end_time or 0,
+                    job.get("filename"),
+                )
+            else:
+                LOGGER.debug(
+                    "No job found in history for print completion timing"
+                )
+        except asyncio.TimeoutError:
+            LOGGER.debug(
+                "Timeout fetching job timing from history (timeout=%.1fs)",
+                timeout_seconds,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Error fetching job timing from history: %s",
                 exc,
             )
 
