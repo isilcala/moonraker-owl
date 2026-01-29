@@ -337,13 +337,13 @@ class MetadataReporter:
             self._session = aiohttp.ClientSession(timeout=timeout)
             self._owns_session = True
 
-        # Build request payload
-        # hasTimelapse is determined by presence of timelapse component
-        has_timelapse = "timelapse" in metadata.get("components", {})
-
+        # Build request payload - server derives hasTimelapse from components.timelapse
+        # schemaVersion is required by the API validator
         payload = {
-            "metadata": metadata,
-            "hasTimelapse": has_timelapse,
+            "metadata": {
+                "schemaVersion": "1.0",
+                **metadata,
+            },
         }
 
         headers = {

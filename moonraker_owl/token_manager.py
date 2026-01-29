@@ -81,6 +81,16 @@ class TokenManager:
             raise RuntimeError("Token not initialized. Call start() first.")
         return self.device_id, self._current_token.jwt
 
+    def get_token(self) -> Optional[str]:
+        """Get current JWT token string, or None if not initialized.
+
+        This is a convenience method for components that need just the token,
+        such as the MetadataReporter for HTTP Bearer authentication.
+        """
+        if not self._current_token:
+            return None
+        return self._current_token.jwt
+
     async def issue_token(self) -> TokenCredentials:
         """Issue a new JWT token by signing current timestamp."""
         timestamp = int(datetime.now(timezone.utc).timestamp())

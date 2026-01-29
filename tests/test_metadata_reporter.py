@@ -428,8 +428,8 @@ class TestMetadataReporter:
             await reporter._upload_metadata(metadata)
 
     @pytest.mark.asyncio
-    async def test_upload_sets_has_timelapse_flag(self, reporter_config):
-        """Should set hasTimelapse based on timelapse component."""
+    async def test_upload_adds_schema_version(self, reporter_config):
+        """Should add schemaVersion to metadata payload."""
         reporter = MetadataReporter(
             config=reporter_config,
             token_provider=make_token_provider(),
@@ -452,17 +452,21 @@ class TestMetadataReporter:
 
             reporter._session = mock_session
 
-            # Test with timelapse
+            # Test with timelapse component
             await reporter._upload_metadata(metadata_with_timelapse)
             call_kwargs = mock_session.put.call_args
             payload = call_kwargs.kwargs.get("json", {})
-            assert payload["hasTimelapse"] is True
+            # schemaVersion should be added
+            assert payload["metadata"]["schemaVersion"] == "1.0"
+            # timelapse component should be preserved
+            assert payload["metadata"]["components"]["timelapse"]["enabled"] is True
 
             # Test without timelapse
             await reporter._upload_metadata(metadata_without_timelapse)
             call_kwargs = mock_session.put.call_args
             payload = call_kwargs.kwargs.get("json", {})
-            assert payload["hasTimelapse"] is False
+            # schemaVersion should always be present
+            assert payload["metadata"]["schemaVersion"] == "1.0"
 
     @pytest.mark.asyncio
     async def test_start_stop_lifecycle(self, reporter_config):
