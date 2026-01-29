@@ -19,6 +19,7 @@ from moonraker_owl.config import (
     CommandConfig,
     CompressionConfig,
     LoggingConfig,
+    MetadataConfig,
     MoonrakerConfig,
     OwlConfig,
     ResilienceConfig,
@@ -162,6 +163,7 @@ def build_config(
         resilience=ResilienceConfig(),
         compression=CompressionConfig(),
         camera=CameraConfig(),
+        metadata=MetadataConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -1332,6 +1334,7 @@ def test_telemetry_configuration_requires_device_id():
         resilience=ResilienceConfig(),
         compression=CompressionConfig(),
         camera=CameraConfig(),
+        metadata=MetadataConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -1358,6 +1361,7 @@ def test_telemetry_configuration_requires_device_id_v2():
         resilience=ResilienceConfig(),
         compression=CompressionConfig(),
         camera=CameraConfig(),
+        metadata=MetadataConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )

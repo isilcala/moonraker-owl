@@ -20,6 +20,7 @@ from moonraker_owl.config import (
     CommandConfig,
     CompressionConfig,
     LoggingConfig,
+    MetadataConfig,
     MoonrakerConfig,
     OwlConfig,
     ResilienceConfig,
@@ -211,6 +212,7 @@ def config() -> OwlConfig:
         resilience=ResilienceConfig(),
         compression=CompressionConfig(),
         camera=CameraConfig(),
+        metadata=MetadataConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
@@ -694,6 +696,7 @@ def test_command_processor_requires_device_id():
         resilience=ResilienceConfig(),
         compression=CompressionConfig(),
         camera=CameraConfig(),
+        metadata=MetadataConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )

@@ -128,6 +128,26 @@ class CompressionConfig:
 
 
 @dataclass(slots=True)
+class MetadataConfig:
+    """Configuration for device metadata reporting (ADR-0032)."""
+
+    enabled: bool = True
+    """Whether metadata reporting is enabled."""
+
+    refresh_interval_hours: float = 24.0
+    """Interval between metadata reports in hours."""
+
+    initial_retry_delay_seconds: float = 30.0
+    """Initial delay before retrying a failed report."""
+
+    max_retry_delay_seconds: float = 600.0
+    """Maximum delay between retry attempts (10 minutes)."""
+
+    request_timeout_seconds: float = 30.0
+    """Timeout for metadata upload requests."""
+
+
+@dataclass(slots=True)
 class CameraConfig:
     """Configuration for camera capture functionality."""
 
@@ -167,6 +187,7 @@ class OwlConfig:
     resilience: ResilienceConfig
     compression: CompressionConfig
     camera: CameraConfig
+    metadata: MetadataConfig
     raw: ConfigParser
     path: Path
 
@@ -249,6 +270,13 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "preprocess_enabled": "true",
                 "preprocess_target_width": "800",
                 "preprocess_jpeg_quality": "85",
+            },
+            "metadata": {
+                "enabled": "true",
+                "refresh_interval_hours": "24.0",
+                "initial_retry_delay_seconds": "30.0",
+                "max_retry_delay_seconds": "600.0",
+                "request_timeout_seconds": "30.0",
             },
         }
     )
@@ -456,6 +484,32 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         ),
     )
 
+    # Metadata config
+    metadata_defaults = MetadataConfig()
+    metadata = MetadataConfig(
+        enabled=parser.getboolean(
+            "metadata", "enabled", fallback=metadata_defaults.enabled
+        ),
+        refresh_interval_hours=parser.getfloat(
+            "metadata", "refresh_interval_hours", fallback=metadata_defaults.refresh_interval_hours
+        ),
+        initial_retry_delay_seconds=parser.getfloat(
+            "metadata",
+            "initial_retry_delay_seconds",
+            fallback=metadata_defaults.initial_retry_delay_seconds,
+        ),
+        max_retry_delay_seconds=parser.getfloat(
+            "metadata",
+            "max_retry_delay_seconds",
+            fallback=metadata_defaults.max_retry_delay_seconds,
+        ),
+        request_timeout_seconds=parser.getfloat(
+            "metadata",
+            "request_timeout_seconds",
+            fallback=metadata_defaults.request_timeout_seconds,
+        ),
+    )
+
     return OwlConfig(
         cloud=cloud,
         moonraker=moonraker,
@@ -466,6 +520,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         resilience=resilience,
         compression=compression,
         camera=camera,
+        metadata=metadata,
         raw=parser,
         path=config_path,
     )

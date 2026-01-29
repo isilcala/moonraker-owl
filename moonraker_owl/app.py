@@ -20,6 +20,7 @@ from .core import PrinterBackend, PrinterHealthAssessment
 from .core.job_registry import PrintJobRegistry
 from .health import HealthReporter, HealthServer
 from .logging import configure_logging
+from .metadata import MetadataReporter, MetadataReporterConfig
 from .telemetry import (
     TelemetryConfigurationError,
     TelemetryPublisher,
@@ -108,6 +109,8 @@ class MoonrakerOwlApp:
         self._last_reconnect_reason: Optional[ReconnectReason] = None
         # Shared registry for PrintJob ID mapping (populated by job:registered commands)
         self._job_registry = PrintJobRegistry()
+        # Metadata reporter for device capability reporting (ADR-0032)
+        self._metadata_reporter: Optional[MetadataReporter] = None
 
     @property
     def _moonraker_client(self) -> Any:
@@ -325,6 +328,9 @@ class MoonrakerOwlApp:
                 self._token_manager = None
             return False
 
+        # Start MetadataReporter (ADR-0032) - non-blocking, fire-and-forget
+        await self._start_metadata_reporter(device_id)
+
         self._mqtt_client = MQTTClient(
             self._config.cloud, client_id=client_id, token_manager=self._token_manager
         )
@@ -405,6 +411,58 @@ class MoonrakerOwlApp:
         else:
             self._health_server = server
             await self._health.update("health-endpoint", True, None)
+
+    async def _start_metadata_reporter(self, device_id: str) -> None:
+        """Start the MetadataReporter for device capability reporting.
+
+        This is a non-blocking operation. The reporter runs in the background
+        and does not block MQTT connection or telemetry startup.
+        """
+        metadata_config = self._config.metadata
+        if not metadata_config.enabled:
+            LOGGER.info("Metadata reporting disabled by configuration")
+            return
+
+        if self._token_manager is None:
+            LOGGER.warning("Cannot start MetadataReporter: TokenManager not available")
+            return
+
+        reporter_config = MetadataReporterConfig(
+            api_base_url=self._config.cloud.base_url,
+            moonraker_url=self._config.moonraker.url,
+            device_id=device_id,
+            refresh_interval_seconds=metadata_config.refresh_interval_hours * 3600,
+            initial_retry_delay=metadata_config.initial_retry_delay_seconds,
+            max_retry_delay=metadata_config.max_retry_delay_seconds,
+            request_timeout=metadata_config.request_timeout_seconds,
+        )
+
+        self._metadata_reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=self._token_manager.get_token,
+        )
+
+        try:
+            await self._metadata_reporter.start()
+            LOGGER.info("MetadataReporter started (non-blocking)")
+        except Exception as exc:
+            LOGGER.warning("Failed to start MetadataReporter: %s", exc)
+            # Don't fail startup - metadata reporting is optional
+            if self._metadata_reporter is not None:
+                await self._metadata_reporter.stop()
+                self._metadata_reporter = None
+
+    async def _stop_metadata_reporter(self) -> None:
+        """Stop the MetadataReporter and clean up resources."""
+        if self._metadata_reporter is None:
+            return
+
+        try:
+            await self._metadata_reporter.stop()
+        except Exception as exc:
+            LOGGER.warning("Error stopping MetadataReporter: %s", exc)
+        finally:
+            self._metadata_reporter = None
 
     def _start_moonraker_monitor(self) -> None:
         if (
@@ -947,6 +1005,7 @@ class MoonrakerOwlApp:
         await self._stop_moonraker_monitor()
         await self._deactivate_components("shutdown", preserve_instances=False)
         await self._stop_health_server()
+        await self._stop_metadata_reporter()
 
         if self._printer_backend is not None:
             await self._printer_backend.stop()

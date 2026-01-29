@@ -18,6 +18,7 @@ from moonraker_owl.config import (
     CommandConfig,
     CompressionConfig,
     LoggingConfig,
+    MetadataConfig,
     MoonrakerConfig,
     OwlConfig,
     ResilienceConfig,
@@ -49,6 +50,7 @@ def _build_config(*, breaker_threshold: int = 2) -> OwlConfig:
         resilience=ResilienceConfig(moonraker_breaker_threshold=breaker_threshold),
         compression=CompressionConfig(),
         camera=CameraConfig(),
+        metadata=MetadataConfig(),
         raw=parser,
         path=Path("moonraker-owl.cfg"),
     )
