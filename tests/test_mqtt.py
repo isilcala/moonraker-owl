@@ -376,3 +376,128 @@ async def test_connect_failure_raises(monkeypatch):
 
     with pytest.raises(MQTTConnectionError):
         await client.connect()
+
+
+# -------------------------------------------------------------------------
+# MQTT v5 Auth Failure Tests (rc=134, rc=135)
+# -------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_failure_rc", [5, 134, 135])
+async def test_connect_retries_on_auth_failure_with_token_refresh(monkeypatch, auth_failure_rc):
+    """Test that auth failure (rc=5, 134, 135) triggers token refresh and retry."""
+    from unittest.mock import Mock, AsyncMock
+    
+    loop = asyncio.get_running_loop()
+    events: dict = {}
+    attempt_counter = {"count": 0}
+
+    def factory(*args, **kwargs):
+        """Factory that fails on first attempt, succeeds on second."""
+        client = FakeMqttClient(loop, events, *args, **kwargs)
+        original_connect_async = client.connect_async
+        
+        def patched_connect_async(host, port, keepalive, **kw):
+            attempt_counter["count"] += 1
+            if attempt_counter["count"] == 1:
+                # First attempt fails with auth error
+                events["connect_args"] = (host, port, keepalive)
+                events["connect_kwargs"] = dict(kw)
+                if client.on_connect:
+                    loop.call_soon(
+                        client.on_connect,
+                        client,
+                        None,
+                        None,
+                        auth_failure_rc,
+                        None,
+                    )
+            else:
+                # Second attempt succeeds
+                original_connect_async(host, port, keepalive, **kw)
+        
+        client.connect_async = patched_connect_async
+        return client
+
+    monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
+
+    config = CloudConfig(
+        base_url="https://api.owl.dev",
+        broker_host="broker.owl.dev",
+        broker_port=1883,
+    )
+
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+    token_manager.refresh_token_now = AsyncMock()
+
+    client = MQTTClient(config, client_id="printer-auth-test", token_manager=token_manager)
+
+    # Should succeed after retry
+    await client.connect()
+
+    # Verify token was refreshed after first failure
+    token_manager.refresh_token_now.assert_called_once()
+    # Verify two connection attempts were made
+    assert attempt_counter["count"] == 2
+    await client.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_failure_rc", [134, 135])
+async def test_mqttv5_auth_failure_raises_when_no_token_manager(monkeypatch, auth_failure_rc):
+    """Test that MQTT v5 auth failures (rc=134, 135) raise error when no TokenManager."""
+    loop = asyncio.get_running_loop()
+    events: dict = {}
+
+    def factory(*args, **kwargs):
+        return FakeMqttClient(loop, events, rc_connect=auth_failure_rc, *args, **kwargs)
+
+    monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
+
+    config = CloudConfig(
+        base_url="https://api.owl.dev",
+        broker_host="broker.owl.dev",
+        broker_port=1883,
+    )
+
+    # No token manager means JWT auth check fails first
+    client = MQTTClient(config, client_id="printer-no-token")
+
+    with pytest.raises(MQTTConnectionError):
+        await client.connect()
+
+
+@pytest.mark.asyncio
+async def test_mqttv5_bad_password_rc134_triggers_auth_failure(monkeypatch):
+    """Test specifically that rc=134 (Bad user name or password) is handled as auth failure."""
+    from unittest.mock import Mock, AsyncMock
+    
+    loop = asyncio.get_running_loop()
+    events: dict = {}
+
+    # Always fail with rc=134
+    def factory(*args, **kwargs):
+        return FakeMqttClient(loop, events, rc_connect=134, *args, **kwargs)
+
+    monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
+
+    config = CloudConfig(
+        base_url="https://api.owl.dev",
+        broker_host="broker.owl.dev",
+        broker_port=1883,
+    )
+
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+    token_manager.refresh_token_now = AsyncMock()
+
+    client = MQTTClient(config, client_id="printer-rc134", token_manager=token_manager)
+
+    # Connection should fail after 2 attempts (initial + 1 retry)
+    with pytest.raises(MQTTConnectionError, match="rejected connection"):
+        await client.connect()
+
+    # Token refresh should have been attempted once (after first failure)
+    token_manager.refresh_token_now.assert_called_once()

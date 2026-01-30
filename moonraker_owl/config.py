@@ -94,6 +94,9 @@ class LoggingConfig:
     level: str = "INFO"
     path: Optional[Path] = constants.DEFAULT_LOG_PATH
     log_network: bool = False
+    # Log rotation settings (RotatingFileHandler)
+    max_bytes: int = 10 * 1024 * 1024  # 10 MB per file
+    backup_count: int = 3  # Keep 3 backup files (~40 MB total max)
 
 
 @dataclass(slots=True)
@@ -243,6 +246,9 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "level": "INFO",
                 "path": str(constants.DEFAULT_LOG_PATH),
                 "log_network": "false",
+                # Log rotation: 10MB per file, keep 3 backups (~40MB total)
+                "max_bytes": "10485760",
+                "backup_count": "3",
             },
             "resilience": {
                 "reconnect_initial_seconds": "1.0",
@@ -394,12 +400,19 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         ),
     )
 
+    logging_defaults = LoggingConfig()
     logging_config = LoggingConfig(
         level=parser.get("logging", "level", fallback="INFO"),
         path=Path(
             parser.get("logging", "path", fallback=str(constants.DEFAULT_LOG_PATH))
         ).expanduser(),
         log_network=parser.getboolean("logging", "log_network", fallback=False),
+        max_bytes=parser.getint(
+            "logging", "max_bytes", fallback=logging_defaults.max_bytes
+        ),
+        backup_count=parser.getint(
+            "logging", "backup_count", fallback=logging_defaults.backup_count
+        ),
     )
 
     resilience = ResilienceConfig(

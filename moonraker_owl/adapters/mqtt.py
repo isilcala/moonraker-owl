@@ -61,8 +61,9 @@ class MQTTClient:
     ) -> None:
         """Connect to the MQTT broker and wait for acknowledgement.
         
-        If JWT authentication fails (CONNACK code 5) and TokenManager is available,
-        automatically refreshes the token and retries connection (max 2 attempts).
+        If JWT authentication fails (CONNACK code 5, 134, or 135) and TokenManager
+        is available, automatically refreshes the token and retries connection
+        (max 2 attempts).
         """
         max_attempts = 2 if self.token_manager else 1
         
@@ -76,10 +77,14 @@ class MQTTClient:
                 )
                 return  # Connection successful
             except MQTTConnectionError as exc:
-                # Check if this is an authentication failure (CONNACK code 5)
-                if self._last_connect_rc == 5 and self.token_manager and attempt < max_attempts:
+                # Check if this is an authentication failure
+                # MQTT v3.1.1: rc=5 = Not authorized
+                # MQTT v5: rc=134 = Bad user name or password, rc=135 = Not authorized
+                auth_failure_codes = (5, 134, 135)
+                if self._last_connect_rc in auth_failure_codes and self.token_manager and attempt < max_attempts:
                     LOGGER.warning(
-                        "MQTT authentication failed (CONNACK 5), refreshing JWT token and retrying (attempt %d/%d)",
+                        "MQTT authentication failed (rc=%d), refreshing JWT token and retrying (attempt %d/%d)",
+                        self._last_connect_rc,
                         attempt,
                         max_attempts,
                     )

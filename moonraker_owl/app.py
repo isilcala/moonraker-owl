@@ -274,6 +274,8 @@ class MoonrakerOwlApp:
             instance._config.logging.level,
             log_path=instance._config.logging.path,
             log_network=instance._config.logging.log_network,
+            max_bytes=instance._config.logging.max_bytes,
+            backup_count=instance._config.logging.backup_count,
         )
         try:
             asyncio.run(instance.run())
@@ -967,7 +969,9 @@ class MoonrakerOwlApp:
         # Request reconnection via coordinator
         if self._connection_coordinator is not None:
             # Determine reconnect reason based on disconnect code
-            if rc == 5:  # CONNACK code 5 = Not authorized
+            # MQTT v3.1.1: rc=5 = Not authorized
+            # MQTT v5: rc=134 = Bad user name or password, rc=135 = Not authorized
+            if rc in (5, 134, 135):
                 reason = ReconnectReason.AUTH_FAILURE
             else:
                 reason = ReconnectReason.CONNECTION_LOST
