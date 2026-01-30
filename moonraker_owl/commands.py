@@ -1444,12 +1444,25 @@ class CommandProcessor:
         if video_filename.endswith(".webm"):
             video_content_type = "video/webm"
 
+        # Calculate upload timeout based on file size
+        # Conservative estimate for cross-region uploads: minimum 120s, 5s per MB + buffer
+        # 9.1MB video → max(120, 9.1*5+30) = max(120, 75.5) = 120s
+        # 50MB video → max(120, 50*5+30) = max(120, 280) = 280s
+        video_size_mb = len(video_data) / (1024 * 1024)
+        video_upload_timeout = max(120.0, video_size_mb * 5 + 30)  # 5s per MB + 30s buffer
+        LOGGER.info(
+            "Uploading timelapse video: %.2f MB, timeout %.0fs",
+            video_size_mb,
+            video_upload_timeout,
+        )
+
         # Upload video to S3
         video_result = await self._s3_upload.upload(
             presigned_url=video_upload_url,
             data=video_data,
             s3_key=video_key,
             content_type=video_content_type,
+            timeout_override=video_upload_timeout,
         )
 
         if video_result.success:

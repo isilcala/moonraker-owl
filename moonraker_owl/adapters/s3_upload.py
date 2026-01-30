@@ -98,6 +98,7 @@ class S3UploadClient:
         data: bytes,
         s3_key: str,
         content_type: str = "image/png",
+        timeout_override: Optional[float] = None,
     ) -> UploadResult:
         """Upload data to S3 using a presigned PUT URL.
 
@@ -106,12 +107,15 @@ class S3UploadClient:
             data: Raw bytes to upload.
             s3_key: The S3 key (for result tracking, not used in upload).
             content_type: MIME type of the content.
+            timeout_override: Optional timeout override for this specific upload.
+                Use this for large files like timelapse videos that need more time.
 
         Returns:
             UploadResult with success status and metadata.
         """
         session = await self._ensure_session()
         file_size = len(data)
+        effective_timeout = timeout_override if timeout_override is not None else self._timeout
 
         headers = {
             "Content-Type": content_type,
@@ -122,7 +126,7 @@ class S3UploadClient:
 
         for attempt in range(self._max_retries):
             try:
-                async with asyncio.timeout(self._timeout):
+                async with asyncio.timeout(effective_timeout):
                     async with session.put(
                         presigned_url,
                         data=data,
@@ -172,7 +176,7 @@ class S3UploadClient:
                 LOGGER.warning(
                     "S3 upload attempt %d timed out after %.1fs",
                     attempt + 1,
-                    self._timeout,
+                    effective_timeout,
                 )
             except aiohttp.ClientError as exc:
                 last_error = exc
