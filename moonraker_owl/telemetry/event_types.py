@@ -253,7 +253,7 @@ class Event:
             "eventName": self.event_name.value,
             "severity": self.severity.value,
             "message": self.message,
-            "occurredAtUtc": self.occurred_at.isoformat().replace("+00:00", "Z"),
+            "occurredAt": self.occurred_at.isoformat().replace("+00:00", "Z"),
         }
         if self.session_id:
             result["sessionId"] = self.session_id

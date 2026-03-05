@@ -1,0 +1,16 @@
+{
+    "$v": 1,
+    "$type": "command.request",
+    "$id": "44444444-4444-7444-8444-444444444444",
+    "$ts": "2025-01-15T10:34:00+00:00",
+    "$origin": "cloud-service@1.0",
+    "deviceId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+    "payload": {
+        "command": "job:registered",
+        "parameters": {
+            "moonrakerJobId": "000456",
+            "printJobId": "pj-001",
+            "fileName": "benchy.gcode"
+        }
+    }
+}

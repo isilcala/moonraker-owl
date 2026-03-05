@@ -34,6 +34,7 @@ class FakeMoonraker:
         self.actions: list[str] = []
         self.gcode_scripts: list[str] = []
         self.emergency_stops: list[bool] = []
+        self.firmware_restarts: list[bool] = []
         self.started_prints: list[str] = []
         self.available_heaters: dict[str, list[str]] = {
             "available_heaters": ["extruder", "heater_bed"],
@@ -57,6 +58,10 @@ class FakeMoonraker:
     async def emergency_stop(self) -> None:
         """Execute emergency stop (fake implementation for testing)."""
         self.emergency_stops.append(True)
+
+    async def firmware_restart(self) -> None:
+        """Execute firmware restart (fake implementation for testing)."""
+        self.firmware_restarts.append(True)
 
     async def start_print(self, filename: str) -> None:
         """Start printing a file (fake implementation for testing)."""
@@ -232,9 +237,10 @@ async def test_command_processor_executes_action_and_sends_ack(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-1",
-        "command": "print:pause",
-        "payload": {},
+        "$id": "cmd-1",
+        "payload": {
+            "command": "print:pause",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
@@ -248,12 +254,13 @@ async def test_command_processor_executes_action_and_sends_ack(config):
     topic, payload, qos, retain = mqtt.published[0]
     accepted = json.loads(payload.decode("utf-8"))
     assert topic == "owl/printers/device-123/acks/print%3Apause"
-    assert accepted["status"] == "accepted"
-    assert accepted["commandId"] == "cmd-1"
-    assert accepted["stage"] == "dispatch"
-    assert "reason" not in accepted
-    assert "timestamps" in accepted
-    assert "acknowledgedAt" in accepted["timestamps"]
+    assert accepted["$v"] == 1
+    assert accepted["$type"] == "command.ack"
+    assert accepted["payload"]["status"] == "accepted"
+    assert accepted["payload"]["commandId"] == "cmd-1"
+    assert accepted["payload"]["stage"] == "dispatch"
+    assert "reason" not in accepted["payload"]
+    assert "$ts" in accepted
     assert qos == 1
     assert retain is False
 
@@ -269,12 +276,11 @@ async def test_command_processor_executes_action_and_sends_ack(config):
     topic, payload, qos, retain = mqtt.published[1]
     completed = json.loads(payload.decode("utf-8"))
     assert topic == "owl/printers/device-123/acks/print%3Apause"
-    assert completed["status"] == "completed"
-    assert completed["stage"] == "execution"
-    assert completed["commandId"] == "cmd-1"
-    assert "reason" not in completed
-    assert "timestamps" in completed
-    assert "acknowledgedAt" in completed["timestamps"]
+    assert completed["payload"]["status"] == "completed"
+    assert completed["payload"]["stage"] == "execution"
+    assert completed["payload"]["commandId"] == "cmd-1"
+    assert "reason" not in completed["payload"]
+    assert "$ts" in completed
     assert qos == 1
     assert retain is False
 
@@ -291,8 +297,10 @@ async def test_command_processor_handles_unknown_action(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-2",
-        "command": "scrub",
+        "$id": "cmd-2",
+        "payload": {
+            "command": "scrub",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/scrub", message)
@@ -300,15 +308,15 @@ async def test_command_processor_handles_unknown_action(config):
     assert len(mqtt.published) == 2
 
     accepted = json.loads(mqtt.published[0][1].decode("utf-8"))
-    assert accepted["status"] == "accepted"
-    assert accepted["stage"] == "dispatch"
-    assert accepted["correlation"]["tenantId"] == "tenant-99"
+    assert accepted["payload"]["status"] == "accepted"
+    assert accepted["payload"]["stage"] == "dispatch"
+    assert accepted["payload"]["correlation"]["tenantId"] == "tenant-99"
     assert mqtt.published[0][2] == 1
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["stage"] == "execution"
-    assert failed["reason"]["code"] == "unsupported_command"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["stage"] == "execution"
+    assert failed["payload"]["reason"]["code"] == "unsupported_command"
     assert mqtt.published[1][2] == 1
     assert not moonraker.actions
 
@@ -332,9 +340,9 @@ async def test_command_processor_rejects_invalid_payload(config):
 
     assert len(mqtt.published) == 1
     payload = json.loads(mqtt.published[0][1].decode("utf-8"))
-    assert payload["status"] == "failed"
-    assert payload.get("reason", {}).get("code") == "invalid_json"
-    assert payload["stage"] == "dispatch"
+    assert payload["payload"]["status"] == "failed"
+    assert payload["payload"].get("reason", {}).get("code") == "invalid_json"
+    assert payload["payload"]["stage"] == "dispatch"
 
     await processor.stop()
 
@@ -348,18 +356,20 @@ async def test_command_processor_rejects_invalid_parameters(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-3",
-        "command": "print:pause",
-        "parameters": "not-an-object",
+        "$id": "cmd-3",
+        "payload": {
+            "command": "print:pause",
+            "parameters": "not-an-object",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
 
     assert len(mqtt.published) == 1
     payload = json.loads(mqtt.published[0][1].decode("utf-8"))
-    assert payload["status"] == "failed"
-    assert payload["stage"] == "dispatch"
-    assert payload.get("reason", {}).get("code") == "invalid_parameters"
+    assert payload["payload"]["status"] == "failed"
+    assert payload["payload"]["stage"] == "dispatch"
+    assert payload["payload"].get("reason", {}).get("code") == "invalid_parameters"
 
     await processor.stop()
 
@@ -381,10 +391,10 @@ async def test_command_processor_abandons_inflight_on_stop(config):
     topic, payload, qos, retain = mqtt.published[0]
     abandoned = json.loads(payload.decode("utf-8"))
     assert topic == "owl/printers/device-123/acks/print%3Apause"
-    assert abandoned["status"] == "failed"
-    assert abandoned["stage"] == "execution"
-    assert abandoned["reason"]["code"] == "agent_restart"
-    assert "reconnecting" in abandoned["reason"]["message"]
+    assert abandoned["payload"]["status"] == "failed"
+    assert abandoned["payload"]["stage"] == "execution"
+    assert abandoned["payload"]["reason"]["code"] == "agent_restart"
+    assert "reconnecting" in abandoned["payload"]["reason"]["message"]
     assert qos == 1
     assert retain is False
 
@@ -405,9 +415,10 @@ async def test_command_processor_replays_cached_ack_for_duplicate(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-dup",
-        "command": "print:pause",
-        "payload": {},
+        "$id": "cmd-dup",
+        "payload": {
+            "command": "print:pause",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
@@ -430,9 +441,9 @@ async def test_command_processor_replays_cached_ack_for_duplicate(config):
     topic, payload, qos, retain = mqtt.published[-1]
     replay = json.loads(payload.decode("utf-8"))
     assert topic == "owl/printers/device-123/acks/print%3Apause"
-    assert replay["status"] == "completed"
-    assert replay["stage"] == "execution"
-    assert replay["commandId"] == "cmd-dup"
+    assert replay["payload"]["status"] == "completed"
+    assert replay["payload"]["stage"] == "execution"
+    assert replay["payload"]["commandId"] == "cmd-dup"
     assert qos == 1
     assert retain is False
     assert moonraker.actions == ["pause"]
@@ -455,13 +466,15 @@ async def test_command_processor_handles_sensors_set_rate(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-sensors",
-        "command": "control:set-telemetry-rate",
-        "parameters": {
-            "mode": "watch",
-            "maxHz": 5.0,
-            "durationSeconds": 120,
-            "issuedAt": "2025-01-01T12:00:00Z",
+        "$id": "cmd-sensors",
+        "payload": {
+            "command": "control:set-telemetry-rate",
+            "parameters": {
+                "mode": "watch",
+                "maxHz": 5.0,
+                "durationSeconds": 120,
+                "issuedAt": "2025-01-01T12:00:00Z",
+            },
         },
     }
 
@@ -486,20 +499,20 @@ async def test_command_processor_handles_sensors_set_rate(config):
     assert details["mode"] == "watch"
     assert details["maxHz"] == 5.0
     assert details["durationSeconds"] == 120
-    assert details["watchWindowExpiresUtc"] == "2025-01-01T13:00:00+00:00"
+    assert details["watchWindowExpires"] == "2025-01-01T13:00:00+00:00"
 
     assert len(mqtt.published) == 2
     first_topic, first_payload, _, _ = mqtt.published[0]
     assert first_topic == "owl/printers/device-123/acks/control%3Aset-telemetry-rate"
     first_ack = json.loads(first_payload.decode("utf-8"))
-    assert first_ack["status"] == "accepted"
-    assert first_ack["stage"] == "dispatch"
+    assert first_ack["payload"]["status"] == "accepted"
+    assert first_ack["payload"]["stage"] == "dispatch"
 
     second_topic, second_payload, _, _ = mqtt.published[1]
     assert second_topic == "owl/printers/device-123/acks/control%3Aset-telemetry-rate"
     second_ack = json.loads(second_payload.decode("utf-8"))
-    assert second_ack["status"] == "completed"
-    assert second_ack["stage"] == "execution"
+    assert second_ack["payload"]["status"] == "completed"
+    assert second_ack["payload"]["stage"] == "execution"
 
     await processor.stop()
 
@@ -521,13 +534,15 @@ async def test_sensors_set_rate_deduplication_extends_watch_window(config):
 
     # First command: sets watch mode at 1 Hz
     first_message = {
-        "commandId": "cmd-1",
-        "command": "control:set-telemetry-rate",
-        "parameters": {
-            "mode": "watch",
-            "maxHz": 1.0,
-            "durationSeconds": 120,
-            "issuedAt": "2025-01-01T12:00:00Z",
+        "$id": "cmd-1",
+        "payload": {
+            "command": "control:set-telemetry-rate",
+            "parameters": {
+                "mode": "watch",
+                "maxHz": 1.0,
+                "durationSeconds": 120,
+                "issuedAt": "2025-01-01T12:00:00Z",
+            },
         },
     }
     await mqtt.emit("owl/printers/device-123/commands/control:set-telemetry-rate", first_message)
@@ -537,13 +552,15 @@ async def test_sensors_set_rate_deduplication_extends_watch_window(config):
 
     # Second command: same mode and interval, should extend only
     second_message = {
-        "commandId": "cmd-2",
-        "command": "control:set-telemetry-rate",
-        "parameters": {
-            "mode": "watch",
-            "maxHz": 1.0,
-            "durationSeconds": 120,
-            "issuedAt": "2025-01-01T12:01:00Z",
+        "$id": "cmd-2",
+        "payload": {
+            "command": "control:set-telemetry-rate",
+            "parameters": {
+                "mode": "watch",
+                "maxHz": 1.0,
+                "durationSeconds": 120,
+                "issuedAt": "2025-01-01T12:01:00Z",
+            },
         },
     }
     await mqtt.emit("owl/printers/device-123/commands/control:set-telemetry-rate", second_message)
@@ -576,9 +593,11 @@ async def test_sensors_set_rate_different_mode_triggers_full_apply(config):
     await mqtt.emit(
         "owl/printers/device-123/commands/control:set-telemetry-rate",
         {
-            "commandId": "cmd-1",
-            "command": "control:set-telemetry-rate",
-            "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
+            "$id": "cmd-1",
+            "payload": {
+                "command": "control:set-telemetry-rate",
+                "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
+            },
         },
     )
     assert len(telemetry.applied) == 1
@@ -587,9 +606,11 @@ async def test_sensors_set_rate_different_mode_triggers_full_apply(config):
     await mqtt.emit(
         "owl/printers/device-123/commands/control:set-telemetry-rate",
         {
-            "commandId": "cmd-2",
-            "command": "control:set-telemetry-rate",
-            "parameters": {"mode": "idle", "maxHz": 0.033},
+            "$id": "cmd-2",
+            "payload": {
+                "command": "control:set-telemetry-rate",
+                "parameters": {"mode": "idle", "maxHz": 0.033},
+            },
         },
     )
     assert len(telemetry.applied) == 2
@@ -616,9 +637,11 @@ async def test_sensors_set_rate_different_hz_triggers_full_apply(config):
     await mqtt.emit(
         "owl/printers/device-123/commands/control:set-telemetry-rate",
         {
-            "commandId": "cmd-1",
-            "command": "control:set-telemetry-rate",
-            "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
+            "$id": "cmd-1",
+            "payload": {
+                "command": "control:set-telemetry-rate",
+                "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
+            },
         },
     )
     assert len(telemetry.applied) == 1
@@ -627,9 +650,11 @@ async def test_sensors_set_rate_different_hz_triggers_full_apply(config):
     await mqtt.emit(
         "owl/printers/device-123/commands/control:set-telemetry-rate",
         {
-            "commandId": "cmd-2",
-            "command": "control:set-telemetry-rate",
-            "parameters": {"mode": "watch", "maxHz": 2.0, "durationSeconds": 120},
+            "$id": "cmd-2",
+            "payload": {
+                "command": "control:set-telemetry-rate",
+                "parameters": {"mode": "watch", "maxHz": 2.0, "durationSeconds": 120},
+            },
         },
     )
     assert len(telemetry.applied) == 2
@@ -656,15 +681,17 @@ async def test_sensors_set_rate_clock_skew_correction(config):
     # Server says it's 12:00:00, but our local clock says 12:00:10
     # So when server says "expires in 120s from now", we should adjust
     message = {
-        "commandId": "cmd-clock",
-        "command": "control:set-telemetry-rate",
-        "parameters": {
-            "mode": "watch",
-            "maxHz": 1.0,
-            "durationSeconds": 120,
-            "serverUtcNow": "2025-01-01T12:00:00Z",
-            # issuedAt is also from server's perspective
-            "issuedAt": "2025-01-01T12:00:00Z",
+        "$id": "cmd-clock",
+        "payload": {
+            "command": "control:set-telemetry-rate",
+            "parameters": {
+                "mode": "watch",
+                "maxHz": 1.0,
+                "durationSeconds": 120,
+                "serverUtcNow": "2025-01-01T12:00:00Z",
+                # issuedAt is also from server's perspective
+                "issuedAt": "2025-01-01T12:00:00Z",
+            },
         },
     }
 
@@ -720,9 +747,10 @@ async def test_state_based_completion_resume_command(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-resume",
-        "command": "print:resume",
-        "payload": {},
+        "$id": "cmd-resume",
+        "payload": {
+            "command": "print:resume",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/print:resume", message)
@@ -730,7 +758,7 @@ async def test_state_based_completion_resume_command(config):
     # Only accepted ack sent initially
     assert len(mqtt.published) == 1
     accepted = json.loads(mqtt.published[0][1].decode("utf-8"))
-    assert accepted["status"] == "accepted"
+    assert accepted["payload"]["status"] == "accepted"
 
     # State change to 'printing' triggers completion
     processor.on_print_state_changed("printing")
@@ -738,8 +766,8 @@ async def test_state_based_completion_resume_command(config):
 
     assert len(mqtt.published) == 2
     completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert completed["status"] == "completed"
-    assert completed["commandId"] == "cmd-resume"
+    assert completed["payload"]["status"] == "completed"
+    assert completed["payload"]["commandId"] == "cmd-resume"
 
     await processor.stop()
 
@@ -754,9 +782,10 @@ async def test_state_based_completion_cancel_command(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-cancel",
-        "command": "print:cancel",
-        "payload": {},
+        "$id": "cmd-cancel",
+        "payload": {
+            "command": "print:cancel",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/print:cancel", message)
@@ -770,8 +799,8 @@ async def test_state_based_completion_cancel_command(config):
 
     assert len(mqtt.published) == 2
     completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert completed["status"] == "completed"
-    assert completed["commandId"] == "cmd-cancel"
+    assert completed["payload"]["status"] == "completed"
+    assert completed["payload"]["commandId"] == "cmd-cancel"
 
     await processor.stop()
 
@@ -788,9 +817,10 @@ async def test_print_control_commands_trigger_state_query(config):
 
     # Test pause command
     message = {
-        "commandId": "cmd-pause",
-        "command": "print:pause",
-        "payload": {},
+        "$id": "cmd-pause",
+        "payload": {
+            "command": "print:pause",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
@@ -801,9 +831,10 @@ async def test_print_control_commands_trigger_state_query(config):
 
     # Test resume command
     message = {
-        "commandId": "cmd-resume",
-        "command": "print:resume",
-        "payload": {},
+        "$id": "cmd-resume",
+        "payload": {
+            "command": "print:resume",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/print:resume", message)
@@ -813,9 +844,10 @@ async def test_print_control_commands_trigger_state_query(config):
 
     # Test cancel command
     message = {
-        "commandId": "cmd-cancel",
-        "command": "print:cancel",
-        "payload": {},
+        "$id": "cmd-cancel",
+        "payload": {
+            "command": "print:cancel",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/print:cancel", message)
@@ -836,9 +868,10 @@ async def test_state_change_wrong_state_does_not_complete(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-pause",
-        "command": "print:pause",
-        "payload": {},
+        "$id": "cmd-pause",
+        "payload": {
+            "command": "print:pause",
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
@@ -872,12 +905,12 @@ async def test_pending_command_count(config):
     assert processor.pending_state_count == 0
 
     # Send pause command - should be pending
-    message = {"commandId": "cmd-1", "command": "print:pause", "payload": {}}
+    message = {"$id": "cmd-1", "payload": {"command": "print:pause"}}
     await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
     assert processor.pending_state_count == 1
 
     # Send another pause command - should also be pending
-    message2 = {"commandId": "cmd-2", "command": "print:resume", "payload": {}}
+    message2 = {"$id": "cmd-2", "payload": {"command": "print:resume"}}
     await mqtt.emit("owl/printers/device-123/commands/print:resume", message2)
     assert processor.pending_state_count == 2
 
@@ -898,7 +931,7 @@ async def test_state_change_case_insensitive(config):
 
     await processor.start()
 
-    message = {"commandId": "cmd-1", "command": "print:pause", "payload": {}}
+    message = {"$id": "cmd-1", "payload": {"command": "print:pause"}}
     await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
     assert len(mqtt.published) == 1
 
@@ -908,7 +941,7 @@ async def test_state_change_case_insensitive(config):
 
     assert len(mqtt.published) == 2
     completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert completed["status"] == "completed"
+    assert completed["payload"]["status"] == "completed"
 
     await processor.stop()
 
@@ -923,8 +956,8 @@ async def test_multiple_commands_same_expected_state(config):
     await processor.start()
 
     # Send two pause commands
-    msg1 = {"commandId": "cmd-1", "command": "print:pause", "payload": {}}
-    msg2 = {"commandId": "cmd-2", "command": "print:pause", "payload": {}}
+    msg1 = {"$id": "cmd-1", "payload": {"command": "print:pause"}}
+    msg2 = {"$id": "cmd-2", "payload": {"command": "print:pause"}}
     await mqtt.emit("owl/printers/device-123/commands/print:pause", msg1)
     await mqtt.emit("owl/printers/device-123/commands/print:pause", msg2)
 
@@ -953,7 +986,7 @@ async def test_abandon_pending_commands_on_stop(config):
 
     await processor.start()
 
-    message = {"commandId": "cmd-1", "command": "print:pause", "payload": {}}
+    message = {"$id": "cmd-1", "payload": {"command": "print:pause"}}
     await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
     assert processor.pending_state_count == 1
 
@@ -986,11 +1019,13 @@ async def test_heater_set_target_executes_gcode(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-heater-1",
-        "command": "heater:set-target",
-        "parameters": {
-            "heater": "extruder",
-            "target": 200,
+        "$id": "cmd-heater-1",
+        "payload": {
+            "command": "heater:set-target",
+            "parameters": {
+                "heater": "extruder",
+                "target": 200,
+            },
         },
     }
 
@@ -1000,8 +1035,8 @@ async def test_heater_set_target_executes_gcode(config):
     assert len(mqtt.published) == 2
 
     completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert completed["status"] == "completed"
-    assert completed["stage"] == "execution"
+    assert completed["payload"]["status"] == "completed"
+    assert completed["payload"]["stage"] == "execution"
 
     # Verify GCode was sent
     assert len(moonraker.gcode_scripts) == 1
@@ -1020,11 +1055,13 @@ async def test_heater_set_target_validates_heater(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-heater-2",
-        "command": "heater:set-target",
-        "parameters": {
-            "heater": "nonexistent_heater",
-            "target": 200,
+        "$id": "cmd-heater-2",
+        "payload": {
+            "command": "heater:set-target",
+            "parameters": {
+                "heater": "nonexistent_heater",
+                "target": 200,
+            },
         },
     }
 
@@ -1034,8 +1071,8 @@ async def test_heater_set_target_validates_heater(config):
     assert len(mqtt.published) == 2
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_heater"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_heater"
 
     # No GCode should be sent
     assert len(moonraker.gcode_scripts) == 0
@@ -1054,21 +1091,23 @@ async def test_heater_set_target_validates_temperature_range(config):
 
     # Test temperature too high for extruder (max 300)
     message = {
-        "commandId": "cmd-heater-3",
-        "command": "heater:set-target",
-        "parameters": {
-            "heater": "extruder",
-            "target": 350,
+        "$id": "cmd-heater-3",
+        "payload": {
+            "command": "heater:set-target",
+            "parameters": {
+                "heater": "extruder",
+                "target": 350,
+            },
         },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_target"
-    assert "350" in failed["reason"]["message"]
-    assert "300" in failed["reason"]["message"]
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_target"
+    assert "350" in failed["payload"]["reason"]["message"]
+    assert "300" in failed["payload"]["reason"]["message"]
 
     await processor.stop()
 
@@ -1083,19 +1122,21 @@ async def test_heater_set_target_rejects_negative_temperature(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-heater-4",
-        "command": "heater:set-target",
-        "parameters": {
-            "heater": "extruder",
-            "target": -10,
+        "$id": "cmd-heater-4",
+        "payload": {
+            "command": "heater:set-target",
+            "parameters": {
+                "heater": "extruder",
+                "target": -10,
+            },
         },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_target"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_target"
 
     await processor.stop()
 
@@ -1111,29 +1152,33 @@ async def test_heater_set_target_requires_parameters(config):
 
     # Missing heater
     message = {
-        "commandId": "cmd-heater-5",
-        "command": "heater:set-target",
-        "parameters": {"target": 200},
+        "$id": "cmd-heater-5",
+        "payload": {
+            "command": "heater:set-target",
+            "parameters": {"target": 200},
+        },
     }
     await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_parameters"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_parameters"
 
     mqtt.published.clear()
 
     # Missing target
     message = {
-        "commandId": "cmd-heater-6",
-        "command": "heater:set-target",
-        "parameters": {"heater": "extruder"},
+        "$id": "cmd-heater-6",
+        "payload": {
+            "command": "heater:set-target",
+            "parameters": {"heater": "extruder"},
+        },
     }
     await mqtt.emit("owl/printers/device-123/commands/heater:set-target", message)
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_parameters"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_parameters"
 
     await processor.stop()
 
@@ -1148,9 +1193,11 @@ async def test_heater_turn_off_executes_gcode(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-heater-off-1",
-        "command": "heater:turn-off",
-        "parameters": {"heater": "heater_bed"},
+        "$id": "cmd-heater-off-1",
+        "payload": {
+            "command": "heater:turn-off",
+            "parameters": {"heater": "heater_bed"},
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/heater:turn-off", message)
@@ -1159,7 +1206,7 @@ async def test_heater_turn_off_executes_gcode(config):
     assert len(mqtt.published) == 2
 
     completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert completed["status"] == "completed"
+    assert completed["payload"]["status"] == "completed"
 
     # Verify GCode was sent
     assert len(moonraker.gcode_scripts) == 1
@@ -1183,11 +1230,13 @@ async def test_fan_set_speed_part_cooling_fan(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-fan-1",
-        "command": "fan:set-speed",
-        "parameters": {
-            "fan": "fan",
-            "speed": 0.5,  # 50%
+        "$id": "cmd-fan-1",
+        "payload": {
+            "command": "fan:set-speed",
+            "parameters": {
+                "fan": "fan",
+                "speed": 0.5,  # 50%
+            },
         },
     }
 
@@ -1197,7 +1246,7 @@ async def test_fan_set_speed_part_cooling_fan(config):
     assert len(mqtt.published) == 2
 
     completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert completed["status"] == "completed"
+    assert completed["payload"]["status"] == "completed"
 
     # Verify GCode was sent (50% = 127 on 0-255 scale)
     assert len(moonraker.gcode_scripts) == 1
@@ -1216,18 +1265,20 @@ async def test_fan_set_speed_turn_off(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-fan-2",
-        "command": "fan:set-speed",
-        "parameters": {
-            "fan": "fan",
-            "speed": 0,
+        "$id": "cmd-fan-2",
+        "payload": {
+            "command": "fan:set-speed",
+            "parameters": {
+                "fan": "fan",
+                "speed": 0,
+            },
         },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
 
     completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert completed["status"] == "completed"
+    assert completed["payload"]["status"] == "completed"
 
     # Verify M107 was sent
     assert len(moonraker.gcode_scripts) == 1
@@ -1246,18 +1297,20 @@ async def test_fan_set_speed_generic_fan(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-fan-3",
-        "command": "fan:set-speed",
-        "parameters": {
-            "fan": "fan_generic exhaust_fan",
-            "speed": 0.75,
+        "$id": "cmd-fan-3",
+        "payload": {
+            "command": "fan:set-speed",
+            "parameters": {
+                "fan": "fan_generic exhaust_fan",
+                "speed": 0.75,
+            },
         },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
 
     completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert completed["status"] == "completed"
+    assert completed["payload"]["status"] == "completed"
 
     # Verify SET_FAN_SPEED was sent
     assert len(moonraker.gcode_scripts) == 1
@@ -1277,37 +1330,41 @@ async def test_fan_set_speed_validates_range(config):
 
     # Speed > 1.0
     message = {
-        "commandId": "cmd-fan-4",
-        "command": "fan:set-speed",
-        "parameters": {
-            "fan": "fan",
-            "speed": 1.5,
+        "$id": "cmd-fan-4",
+        "payload": {
+            "command": "fan:set-speed",
+            "parameters": {
+                "fan": "fan",
+                "speed": 1.5,
+            },
         },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_speed"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_speed"
 
     mqtt.published.clear()
 
     # Speed < 0
     message = {
-        "commandId": "cmd-fan-5",
-        "command": "fan:set-speed",
-        "parameters": {
-            "fan": "fan",
-            "speed": -0.5,
+        "$id": "cmd-fan-5",
+        "payload": {
+            "command": "fan:set-speed",
+            "parameters": {
+                "fan": "fan",
+                "speed": -0.5,
+            },
         },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_speed"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_speed"
 
     await processor.stop()
 
@@ -1323,29 +1380,33 @@ async def test_fan_set_speed_requires_parameters(config):
 
     # Missing fan
     message = {
-        "commandId": "cmd-fan-6",
-        "command": "fan:set-speed",
-        "parameters": {"speed": 0.5},
+        "$id": "cmd-fan-6",
+        "payload": {
+            "command": "fan:set-speed",
+            "parameters": {"speed": 0.5},
+        },
     }
     await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_parameters"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_parameters"
 
     mqtt.published.clear()
 
     # Missing speed
     message = {
-        "commandId": "cmd-fan-7",
-        "command": "fan:set-speed",
-        "parameters": {"fan": "fan"},
+        "$id": "cmd-fan-7",
+        "payload": {
+            "command": "fan:set-speed",
+            "parameters": {"fan": "fan"},
+        },
     }
     await mqtt.emit("owl/printers/device-123/commands/fan:set-speed", message)
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_parameters"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_parameters"
 
     await processor.stop()
 
@@ -1365,10 +1426,12 @@ async def test_object_exclude_executes_gcode(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-obj-1",
-        "command": "object:exclude",
-        "parameters": {
-            "objectName": "cube_1",
+        "$id": "cmd-obj-1",
+        "payload": {
+            "command": "object:exclude",
+            "parameters": {
+                "objectName": "cube_1",
+            },
         },
     }
 
@@ -1378,8 +1441,8 @@ async def test_object_exclude_executes_gcode(config):
     assert len(mqtt.published) == 2
 
     completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert completed["status"] == "completed"
-    assert completed["stage"] == "execution"
+    assert completed["payload"]["status"] == "completed"
+    assert completed["payload"]["stage"] == "execution"
 
     # Verify GCode was sent
     assert len(moonraker.gcode_scripts) == 1
@@ -1399,9 +1462,11 @@ async def test_object_exclude_validates_object_name_required(config):
 
     # Missing objectName
     message = {
-        "commandId": "cmd-obj-2",
-        "command": "object:exclude",
-        "parameters": {},
+        "$id": "cmd-obj-2",
+        "payload": {
+            "command": "object:exclude",
+            "parameters": {},
+        },
     }
 
     await mqtt.emit("owl/printers/device-123/commands/object:exclude", message)
@@ -1410,8 +1475,8 @@ async def test_object_exclude_validates_object_name_required(config):
     assert len(mqtt.published) == 2
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "missing_parameter"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "missing_parameter"
 
     # No GCode should be sent
     assert len(moonraker.gcode_scripts) == 0
@@ -1429,10 +1494,12 @@ async def test_object_exclude_rejects_empty_object_name(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-obj-3",
-        "command": "object:exclude",
-        "parameters": {
-            "objectName": "   ",
+        "$id": "cmd-obj-3",
+        "payload": {
+            "command": "object:exclude",
+            "parameters": {
+                "objectName": "   ",
+            },
         },
     }
 
@@ -1442,8 +1509,8 @@ async def test_object_exclude_rejects_empty_object_name(config):
     assert len(mqtt.published) == 2
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "missing_parameter"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "missing_parameter"
 
     # No GCode should be sent
     assert len(moonraker.gcode_scripts) == 0
@@ -1461,10 +1528,12 @@ async def test_object_exclude_rejects_injection_semicolon(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-obj-4",
-        "command": "object:exclude",
-        "parameters": {
-            "objectName": "cube; M112",  # Attempted injection
+        "$id": "cmd-obj-4",
+        "payload": {
+            "command": "object:exclude",
+            "parameters": {
+                "objectName": "cube; M112",  # Attempted injection
+            },
         },
     }
 
@@ -1474,8 +1543,8 @@ async def test_object_exclude_rejects_injection_semicolon(config):
     assert len(mqtt.published) == 2
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_object_name"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_object_name"
 
     # No GCode should be sent
     assert len(moonraker.gcode_scripts) == 0
@@ -1493,10 +1562,12 @@ async def test_object_exclude_rejects_injection_newline(config):
     await processor.start()
 
     message = {
-        "commandId": "cmd-obj-5",
-        "command": "object:exclude",
-        "parameters": {
-            "objectName": "cube\nM112",  # Attempted injection
+        "$id": "cmd-obj-5",
+        "payload": {
+            "command": "object:exclude",
+            "parameters": {
+                "objectName": "cube\nM112",  # Attempted injection
+            },
         },
     }
 
@@ -1506,8 +1577,8 @@ async def test_object_exclude_rejects_injection_newline(config):
     assert len(mqtt.published) == 2
 
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
-    assert failed["status"] == "failed"
-    assert failed["reason"]["code"] == "invalid_object_name"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_object_name"
 
     # No GCode should be sent
     assert len(moonraker.gcode_scripts) == 0
@@ -1541,10 +1612,12 @@ async def test_object_exclude_allows_valid_names(config):
         moonraker.gcode_scripts.clear()
 
         message = {
-            "commandId": f"cmd-obj-valid-{i}",
-            "command": "object:exclude",
-            "parameters": {
-                "objectName": name,
+            "$id": f"cmd-obj-valid-{i}",
+            "payload": {
+                "command": "object:exclude",
+                "parameters": {
+                    "objectName": name,
+                },
             },
         }
 
@@ -1553,8 +1626,43 @@ async def test_object_exclude_allows_valid_names(config):
         assert len(mqtt.published) == 2, f"Failed for name: {name}"
 
         completed = json.loads(mqtt.published[1][1].decode("utf-8"))
-        assert completed["status"] == "completed", f"Failed for name: {name}"
+        assert completed["payload"]["status"] == "completed", f"Failed for name: {name}"
         assert moonraker.gcode_scripts[0] == f"EXCLUDE_OBJECT NAME={name}"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_firmware_restart_executes_and_sends_ack(config):
+    """Test that print:firmware-restart calls firmware_restart and sends completed ACK."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "$id": "cmd-fwr-1",
+        "payload": {
+            "command": "print:firmware-restart",
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/print:firmware-restart", message)
+
+    # firmware_restart should have been called
+    assert len(moonraker.firmware_restarts) == 1
+
+    # Should have accepted + completed ACKs
+    assert len(mqtt.published) == 2
+
+    accepted = json.loads(mqtt.published[0][1].decode("utf-8"))
+    assert accepted["payload"]["status"] == "accepted"
+    assert accepted["payload"]["commandId"] == "cmd-fwr-1"
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert completed["payload"]["commandId"] == "cmd-fwr-1"
 
     await processor.stop()
 

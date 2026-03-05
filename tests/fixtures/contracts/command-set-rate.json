@@ -1,0 +1,25 @@
+{
+    "$v": 1,
+    "$type": "command.request",
+    "$id": "22222222-2222-7222-8222-222222222222",
+    "$ts": "2025-01-15T10:32:00+00:00",
+    "$origin": "cloud-service@1.0",
+    "deviceId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+    "payload": {
+        "command": "control:set-telemetry-rate",
+        "parameters": {
+            "mode": "watch",
+            "maxHz": 2.0,
+            "durationSeconds": 300,
+            "issuedAt": "2025-01-15T10:32:00+00:00",
+            "serverUtcNow": "2025-01-15T10:32:00.000Z",
+            "reason": "user_opened_detail",
+            "requestedBy": "web-ui",
+            "watcherId": "watcher-001",
+            "source": "detail-page",
+            "connectionId": "conn-abc",
+            "clientVersion": "1.0.0",
+            "viewerCount": 1
+        }
+    }
+}

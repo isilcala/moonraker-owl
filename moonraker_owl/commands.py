@@ -12,7 +12,9 @@ from typing import Any, Deque, Dict, Optional, Protocol
 from urllib.parse import quote
 
 from .printer_command_names import PrinterCommandNames
+from .identifiers import uuid7
 from .config import OwlConfig
+from .version import __version__
 from .telemetry import TelemetryPublisher
 from .adapters.s3_upload import S3UploadClient, UploadResult
 from .adapters.camera import CameraClient
@@ -59,6 +61,10 @@ class MoonrakerCommandClient(Protocol):
 
     async def emergency_stop(self) -> None:
         """Execute emergency stop (M112) on the printer."""
+        ...
+
+    async def firmware_restart(self) -> None:
+        """Restart the Klipper firmware."""
         ...
 
     async def start_print(self, filename: str) -> None:
@@ -686,8 +692,8 @@ class CommandProcessor:
         - fan:set-speed: Set fan speed
         - print:pause/resume/cancel: Print control actions
         - print:emergency-stop: Emergency stop
+        - print:firmware-restart: Restart Klipper firmware
         - print:reprint: Reprint the last print job
-        - sync:job-thumbnail: Set thumbnail URL for current print job
         - task:upload-thumbnail: Upload thumbnail to presigned URL
         - task:capture-image: Capture and upload camera frame
         - object:exclude: Exclude an object from the current print (ADR-0016)
@@ -712,9 +718,6 @@ class CommandProcessor:
         if message.command == PrinterCommandNames.OBJECT_EXCLUDE:
             return await self._execute_object_exclude(message)
 
-        # Note: sync:job-thumbnail command has been removed.
-        # Thumbnail URLs are now pushed via SignalR after ACK processing.
-
         # System task commands
         if message.command == PrinterCommandNames.UPLOAD_THUMBNAIL:
             return await self._execute_upload_thumbnail(message)
@@ -732,6 +735,10 @@ class CommandProcessor:
         # Emergency stop command
         if message.command == PrinterCommandNames.EMERGENCY_STOP:
             return await self._execute_emergency_stop(message)
+
+        # Firmware restart command
+        if message.command == PrinterCommandNames.FIRMWARE_RESTART:
+            return await self._execute_firmware_restart(message)
 
         # Reprint command
         if message.command == PrinterCommandNames.REPRINT:
@@ -789,6 +796,23 @@ class CommandProcessor:
         except Exception as exc:
             raise CommandProcessingError(
                 f"Emergency stop failed: {exc}",
+                code="moonraker_error",
+                command_id=message.command_id,
+            ) from exc
+        return {"command": message.command}
+
+    async def _execute_firmware_restart(self, message: CommandMessage) -> Dict[str, Any]:
+        """Handle print:firmware-restart command.
+
+        Restarts the Klipper firmware via Moonraker's firmware_restart API.
+        This reloads the firmware configuration and resets the MCU.
+        """
+        try:
+            await self._moonraker.firmware_restart()
+            LOGGER.warning("Firmware restart executed (command_id=%s)", message.command_id[:8])
+        except Exception as exc:
+            raise CommandProcessingError(
+                f"Firmware restart failed: {exc}",
                 code="moonraker_error",
                 command_id=message.command_id,
             ) from exc
@@ -1024,7 +1048,7 @@ class CommandProcessor:
         if requested_at is not None:
             details["requestedAtUtc"] = requested_at.replace(microsecond=0).isoformat()
         if effective_expires is not None:
-            details["watchWindowExpiresUtc"] = effective_expires.replace(
+            details["watchWindowExpires"] = effective_expires.replace(
                 microsecond=0
             ).isoformat()
 
@@ -1906,7 +1930,7 @@ class CommandProcessor:
         result: Optional[Dict[str, Any]] = None,
         skipped: bool = False,
     ) -> None:
-        """Publish command acknowledgment to MQTT.
+        """Publish command acknowledgment to MQTT using $-prefix envelope.
 
         Args:
             command_name: The command name (e.g., "print:pause").
@@ -1922,36 +1946,29 @@ class CommandProcessor:
         acknowledged_at = datetime.now(timezone.utc).replace(microsecond=0)
         stage_value = stage.lower()
         effective_command_id = command_id or ""
-        document: Dict[str, Any] = {
+
+        # Build payload (business data)
+        ack_payload: Dict[str, Any] = {
             "commandId": effective_command_id,
-            "deviceId": self._device_id,
             "status": status,
             "stage": stage_value,
-            "timestamps": {
-                "acknowledgedAt": acknowledged_at.isoformat(timespec="seconds"),
-            },
         }
 
         # ADR-0013 Appendix D: Indicate duplicate detection
         if skipped:
-            document["skipped"] = True
-
-        if stage_value == "dispatch":
-            document["timestamps"]["dispatchedAt"] = acknowledged_at.isoformat(
-                timespec="seconds"
-            )
+            ack_payload["skipped"] = True
 
         if self._tenant_id:
-            document["tenantId"] = self._tenant_id
+            ack_payload["tenantId"] = self._tenant_id
         if self._printer_id:
-            document["printerId"] = self._printer_id
+            ack_payload["printerId"] = self._printer_id
         correlation: Dict[str, Any] = {}
         if self._tenant_id:
             correlation["tenantId"] = self._tenant_id
         if self._printer_id:
             correlation["printerId"] = self._printer_id
         if correlation:
-            document["correlation"] = correlation
+            ack_payload["correlation"] = correlation
 
         if error_code or error_message:
             reason: Dict[str, Any] = {}
@@ -1960,14 +1977,25 @@ class CommandProcessor:
             if error_message:
                 reason["message"] = error_message
             if reason:
-                document["reason"] = reason
+                ack_payload["reason"] = reason
 
         # Include execution result data (e.g., capture details, uploaded file info)
         if result:
-            document["result"] = result
+            ack_payload["result"] = result
 
-        payload = json.dumps(document).encode("utf-8")
-        self._mqtt.publish(topic, payload, qos=1, retain=False)
+        # Build $-prefix envelope (D16) — $ts serves as acknowledgedAt, no separate timestamps object
+        document: Dict[str, Any] = {
+            "$v": 1,
+            "$type": "command.ack",
+            "$id": str(uuid7()),
+            "$ts": acknowledged_at.isoformat(timespec="seconds"),
+            "$origin": f"moonraker-owl@{__version__}",
+            "deviceId": self._device_id,
+            "payload": ack_payload,
+        }
+
+        payload_bytes = json.dumps(document).encode("utf-8")
+        self._mqtt.publish(topic, payload_bytes, qos=1, retain=False)
 
         if stage_value == "execution":
             self._remember_history(
@@ -1994,13 +2022,17 @@ def _parse_command(raw_payload: bytes, command_name: str) -> CommandMessage:
             "Payload is not valid JSON", code="invalid_json"
         ) from exc
 
-    command_id = str(data.get("commandId", "")).strip()
+    # $-prefix envelope: $id is the command identifier, business data in payload
+    command_id = str(data.get("$id", "") or data.get("commandId", "")).strip()
     if not command_id:
         raise CommandProcessingError(
-            "Missing commandId in payload", code="invalid_payload"
+            "Missing $id in command envelope", code="invalid_payload"
         )
 
-    command_field = data.get("command") or data.get("action") or ""
+    # Business data lives in payload sub-object
+    inner = data.get("payload", data)
+
+    command_field = inner.get("command") or inner.get("action") or ""
     parsed_command = (
         str(command_field).strip().lower() if command_field else command_name
     )
@@ -2011,9 +2043,9 @@ def _parse_command(raw_payload: bytes, command_name: str) -> CommandMessage:
             command_id=command_id,
         )
 
-    parameters = data.get("parameters")
+    parameters = inner.get("parameters")
     if parameters is None:
-        parameters = data.get("payload", {}) or {}
+        parameters = {}
 
     if not isinstance(parameters, dict):
         raise CommandProcessingError(

@@ -22,6 +22,7 @@ from .. import constants
 from ..adapters import MQTTConnectionError
 from ..config import CompressionConfig, OwlConfig
 from ..core import PrinterAdapter, deep_merge
+from ..identifiers import uuid7
 from ..tracing import create_traceparent
 from .cadence import (
     ChannelCadenceController,
@@ -980,9 +981,13 @@ class TelemetryPublisher:
             )
 
             if channel == "status":
-                status_body = envelope.get("status")
+                status_body = envelope.get("payload")
                 if isinstance(status_body, dict):
-                    state_value = status_body.get("printerStatus")
+                    lifecycle = status_body.get("lifecycle")
+                    if isinstance(lifecycle, dict):
+                        state_value = lifecycle.get("phase")
+                    else:
+                        state_value = None
                     if isinstance(state_value, str):
                         normalized_state = state_value.strip()
                         if normalized_state:
@@ -1528,7 +1533,6 @@ class TelemetryPublisher:
     def set_thumbnail_url(self, url: Optional[str]) -> None:
         """Set the thumbnail URL for the current print job.
 
-        Called by CommandProcessor when sync:job-thumbnail command is received.
         The URL will be included in subsequent status telemetry payloads.
 
         Args:
@@ -1552,14 +1556,16 @@ class TelemetryPublisher:
         payload_kind = "delta" if frame.is_delta else "full"
 
         document: Dict[str, Any] = {
-            "_schema": 1,
+            "$v": 1,
+            "$type": f"telemetry.{channel}",
+            "$id": str(uuid7()),
+            "$ts": frame.observed_at.replace(microsecond=0).isoformat(),
+            "$origin": self._orchestrator.origin,
+            "$seq": state.sequence,
             "kind": payload_kind,
-            "_ts": frame.observed_at.replace(microsecond=0).isoformat(),
-            "_origin": self._orchestrator.origin,
-            "_seq": state.sequence,
             "sessionId": frame.session_id,
-            channel: frame.payload,
             "deviceId": self._device_id,
+            "payload": frame.payload,
         }
 
         if self._tenant_id:

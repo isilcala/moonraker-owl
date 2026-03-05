@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -338,6 +339,42 @@ class MoonrakerOwlApp:
         )
         self._mqtt_client.register_disconnect_handler(self._on_mqtt_disconnect)
         self._mqtt_client.register_connect_handler(self._on_mqtt_connect)
+
+        # Configure Last Will and Testament (LWT) for crash detection (D5)
+        # The broker publishes this message if the agent disconnects unexpectedly.
+        # Note: $ts is set at registration time, not crash time.
+        from .version import __version__
+        from .identifiers import uuid7
+
+        lwt_payload = {
+            "$v": 1,
+            "$type": "telemetry.status",
+            "$id": str(uuid7()),
+            "$ts": "",
+            "$origin": f"moonraker-owl@{__version__}",
+            "deviceId": str(device_id),
+            "payload": {
+                "lifecycle": {
+                    "phase": "Offline",
+                    "isHeating": False,
+                    "hasActiveJob": False,
+                    "reason": "Connection lost (LWT)",
+                },
+                "cadence": {
+                    "heartbeatSeconds": 0,
+                    "watchWindowActive": False,
+                },
+                "lastUpdated": "",
+            },
+        }
+        lwt_topic = f"{self._base_topic}/status"
+        self._mqtt_client.set_last_will(
+            topic=lwt_topic,
+            payload=json.dumps(lwt_payload).encode("utf-8"),
+            qos=1,
+            retain=True,
+        )
+        LOGGER.info("LWT configured on topic %s", lwt_topic)
 
         # Create ConnectionCoordinator with session expiry from config
         resilience = self._config.resilience

@@ -229,17 +229,19 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         assert first_message["qos"] == expected_qos[channel]
         document = _decode(first_message)
         assert document["kind"] == "full"
-        assert document["_schema"] == 1
+        assert document["$v"] == 1
         assert document["deviceId"] == "device-123"
         assert document.get("tenantId") == "tenant-42"
         assert document.get("printerId") == "printer-99"
-        assert document.get("_origin") == EXPECTED_ORIGIN
-        assert document.get("_ts"), "Expected contract timestamp"
-        assert document.get("_seq") is not None
+        assert document.get("$origin") == EXPECTED_ORIGIN
+        assert document.get("$ts"), "Expected contract timestamp"
+        assert document.get("$seq") is not None
+        assert document.get("$type") == f"telemetry.{channel}"
+        assert document.get("$id"), "Expected $id (UUID v7)"
         assert "raw" not in document, "Raw field should be excluded by default"
 
     sensors_doc = _decode(messages["owl/printers/device-123/sensors"][0])
-    sensors_body = sensors_doc.get("sensors")
+    sensors_body = sensors_doc.get("payload")
     assert isinstance(sensors_body, dict)
     sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list) and sensors, "Expected sensors payload"
@@ -253,21 +255,21 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
     assert extruder_sensor.get("target") is not None
 
     status_doc = _decode(messages["owl/printers/device-123/status"][0])
-    status_contract = status_doc.get("status")
+    status_contract = status_doc.get("payload")
     assert isinstance(status_contract, dict)
-    assert status_contract.get("printerStatus") == "Printing"
-    assert status_contract.get("elapsedSeconds") is not None
-    assert status_contract.get("estimatedTimeRemainingSeconds") is not None
-    assert status_contract.get("subStatus")
-    flags = status_contract.get("flags")
-    assert isinstance(flags, dict)
-    assert flags.get("hasActiveJob") is True
-    assert flags.get("watchWindowActive") is False
+    assert status_contract["lifecycle"]["phase"] == "Printing"
+    assert status_contract["lifecycle"].get("reason")
+    assert status_contract["lifecycle"]["hasActiveJob"] is True
+    assert status_contract["cadence"]["watchWindowActive"] is False
 
     job_contract = status_contract.get("job")
     assert isinstance(job_contract, dict)
     assert job_contract.get("name")
     assert job_contract.get("progressPercent") is not None
+    progress = job_contract.get("progress")
+    assert isinstance(progress, dict)
+    assert progress.get("elapsedSeconds") is not None
+    assert progress.get("estimatedTimeRemainingSeconds") is not None
 
 
 @pytest.mark.asyncio
@@ -292,23 +294,23 @@ async def test_pipeline_emits_schema_envelopes() -> None:
     assert status_topic in messages, "Expected status channel"
 
     sensors_envelope = _decode(messages[sensors_topic][0])
-    assert sensors_envelope["_schema"] == 1
+    assert sensors_envelope["$v"] == 1
     assert sensors_envelope["kind"] == "full"
-    assert sensors_envelope["_origin"] == EXPECTED_ORIGIN
-    assert sensors_envelope.get("sensors")
-    cadence = sensors_envelope["sensors"].get("cadence")
+    assert sensors_envelope["$origin"] == EXPECTED_ORIGIN
+    assert sensors_envelope.get("payload")
+    cadence = sensors_envelope["payload"].get("cadence")
     assert isinstance(cadence, dict)
     assert cadence.get("mode") == "idle"
 
-    sensors = sensors_envelope["sensors"].get("sensors")
+    sensors = sensors_envelope["payload"].get("sensors")
     assert isinstance(sensors, list) and sensors
 
     status_envelope = _decode(messages[status_topic][0])
-    assert status_envelope["_schema"] == 1
+    assert status_envelope["$v"] == 1
     assert status_envelope["kind"] == "full"
-    status_payload = status_envelope.get("status")
+    status_payload = status_envelope.get("payload")
     assert isinstance(status_payload, dict)
-    assert status_payload.get("printerStatus")
+    assert status_payload["lifecycle"]["phase"]
 
 
 def test_cancelled_print_drops_redundant_printing_message() -> None:
@@ -338,8 +340,8 @@ def test_cancelled_print_drops_redundant_printing_message() -> None:
     session = tracker.compute(store)
     status = selector.build(store, session, heater, observed_at)
     assert status is not None
-    assert status.get("printerStatus") == "Printing"
-    assert status.get("subStatus") == "Printing"
+    assert status["lifecycle"]["phase"] == "Printing"
+    assert status["lifecycle"].get("reason") == "Printing"
 
     store.ingest(
         {
@@ -359,8 +361,8 @@ def test_cancelled_print_drops_redundant_printing_message() -> None:
     session = tracker.compute(store)
     status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
     assert status is not None
-    assert status.get("printerStatus") == "Cancelled"
-    assert status.get("subStatus") is None
+    assert status["lifecycle"]["phase"] == "Cancelled"
+    assert status["lifecycle"].get("reason") is None
     assert session.message is None
     assert session.has_active_job is False
 
@@ -404,8 +406,8 @@ def test_pause_then_cancel_clears_paused_state() -> None:
     session = tracker.compute(store)
     status = selector.build(store, session, heater, observed_at)
     assert status is not None
-    assert status.get("printerStatus") == "Printing"
-    assert status.get("subStatus") == "Printing"
+    assert status["lifecycle"]["phase"] == "Printing"
+    assert status["lifecycle"].get("reason") == "Printing"
     assert session.has_active_job is True
 
     store.ingest(
@@ -426,8 +428,8 @@ def test_pause_then_cancel_clears_paused_state() -> None:
     session = tracker.compute(store)
     status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
     assert status is not None
-    assert status.get("printerStatus") == "Paused"
-    assert status.get("subStatus") == "Paused"
+    assert status["lifecycle"]["phase"] == "Paused"
+    assert status["lifecycle"].get("reason") == "Paused"
     assert session.has_active_job is True
 
     store.ingest(
@@ -464,8 +466,8 @@ def test_pause_then_cancel_clears_paused_state() -> None:
     session = tracker.compute(store)
     status = selector.build(store, session, heater, observed_at + timedelta(seconds=2))
     assert status is not None
-    assert status.get("printerStatus") == "Cancelled"
-    assert status.get("subStatus") is None
+    assert status["lifecycle"]["phase"] == "Cancelled"
+    assert status["lifecycle"].get("reason") is None
     assert session.message is None
     assert session.has_active_job is False
 
@@ -516,7 +518,7 @@ def test_completed_job_status_updates_via_query() -> None:
     session = tracker.compute(store)
     status = selector.build(store, session, heater, observed_at)
     assert status is not None
-    assert status.get("printerStatus") == "Printing"
+    assert status["lifecycle"]["phase"] == "Printing"
     assert session.has_active_job is True
 
     # Job finishes - simulate the query-on-notification pattern:
@@ -556,7 +558,7 @@ def test_completed_job_status_updates_via_query() -> None:
 
     status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
     assert status is not None
-    assert status.get("printerStatus") == "Completed"
+    assert status["lifecycle"]["phase"] == "Completed"
 
 
 def test_cancelled_job_status_updates_via_query() -> None:
@@ -632,7 +634,7 @@ def test_cancelled_job_status_updates_via_query() -> None:
 
     status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
     assert status is not None
-    assert status.get("printerStatus") == "Cancelled"
+    assert status["lifecycle"]["phase"] == "Cancelled"
 
 
 def test_new_print_after_cancel_shows_printing_not_cancelled() -> None:
@@ -696,7 +698,7 @@ def test_new_print_after_cancel_shows_printing_not_cancelled() -> None:
     # Verify it shows Cancelled initially (raw_state is "cancelled")
     status = selector.build(store, session, heater, observed_at)
     assert status is not None
-    assert status.get("printerStatus") == "Cancelled"
+    assert status["lifecycle"]["phase"] == "Cancelled"
 
     # Step 2: User starts a new print - print_stats.state changes to "printing"
     # With Mainsail-aligned logic, we trust this state immediately
@@ -728,7 +730,7 @@ def test_new_print_after_cancel_shows_printing_not_cancelled() -> None:
     # we trust print_stats.state="printing" directly, no override from job_status
     status = selector.build(store, session, heater, observed_at + timedelta(seconds=1))
     assert status is not None
-    assert status.get("printerStatus") == "Printing"
+    assert status["lifecycle"]["phase"] == "Printing"
 
 
 @pytest.mark.asyncio
@@ -764,7 +766,7 @@ async def test_publisher_emits_status_full_update() -> None:
     assert status_messages, "Expected status updates"
     document = _decode(status_messages[-1])
     assert document["kind"] == "full"
-    status = document.get("status")
+    status = document.get("payload")
     assert isinstance(status, dict)
 
     job = status.get("job")
@@ -802,8 +804,8 @@ async def test_publisher_emits_events_channel() -> None:
     assert last_event_message["qos"] == 2
     document = _decode(last_event_message)
     assert document["kind"] == "full"
-    assert document["_schema"] == 1
-    events_body = document.get("events")
+    assert document["$v"] == 1
+    events_body = document.get("payload")
     assert isinstance(events_body, dict)
     items = events_body.get("items")
     assert isinstance(items, list) and items, "Expected contract events"
@@ -1262,9 +1264,9 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
     assert len(sensors_messages) == 1
 
     document = _decode(sensors_messages[0])
-    assert document.get("_seq", 0) > 1
+    assert document.get("$seq", 0) > 1
 
-    sensors_body = document.get("sensors")
+    sensors_body = document.get("payload")
     assert isinstance(sensors_body, dict)
     sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list)
@@ -1314,10 +1316,10 @@ async def test_publish_system_status_publishes_error_snapshot() -> None:
     error_message = status_messages[-1]
     assert error_message["retain"] is False
     document = _decode(error_message)
-    status = document.get("status")
+    status = document.get("payload")
     assert isinstance(status, dict)
-    assert status.get("printerStatus") == "Error"
-    assert status.get("subStatus") == "Emergency stop"
+    assert status["lifecycle"]["phase"] == "Error"
+    assert status["lifecycle"].get("reason") == "Emergency stop"
 
 
 def test_telemetry_configuration_requires_device_id():
@@ -1460,7 +1462,7 @@ async def test_temperature_target_preserved_across_updates() -> None:
     assert sensors_messages, "Expected sensors updates"
 
     document = _decode(sensors_messages[-1])
-    sensors_body = document.get("sensors")
+    sensors_body = document.get("payload")
     assert isinstance(sensors_body, dict)
     sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list) and sensors
@@ -1511,7 +1513,7 @@ async def test_fan_sensor_emits_speed_as_percent() -> None:
     assert sensors_messages, "Expected sensors updates"
 
     document = _decode(sensors_messages[-1])
-    sensors_body = document.get("sensors")
+    sensors_body = document.get("payload")
     assert isinstance(sensors_body, dict)
     sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list) and sensors
@@ -1594,7 +1596,7 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
     assert sensors_messages, "Expected integer-scale change to publish sensors"
 
     document = _decode(sensors_messages[-1])
-    sensors_body = document.get("sensors")
+    sensors_body = document.get("payload")
     assert isinstance(sensors_body, dict)
     sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list)
@@ -1662,7 +1664,7 @@ async def test_idle_cadence_flushes_latest_payload() -> None:
     assert sensors_messages, "Expected deferred payload to flush"
 
     document = _decode(sensors_messages[-1])
-    sensors_body = document.get("sensors")
+    sensors_body = document.get("payload")
     assert isinstance(sensors_body, dict)
     sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list)
@@ -1705,9 +1707,9 @@ async def test_restart_fetches_fresh_status_state() -> None:
         resumed_messages = mqtt.by_topic().get("owl/printers/device-123/status") or []
         if resumed_messages:
             last_message = _decode(resumed_messages[-1])
-            status_body = last_message.get("status")
+            status_body = last_message.get("payload")
             if isinstance(status_body, dict):
-                latest_status = status_body.get("printerStatus")
+                latest_status = status_body["lifecycle"]["phase"]
                 if latest_status == "Completed":
                     break
         await asyncio.sleep(0.01)
@@ -1767,7 +1769,7 @@ async def test_restart_emits_current_sensors_after_start() -> None:
     initial_messages = mqtt.by_topic().get("owl/printers/device-123/sensors")
     assert initial_messages, "Expected sensors publish on first start"
     initial_payload = _decode(initial_messages[-1])
-    initial_sensors = initial_payload.get("sensors", {})
+    initial_sensors = initial_payload.get("payload", {})
     initial_extruder = next(
         (
             sensor
@@ -1796,7 +1798,7 @@ async def test_restart_emits_current_sensors_after_start() -> None:
         replay_messages = mqtt.by_topic().get("owl/printers/device-123/sensors") or []
         if replay_messages:
             latest_payload = _decode(replay_messages[-1])
-            sensors_body = latest_payload.get("sensors", {})
+            sensors_body = latest_payload.get("payload", {})
             sensors = sensors_body.get("sensors", [])
             candidate = next(
                 (sensor for sensor in sensors if sensor.get("channel") == "extruder"),
@@ -1845,8 +1847,8 @@ async def test_restart_replays_full_status_when_state_unchanged() -> None:
 
     assert status_document.get("kind") == "full"
     assert sensors_document.get("kind") == "full"
-    assert isinstance(status_document.get("status"), dict)
-    assert isinstance(sensors_document.get("sensors"), dict)
+    assert isinstance(status_document.get("payload"), dict)
+    assert isinstance(sensors_document.get("payload"), dict)
 
     assert not publisher._force_full_channels_after_reset  # type: ignore[attr-defined]
 
@@ -1877,10 +1879,10 @@ async def test_publish_system_status_emits_error_snapshot() -> None:
     assert status_messages, "Expected status publish for system status"
 
     snapshot = json.loads(status_messages[-1]["payload"].decode("utf-8"))
-    status_body = snapshot.get("status")
+    status_body = snapshot.get("payload")
     assert status_body is not None
-    assert status_body.get("printerStatus") == "Error"
-    assert status_body.get("subStatus") == "Moonraker unavailable"
+    assert status_body["lifecycle"]["phase"] == "Error"
+    assert status_body["lifecycle"].get("reason") == "Moonraker unavailable"
     assert status_messages[-1]["retain"] is False
 
     await publisher.stop()
@@ -2284,8 +2286,8 @@ async def test_status_channel_forced_after_klippy_ready() -> None:
     # The status message should reflect operational state (Idle, not Error)
     last_status_msg = status_messages[-1]
     last_status = json.loads(last_status_msg["payload"])
-    status_body = last_status.get("status", {})
-    printer_status = status_body.get("printerStatus", "")
+    status_body = last_status.get("payload", {})
+    printer_status = status_body.get("lifecycle", {}).get("phase", "")
     
     # After klippy ready with print_stats.state=standby, printerStatus should be "Idle"
     # (not "Error" which was the previous state)
@@ -2294,9 +2296,9 @@ async def test_status_channel_forced_after_klippy_ready() -> None:
     )
     
     # Verify isShutdown flag is cleared
-    flags = status_body.get("flags", {})
-    assert flags.get("isShutdown") is False, (
-        f"Expected isShutdown=False after recovery, got {flags.get('isShutdown')}"
+    lifecycle = status_body.get("lifecycle", {})
+    assert lifecycle.get("isShutdown") is False, (
+        f"Expected isShutdown=False after recovery, got {lifecycle.get('isShutdown')}"
     )
 
     await publisher.stop()
@@ -2620,7 +2622,7 @@ async def test_status_recovery_retained_after_error_snapshot() -> None:
     assert recovery_messages, "Expected status after recovery"
     assert recovery_messages[-1]["retain"] is False
     snapshot = json.loads(recovery_messages[-1]["payload"].decode("utf-8"))
-    assert snapshot.get("status", {}).get("printerStatus") != "Error"
+    assert snapshot.get("payload", {}).get("lifecycle", {}).get("phase") != "Error"
 
     await publisher.stop()
 
@@ -2705,8 +2707,8 @@ async def test_raw_payload_excluded_by_default():
 
     # Verify normalized data is still present
     assert "deviceId" in document, "Expected device metadata"
-    assert document.get("_origin") == EXPECTED_ORIGIN
-    sensors_body = document.get("sensors")
+    assert document.get("$origin") == EXPECTED_ORIGIN
+    sensors_body = document.get("payload")
     assert isinstance(sensors_body, dict)
     sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list)
@@ -2744,8 +2746,8 @@ async def test_raw_payload_included_when_configured():
     assert isinstance(document["raw"], str), "Raw field should be a JSON string"
 
     # Verify normalized data is also present
-    assert document.get("_origin") == EXPECTED_ORIGIN
-    sensors_body = document.get("sensors")
+    assert document.get("$origin") == EXPECTED_ORIGIN
+    sensors_body = document.get("payload")
     assert isinstance(sensors_body, dict)
     sensors = sensors_body.get("sensors")
     assert isinstance(sensors, list) and sensors
@@ -2941,10 +2943,9 @@ def test_status_payload_includes_moonraker_job_id() -> None:
 
 
 def test_status_payload_job_id_equals_session_id() -> None:
-    """Test that jobId equals sessionId (both use Agent's session identifier).
+    """Test that job payload uses sessionId (jobId was removed in envelope refactor).
 
-    The jobId field uses session_id for backward compatibility. Backend matching
-    should use moonrakerJobId instead.
+    Backend matching should use moonrakerJobId instead.
     """
     store = MoonrakerStateStore()
     tracker = PrintSessionTracker()
@@ -2979,7 +2980,6 @@ def test_status_payload_job_id_equals_session_id() -> None:
     job = status.get("job")
     assert job is not None, "Expected job payload when printing"
 
-    # jobId should equal sessionId
-    assert job.get("jobId") == job.get("sessionId"), (
-        "jobId should equal sessionId for backward compatibility"
-    )
+    # sessionId should be present; jobId was removed in the envelope refactor
+    assert job.get("sessionId") is not None, "Expected sessionId in job payload"
+    assert "jobId" not in job, "jobId was removed in the envelope refactor"

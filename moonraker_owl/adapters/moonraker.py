@@ -228,6 +228,22 @@ class MoonrakerClient(PrinterAdapter):
                     f"Emergency stop failed with status {response.status}: {detail.strip()}"
                 )
 
+    async def firmware_restart(self) -> None:
+        """Restart the Klipper firmware.
+
+        This calls the Moonraker firmware_restart endpoint which restarts
+        the Klipper MCU firmware and reloads the configuration.
+        """
+        session = await self._ensure_session()
+        url = f"{self._base_url}/printer/firmware_restart"
+
+        async with session.post(url, headers=self._headers) as response:
+            if response.status >= 400:
+                detail = await response.text()
+                raise RuntimeError(
+                    f"Firmware restart failed with status {response.status}: {detail.strip()}"
+                )
+
     async def start_print(self, filename: str) -> None:
         """Start printing the specified GCode file.
 

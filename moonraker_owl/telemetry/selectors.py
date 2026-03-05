@@ -76,47 +76,27 @@ class StatusSelector:
 
         lifecycle: Dict[str, Any] = {
             "phase": phase,
-            "statusLabel": phase,
             "isHeating": heater_monitor.is_actively_heating(),
             "hasActiveJob": session.has_active_job,
+            "isShutdown": is_shutdown,
         }
 
-        # Priority: shutdown message > session message
+        # Reason priority: shutdown message > session message > display message
         if is_shutdown and shutdown_message:
             lifecycle["reason"] = shutdown_message
         elif session.message:
             lifecycle["reason"] = session.message
-
-        status: Dict[str, Any] = {
-            "printerStatus": phase,
-            "lifecycle": lifecycle,
-            "flags": {
-                "watchWindowActive": False,
-                "hasActiveJob": session.has_active_job,
-                "isShutdown": is_shutdown,
-            },
-        }
-
-        # subStatus priority: shutdown message > session message > display message
-        if is_shutdown and shutdown_message:
-            status["subStatus"] = shutdown_message
-        elif session.message:
-            status["subStatus"] = session.message
         elif display_status_snapshot is not None:
             candidate = display_status_snapshot.data.get("message")
             if isinstance(candidate, str):
                 cleaned = candidate.strip()
                 if cleaned and _should_use_display_message(cleaned, session):
-                    status["subStatus"] = cleaned
+                    lifecycle["reason"] = cleaned
 
-        if session.progress_percent is not None:
-            quantized_progress = max(
-                0,
-                min(100, int(math.floor(session.progress_percent))),
-            )
-            status["progressPercent"] = quantized_progress
-        if session.elapsed_seconds is not None:
-            status["elapsedSeconds"] = session.elapsed_seconds
+        status: Dict[str, Any] = {
+            "lifecycle": lifecycle,
+        }
+
         estimated_remaining = session.remaining_seconds
         if estimated_remaining is None and print_stats_snapshot is not None:
             total_duration = _to_float(print_stats_snapshot.data.get("total_duration"))
@@ -129,9 +109,6 @@ class StatusSelector:
                 and total_duration >= elapsed_duration
             ):
                 estimated_remaining = max(int(total_duration - elapsed_duration), 0)
-
-        if estimated_remaining is not None:
-            status["estimatedTimeRemainingSeconds"] = estimated_remaining
 
         job_payload = _build_job_payload(session)
         if job_payload:
@@ -160,7 +137,7 @@ class StatusSelector:
 
         last_updated = self._last_updated or observed_at
 
-        status["lastUpdatedUtc"] = last_updated.replace(microsecond=0).isoformat()
+        status["lastUpdated"] = last_updated.replace(microsecond=0).isoformat()
         self._last_emitted_at = observed_at
 
         return status
@@ -169,7 +146,7 @@ class StatusSelector:
         time_keys = {
             "elapsedSeconds",
             "estimatedTimeRemainingSeconds",
-            "lastUpdatedUtc",
+            "lastUpdated",
         }
 
         def sanitize(value: Any) -> Any:
@@ -221,7 +198,7 @@ class SensorsSelector:
             "maxHz": max_hz,
         }
         if watch_window_expires is not None:
-            cadence["watchWindowExpiresUtc"] = watch_window_expires.replace(
+            cadence["watchWindowExpires"] = watch_window_expires.replace(
                 microsecond=0
             ).isoformat()
 
@@ -231,7 +208,7 @@ class SensorsSelector:
         }
 
         # Only hash the sensors data for deduplication.
-        # Cadence metadata (mode, maxHz, watchWindowExpiresUtc) changes frequently
+        # Cadence metadata (mode, maxHz, watchWindowExpires) changes frequently
         # and should not trigger re-emission if sensor values haven't changed.
         contract_hash = json.dumps(sensors, sort_keys=True, default=str)
         if not force_emit and contract_hash == self._last_contract_hash:
@@ -306,7 +283,7 @@ class SensorsSelector:
             "sourceObject": section.name,
             **({"target": target} if target is not None else {}),
             "status": status,
-            "lastUpdatedUtc": last_updated.replace(microsecond=0).isoformat(),
+            "lastUpdated": last_updated.replace(microsecond=0).isoformat(),
         }
 
         return payload, previous
@@ -364,7 +341,6 @@ def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
 
     payload: Dict[str, Any] = {
         "sessionId": session.session_id,
-        "jobId": session.session_id,
     }
 
     # Include moonrakerJobId (raw value like "0003BB") for backend matching.
@@ -376,7 +352,6 @@ def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
 
     if session.job_name:
         payload["name"] = session.job_name
-        payload["sourcePath"] = session.job_name
 
     if session.progress_percent is not None:
         payload["progressPercent"] = max(

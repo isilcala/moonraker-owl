@@ -174,8 +174,8 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
     assert status_frame.channel == "status"
     assert status_frame.session_id.startswith("history-")
     status_body = status_frame.payload
-    assert status_body["printerStatus"] == "Printing"
-    assert status_body["flags"]["watchWindowActive"] is True
+    assert status_body["lifecycle"]["phase"] == "Printing"
+    assert status_body["cadence"]["watchWindowActive"] is True
     assert status_body["job"]["progressPercent"] == pytest.approx(12.0, rel=1e-3)
 
     sensors_frame = frames["sensors"]
@@ -214,13 +214,13 @@ def test_status_last_updated_remains_stable_without_state_changes(
 
     first_frames = orchestrator.build_payloads()
     first_status = first_frames["status"].payload
-    first_last_updated = first_status["lastUpdatedUtc"]
+    first_last_updated = first_status["lastUpdated"]
 
     orchestrator.ingest(baseline_snapshot)
 
     second_frames = orchestrator.build_payloads()
     second_status = second_frames["status"].payload
-    assert second_status["lastUpdatedUtc"] == first_last_updated
+    assert second_status["lastUpdated"] == first_last_updated
 
 
 def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> None:
@@ -240,7 +240,7 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
     first_frames = orchestrator.build_payloads()
     sensors_first = first_frames["sensors"].payload["sensors"]
     extruder_first = next(sensor for sensor in sensors_first if sensor["channel"] == "extruder")
-    first_last_updated = extruder_first["lastUpdatedUtc"]
+    first_last_updated = extruder_first["lastUpdated"]
 
     noise_update = {
         "method": "notify_status_update",
@@ -251,7 +251,7 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
     second_frames = orchestrator.build_payloads(forced_channels=["sensors"])
     sensors_second = second_frames["sensors"].payload["sensors"]
     extruder_second = next(sensor for sensor in sensors_second if sensor["channel"] == "extruder")
-    assert extruder_second["lastUpdatedUtc"] == first_last_updated
+    assert extruder_second["lastUpdated"] == first_last_updated
 
     change_update = {
         "method": "notify_status_update",
@@ -262,7 +262,7 @@ def test_sensor_last_updated_ignores_rounding_noise(baseline_snapshot: dict) -> 
     third_frames = orchestrator.build_payloads()
     sensors_third = third_frames["sensors"].payload["sensors"]
     extruder_third = next(sensor for sensor in sensors_third if sensor["channel"] == "extruder")
-    assert extruder_third["lastUpdatedUtc"] != first_last_updated
+    assert extruder_third["lastUpdated"] != first_last_updated
 
 
 def test_watch_window_flag_reflects_idle_mode(baseline_snapshot: dict) -> None:
@@ -276,8 +276,8 @@ def test_watch_window_flag_reflects_idle_mode(baseline_snapshot: dict) -> None:
 
     frames = orchestrator.build_payloads()
 
-    status_flags = frames["status"].payload["flags"]
-    assert status_flags["watchWindowActive"] is False
+    status_cadence = frames["status"].payload["cadence"]
+    assert status_cadence["watchWindowActive"] is False
 
 
 def test_replay_stream_produces_progress_while_printing() -> None:
@@ -347,8 +347,8 @@ def test_status_selector_emits_error_phase_when_klippy_shutdown() -> None:
     })
 
     frames = orchestrator.build_payloads()
-    assert frames["status"].payload["printerStatus"] == "Idle"
-    assert frames["status"].payload["flags"]["isShutdown"] is False
+    assert frames["status"].payload["lifecycle"]["phase"] == "Idle"
+    assert frames["status"].payload["lifecycle"]["isShutdown"] is False
 
     # Simulate klippy shutdown
     orchestrator.ingest({
@@ -368,14 +368,12 @@ def test_status_selector_emits_error_phase_when_klippy_shutdown() -> None:
     status = frames["status"].payload
 
     # Critical: phase should be Error, not Idle
-    assert status["printerStatus"] == "Error", (
-        "printerStatus should be Error when klippy is shutdown"
+    assert status["lifecycle"]["phase"] == "Error", (
+        "lifecycle.phase should be Error when klippy is shutdown"
     )
-    assert status["lifecycle"]["phase"] == "Error"
-    assert status["flags"]["isShutdown"] is True
+    assert status["lifecycle"]["isShutdown"] is True
 
     # The shutdown message should be available
-    assert "MCU shutdown" in status.get("subStatus", "")
     assert "MCU shutdown" in status["lifecycle"].get("reason", "")
 
     # Verify events channel emits klippy:shutdown
@@ -389,11 +387,11 @@ def test_status_selector_emits_error_phase_when_klippy_shutdown() -> None:
 
 
 def test_sensors_dedup_ignores_watch_window_expiry_changes(baseline_snapshot: dict) -> None:
-    """Verify that changes to watchWindowExpiresUtc don't cause sensor republishing.
+    """Verify that changes to watchWindowExpires don't cause sensor republishing.
     
     This is a regression test for a bug where the sensors contract_hash included
     cadence metadata, causing ~1Hz publish rate in watch mode even when sensor
-    values hadn't changed (because watchWindowExpiresUtc was ticking down).
+    values hadn't changed (because watchWindowExpires was ticking down).
     """
     now = datetime(2025, 10, 10, 16, 42, 0, tzinfo=timezone.utc)
     clock = FakeClock(now, now, now, now, now, now)
@@ -421,7 +419,7 @@ def test_sensors_dedup_ignores_watch_window_expiry_changes(baseline_snapshot: di
     # Second build should NOT emit sensors (values unchanged, only cadence changed)
     frames2 = orchestrator.build_payloads()
     assert "sensors" not in frames2, (
-        "Sensors should be deduplicated when only watchWindowExpiresUtc changes"
+        "Sensors should be deduplicated when only watchWindowExpires changes"
     )
     
     # Simulate watch window being extended (user opened sensors panel again)
@@ -966,8 +964,8 @@ class TestPrintEventPayloads:
         assert "printDuration" in event.data, f"printDuration missing. Got: {event.data}"
         assert "filamentUsedMm" in event.data, f"filamentUsedMm missing. Got: {event.data}"
         assert "progressPercent" in event.data, f"progressPercent missing. Got: {event.data}"
-        assert "errorMessage" in event.data, f"errorMessage missing. Got: {event.data}"
-        assert event.data["errorMessage"] == "Heater timeout on extruder"
+        assert "error" in event.data, f"error missing. Got: {event.data}"
+        assert event.data["error"] == "Heater timeout on extruder"
 
 
 # =============================================================================

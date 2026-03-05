@@ -1,0 +1,12 @@
+{
+    "$v": 1,
+    "$type": "command.request",
+    "$id": "33333333-3333-7333-8333-333333333333",
+    "$ts": "2025-01-15T10:33:00+00:00",
+    "$origin": "cloud-service@1.0",
+    "deviceId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+    "payload": {
+        "command": "print:pause",
+        "parameters": {}
+    }
+}

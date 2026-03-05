@@ -5,7 +5,6 @@ These names appear as the final segment of command topics:
 
 Command naming conventions (ADR-0013):
 - User commands: {domain}:{action} (print:pause, heater:set-target)
-- System sync: sync:{type} (sync:job-thumbnail) - fire-and-forget
 - System control: control:{type} (control:set-telemetry-rate) - requires ACK
 - System tasks: task:{type} (task:upload-thumbnail) - requires result
 
@@ -65,9 +64,6 @@ class PrinterCommandNames:
 
     FAN_SET_SPEED = "fan:set-speed"
     """Set fan speed."""
-
-    # Note: SYNC_JOB_THUMBNAIL has been removed.
-    # Thumbnail URLs are now pushed via SignalR after ACK processing.
 
     # -------------------------------------------------------------------------
     # System Task Commands (cloud-triggered, requires result)

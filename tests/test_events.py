@@ -135,7 +135,7 @@ class TestEventTypes:
         assert result["eventName"] == "print:started"
         assert result["severity"] == "info"
         assert result["message"] == "Print started: test.gcode"
-        assert result["occurredAtUtc"] == "2025-11-30T10:00:00Z"
+        assert result["occurredAt"] == "2025-11-30T10:00:00Z"
         assert result["sessionId"] == "history-123"
         assert result["data"]["filename"] == "test.gcode"
 

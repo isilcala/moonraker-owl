@@ -189,7 +189,7 @@ class EventCollector:
         payload: Dict[str, Any] = {
             "eventName": "system:command-state",
             "severity": "info",
-            "occurredAtUtc": occurred.replace(microsecond=0).isoformat(),
+            "occurredAt": occurred.replace(microsecond=0).isoformat(),
             "data": {
                 "commandId": command_id,
                 "commandType": command_type,

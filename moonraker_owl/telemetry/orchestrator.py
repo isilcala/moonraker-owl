@@ -321,9 +321,6 @@ class TelemetryOrchestrator:
         if status_payload:
             cadence = status_payload.setdefault("cadence", {})
             cadence["watchWindowActive"] = self._sensors_mode != "idle"
-            status_payload.setdefault("flags", {})["watchWindowActive"] = (
-                self._sensors_mode != "idle"
-            )
             frames["status"] = ChannelPayload(
                 channel="status",
                 payload=status_payload,
@@ -768,7 +765,7 @@ class TelemetryOrchestrator:
                 base_data["filamentUsedMm"] = filament_used
             error_message = print_data.get("message", "")
             if error_message:
-                base_data["errorMessage"] = error_message
+                base_data["error"] = error_message
             return base_data
 
         if event_name == EventName.PRINT_CANCELLED:
