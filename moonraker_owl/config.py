@@ -72,6 +72,18 @@ class MoonrakerConfig:
     api_key: Optional[str] = None
 
 
+# Sensors that are always reported regardless of allow/deny lists.
+# These are the minimum set required for basic printer monitoring.
+CORE_SENSORS: frozenset[str] = frozenset({
+    "extruder",
+    "extruder1",
+    "extruder2",
+    "extruder3",
+    "heater_bed",
+    "fan",
+})
+
+
 @dataclass(slots=True)
 class TelemetryConfig:
     rate_hz: float = DEFAULT_TELEMETRY_RATE_HZ
@@ -82,6 +94,16 @@ class TelemetryConfig:
     exclude_fields: List[str] = field(
         default_factory=lambda: list(DEFAULT_TELEMETRY_EXCLUDE_FIELDS)
     )
+    sensor_allowlist: List[str] = field(default_factory=list)
+    """Explicit list of sensor object names to report (in addition to core sensors).
+    When non-empty, only core sensors + these sensors are reported.
+    Example: ['temperature_sensor chamber', 'heater_generic chamber_heater']
+    """
+    sensor_denylist: List[str] = field(default_factory=list)
+    """Sensor object names to exclude from reporting.
+    Applied after allowlist. Can exclude core sensors if desired.
+    Example: ['temperature_sensor mcu_temp']
+    """
 
 
 @dataclass(slots=True)
@@ -351,6 +373,14 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 fallback=",".join(DEFAULT_TELEMETRY_EXCLUDE_FIELDS),
             ),
             default=DEFAULT_TELEMETRY_EXCLUDE_FIELDS,
+        ),
+        sensor_allowlist=_parse_list(
+            parser.get("telemetry", "sensor_allowlist", fallback=""),
+            default=[],
+        ),
+        sensor_denylist=_parse_list(
+            parser.get("telemetry", "sensor_denylist", fallback=""),
+            default=[],
         ),
     )
 

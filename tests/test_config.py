@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from moonraker_owl.config import load_config, DEFAULT_TELEMETRY_RATE_HZ
+from moonraker_owl.config import load_config, DEFAULT_TELEMETRY_RATE_HZ, CORE_SENSORS
 
 
 def test_load_config_defaults(tmp_path: Path) -> None:
@@ -80,3 +80,45 @@ status_heartbeat_seconds = 45
     assert config.cloud.base_url == "https://example.com"
     assert config.telemetry.rate_hz == 10.0
     assert config.telemetry_cadence.status_heartbeat_seconds == 45
+
+
+def test_load_config_sensor_filter_defaults(tmp_path: Path) -> None:
+    config_path = tmp_path / "moonraker-owl.cfg"
+    config = load_config(config_path)
+
+    assert config.telemetry.sensor_allowlist == []
+    assert config.telemetry.sensor_denylist == []
+
+
+def test_load_config_sensor_filter_allowlist(tmp_path: Path) -> None:
+    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path.write_text(
+        "[telemetry]\nsensor_allowlist = temperature_sensor chamber, heater_generic bed_heater\n",
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+
+    assert config.telemetry.sensor_allowlist == [
+        "temperature_sensor chamber",
+        "heater_generic bed_heater",
+    ]
+    assert config.telemetry.sensor_denylist == []
+
+
+def test_load_config_sensor_filter_denylist(tmp_path: Path) -> None:
+    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path.write_text(
+        "[telemetry]\nsensor_denylist = temperature_sensor mcu_temp\n",
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+
+    assert config.telemetry.sensor_denylist == ["temperature_sensor mcu_temp"]
+    assert config.telemetry.sensor_allowlist == []
+
+
+def test_core_sensors_set_is_frozen() -> None:
+    assert isinstance(CORE_SENSORS, frozenset)
+    assert "extruder" in CORE_SENSORS
+    assert "heater_bed" in CORE_SENSORS
+    assert "fan" in CORE_SENSORS

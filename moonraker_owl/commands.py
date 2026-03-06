@@ -547,7 +547,7 @@ class CommandProcessor:
                 )
 
         self._loop.call_soon(
-            lambda: asyncio.ensure_future(send_ack(), loop=self._loop)
+            lambda: self._loop.create_task(send_ack())
         )
 
     @property

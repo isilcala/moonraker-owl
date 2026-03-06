@@ -35,6 +35,7 @@ from .event_types import Event, EventName, EventPriority, EventSeverity
 from .events import EventCollector, RateLimitConfig
 from .orchestrator import ChannelPayload, TelemetryOrchestrator
 from .polling import DEFAULT_POLL_SPECS, PollSpec
+from .selectors import SensorFilter
 from .state_store import MoonrakerStateStore
 from .telemetry_state import TelemetryHasher
 
@@ -245,10 +246,15 @@ class TelemetryPublisher:
         self._current_mode = "idle"
         self._bootstrapped = False
 
+        self._sensor_filter = SensorFilter(
+            allowlist=config.telemetry.sensor_allowlist,
+            denylist=config.telemetry.sensor_denylist,
+        )
         self._orchestrator = TelemetryOrchestrator(
             clock=lambda: datetime.now(timezone.utc),
             cadence=self._cadence,
             job_registry=self._job_registry,
+            sensor_filter=self._sensor_filter,
         )
         self._orchestrator.set_sensors_mode(
             mode="idle",
@@ -344,6 +350,8 @@ class TelemetryPublisher:
                     " " in heater and heater.split(" ", 1)[1].startswith("_")
                 ):
                     continue
+                if not self._sensor_filter.is_allowed(heater):
+                    continue
                 self._subscription_objects[heater] = ["temperature", "target"]
                 added_objects.append(heater)
 
@@ -357,6 +365,8 @@ class TelemetryPublisher:
                     continue
                 # Skip if it's already a heater (to avoid duplicate subscriptions)
                 if sensor in available_heaters:
+                    continue
+                if not self._sensor_filter.is_allowed(sensor):
                     continue
                 # temperature_fan has target, temperature_sensor does not
                 if sensor.startswith("temperature_fan"):

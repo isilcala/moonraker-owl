@@ -11,7 +11,7 @@ from ..config import TelemetryCadenceConfig
 from ..version import __version__
 from .events import EventCollector
 from .event_types import Event, EventName, PRINT_STATE_TRANSITIONS
-from .selectors import EventsSelector, ObjectsSelector, SensorsSelector, StatusSelector
+from .selectors import EventsSelector, ObjectsSelector, SensorFilter, SensorsSelector, StatusSelector
 from .state_store import MoonrakerStateStore, MoonrakerStoreState
 from .trackers import HeaterMonitor, PrintSessionTracker, SessionInfo
 
@@ -47,6 +47,7 @@ class TelemetryOrchestrator:
         clock=None,
         cadence: Optional[TelemetryCadenceConfig] = None,
         job_registry: Optional["PrintJobRegistry"] = None,
+        sensor_filter: Optional[SensorFilter] = None,
     ) -> None:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._origin = origin or f"moonraker-owl@{__version__}"
@@ -65,7 +66,7 @@ class TelemetryOrchestrator:
         self.events = EventCollector()
 
         self.status_selector = StatusSelector(heartbeat_seconds=heartbeat)
-        self.sensors_selector = SensorsSelector()
+        self.sensors_selector = SensorsSelector(sensor_filter=sensor_filter)
         self.objects_selector = ObjectsSelector()
         self.events_selector = EventsSelector(
             max_per_second=self._cadence.events_max_per_second,

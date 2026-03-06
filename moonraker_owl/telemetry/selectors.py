@@ -7,7 +7,9 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence
+
+from ..config import CORE_SENSORS
 
 from .state_engine import PrinterContext, resolve_printer_state
 from .state_store import MoonrakerStateStore, SectionSnapshot
@@ -173,10 +175,42 @@ class _SensorState:
     last_updated: datetime
 
 
+class SensorFilter:
+    """Decides which Moonraker sensor objects should be reported.
+
+    Resolution order:
+    1. Denylist always wins — if a sensor is denied, it is excluded.
+    2. Core sensors (extruder*, heater_bed, fan) are included by default.
+    3. If allowlist is non-empty, only core + allowed sensors pass.
+    4. If allowlist is empty, all sensors pass (minus denied ones).
+    """
+
+    def __init__(
+        self,
+        *,
+        allowlist: Sequence[str] = (),
+        denylist: Sequence[str] = (),
+    ) -> None:
+        self._allowlist: FrozenSet[str] = frozenset(allowlist)
+        self._denylist: FrozenSet[str] = frozenset(denylist)
+        self._use_allowlist = len(self._allowlist) > 0
+
+    def is_allowed(self, sensor_name: str) -> bool:
+        """Return True if the sensor should be reported."""
+        if sensor_name in self._denylist:
+            return False
+        if sensor_name in CORE_SENSORS:
+            return True
+        if self._use_allowlist:
+            return sensor_name in self._allowlist
+        return True
+
+
 class SensorsSelector:
-    def __init__(self) -> None:
+    def __init__(self, *, sensor_filter: Optional[SensorFilter] = None) -> None:
         self._sensor_state: Dict[str, _SensorState] = {}
         self._last_contract_hash: Optional[str] = None
+        self._sensor_filter = sensor_filter or SensorFilter()
 
     def reset(self) -> None:
         self._sensor_state.clear()
@@ -224,6 +258,9 @@ class SensorsSelector:
         for section in store.iter_sections():
             channel = _get_channel_name(section.name)
             if channel is None:
+                continue
+
+            if not self._sensor_filter.is_allowed(section.name):
                 continue
 
             payload, state = self._build_sensor_payload(channel, section)
