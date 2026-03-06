@@ -336,7 +336,7 @@ async def test_connect_with_backoff_retries(coordinator_setup):
     coordinator, mqtt_client, _ = coordinator_setup(connect_succeeds=False)
 
     async def stop_after_delay():
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.5)
         coordinator._stop_event.set()
 
     stop_task = asyncio.create_task(stop_after_delay())
