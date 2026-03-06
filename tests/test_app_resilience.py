@@ -5,55 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import types
-from configparser import ConfigParser
-from pathlib import Path
 from typing import Any, Optional
 
 import pytest
 
-from moonraker_owl.app import AgentState, MoonrakerOwlApp
-from moonraker_owl.config import (
-    CameraConfig,
-    CloudConfig,
-    CommandConfig,
-    CompressionConfig,
-    LoggingConfig,
-    MetadataConfig,
-    MoonrakerConfig,
-    OwlConfig,
-    ResilienceConfig,
-    TelemetryCadenceConfig,
-    TelemetryConfig,
-)
-
-
-def _build_config(*, breaker_threshold: int = 2) -> OwlConfig:
-    parser = ConfigParser()
-    parser.add_section("cloud")
-    parser.set("cloud", "device_id", "device-123")
-    parser.set("cloud", "tenant_id", "tenant-99")
-    parser.set("cloud", "printer_id", "printer-17")
-
-    return OwlConfig(
-        cloud=CloudConfig(
-            base_url="https://api.owl.dev",
-            broker_host="broker.owl.dev",
-            broker_port=1883,
-            username="tenant-99:device-123",
-            password="token",
-        ),
-        moonraker=MoonrakerConfig(),
-        telemetry=TelemetryConfig(),
-        telemetry_cadence=TelemetryCadenceConfig(),
-        commands=CommandConfig(),
-        logging=LoggingConfig(),
-        resilience=ResilienceConfig(moonraker_breaker_threshold=breaker_threshold),
-        compression=CompressionConfig(),
-        camera=CameraConfig(),
-        metadata=MetadataConfig(),
-        raw=parser,
-        path=Path("moonraker-owl.cfg"),
-    )
+from moonraker_owl.app import AgentState, MoonrakerOwlApp, _ALLOWED_TRANSITIONS
+from helpers import build_config
 
 
 class _StubTelemetryPublisher:
@@ -100,7 +57,7 @@ class _StubCommandProcessor:
 
 @pytest.mark.asyncio
 async def test_moonraker_breaker_trips_after_failures() -> None:
-    config = _build_config(breaker_threshold=2)
+    config = build_config(breaker_threshold=2)
     app = MoonrakerOwlApp(config)
 
     app._loop = asyncio.get_running_loop()
@@ -130,7 +87,7 @@ async def test_moonraker_breaker_trips_after_failures() -> None:
 
 @pytest.mark.asyncio
 async def test_moonraker_recovery_restarts_components() -> None:
-    config = _build_config(breaker_threshold=1)
+    config = build_config(breaker_threshold=1)
     app = MoonrakerOwlApp(config)
 
     app._loop = asyncio.get_running_loop()
@@ -192,7 +149,7 @@ def _build_snapshot(
 
 
 def test_moonraker_assessment_detects_shutdown_state() -> None:
-    app = MoonrakerOwlApp(_build_config())
+    app = MoonrakerOwlApp(build_config())
     snapshot = _build_snapshot(
         webhooks_state="shutdown",
         print_message="Emergency stop",
@@ -207,7 +164,7 @@ def test_moonraker_assessment_detects_shutdown_state() -> None:
 
 @pytest.mark.asyncio
 async def test_push_status_listener_trips_breaker_on_shutdown() -> None:
-    config = _build_config(breaker_threshold=1)
+    config = build_config(breaker_threshold=1)
     app = MoonrakerOwlApp(config)
 
     app._loop = asyncio.get_running_loop()
@@ -237,7 +194,7 @@ async def test_push_status_listener_trips_breaker_on_shutdown() -> None:
 
 
 def test_moonraker_assessment_reports_healthy_state() -> None:
-    app = MoonrakerOwlApp(_build_config())
+    app = MoonrakerOwlApp(build_config())
     snapshot = _build_snapshot(
         webhooks_state="ready",
         printer_state="ready",
@@ -252,7 +209,7 @@ def test_moonraker_assessment_reports_healthy_state() -> None:
 
 
 def test_moonraker_assessment_ignores_stale_webhooks_error() -> None:
-    app = MoonrakerOwlApp(_build_config())
+    app = MoonrakerOwlApp(build_config())
     snapshot = _build_snapshot(
         webhooks_state="error",
         print_state="standby",
@@ -266,7 +223,7 @@ def test_moonraker_assessment_ignores_stale_webhooks_error() -> None:
 
 
 def test_moonraker_assessment_detects_print_stats_error() -> None:
-    app = MoonrakerOwlApp(_build_config())
+    app = MoonrakerOwlApp(build_config())
     snapshot = _build_snapshot(
         print_state="error",
         print_message="Emergency stop",
@@ -281,7 +238,7 @@ def test_moonraker_assessment_detects_print_stats_error() -> None:
 
 @pytest.mark.asyncio
 async def test_moonraker_failure_force_trip_bypasses_threshold() -> None:
-    config = _build_config(breaker_threshold=5)
+    config = build_config(breaker_threshold=5)
     app = MoonrakerOwlApp(config)
     app._loop = asyncio.get_running_loop()
 
@@ -296,3 +253,49 @@ async def test_moonraker_failure_force_trip_bypasses_threshold() -> None:
 
     assert app._moonraker_breaker_tripped is True
     assert telemetry.system_status_calls == [("error", "moonraker shutdown")]
+
+
+@pytest.mark.asyncio
+async def test_invalid_state_transition_is_rejected(caplog: pytest.LogCaptureFixture) -> None:
+    """Test that invalid transitions are rejected and logged as errors."""
+    config = build_config()
+    app = MoonrakerOwlApp(config)
+    app._loop = asyncio.get_running_loop()
+
+    # Start in COLD_START (default)
+    assert app._state == AgentState.COLD_START
+
+    # COLD_START -> ACTIVE is not allowed (must go through AWAITING_*)
+    await app._transition_state(AgentState.ACTIVE, detail="invalid")
+
+    # State should remain COLD_START
+    assert app._state == AgentState.COLD_START
+    assert any(
+        "Invalid state transition: cold_start -> active" in r.message
+        for r in caplog.records
+        if r.levelname == "ERROR"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stopping_is_terminal_state() -> None:
+    """Test that no transitions are allowed from STOPPING."""
+    config = build_config()
+    app = MoonrakerOwlApp(config)
+    app._loop = asyncio.get_running_loop()
+
+    # Force into STOPPING
+    app._state = AgentState.STOPPING
+
+    # Try every state �?all should be rejected
+    for target in AgentState:
+        if target == AgentState.STOPPING:
+            continue  # same-state is a no-op
+        await app._transition_state(target)
+        assert app._state == AgentState.STOPPING
+
+
+def test_allowed_transitions_covers_all_states() -> None:
+    """Every AgentState must appear as a key in _ALLOWED_TRANSITIONS."""
+    for state in AgentState:
+        assert state in _ALLOWED_TRANSITIONS, f"{state.value} missing from _ALLOWED_TRANSITIONS"

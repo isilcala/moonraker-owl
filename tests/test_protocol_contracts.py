@@ -291,3 +291,176 @@ class TestLwtPayloadStructure:
         doc = self._build_lwt_payload()
 
         assert "lastUpdated" in doc["payload"]
+
+
+# ---------------------------------------------------------------------------
+# Value validation: verify field values match expected formats
+# ---------------------------------------------------------------------------
+
+import re
+from datetime import datetime as _dt
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+_ISO8601_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",
+)
+
+
+class TestContractValueValidation:
+    """Verify fixture field values use correct formats (ISO 8601, UUID, enums)."""
+
+    @pytest.mark.parametrize(
+        "fixture_name",
+        [
+            "command-capture-image.json",
+            "command-set-rate.json",
+            "command-print-pause.json",
+            "command-job-registered.json",
+        ],
+    )
+    def test_envelope_id_is_uuid(self, fixture_name: str):
+        data = _load_fixture(fixture_name)
+        assert _UUID_RE.match(data["$id"]), f"$id is not a valid UUID: {data['$id']}"
+
+    @pytest.mark.parametrize(
+        "fixture_name",
+        [
+            "command-capture-image.json",
+            "command-set-rate.json",
+            "command-print-pause.json",
+            "command-job-registered.json",
+        ],
+    )
+    def test_envelope_ts_is_iso8601(self, fixture_name: str):
+        data = _load_fixture(fixture_name)
+        assert _ISO8601_RE.match(data["$ts"]), f"$ts is not ISO 8601: {data['$ts']}"
+
+    @pytest.mark.parametrize(
+        "fixture_name",
+        [
+            "command-capture-image.json",
+            "command-set-rate.json",
+            "command-print-pause.json",
+            "command-job-registered.json",
+        ],
+    )
+    def test_envelope_device_id_is_uuid(self, fixture_name: str):
+        data = _load_fixture(fixture_name)
+        assert _UUID_RE.match(data["deviceId"]), f"deviceId is not UUID: {data['deviceId']}"
+
+    def test_capture_image_ids_are_uuid(self):
+        data = _load_fixture("command-capture-image.json")
+        params = data["payload"]["parameters"]
+        assert _UUID_RE.match(params["captureFrameId"])
+
+    def test_set_rate_issued_at_is_iso8601(self):
+        data = _load_fixture("command-set-rate.json")
+        params = data["payload"]["parameters"]
+        assert _ISO8601_RE.match(params["issuedAt"])
+        assert _ISO8601_RE.match(params["serverUtcNow"])
+
+    def test_set_rate_mode_is_valid_enum(self):
+        data = _load_fixture("command-set-rate.json")
+        params = data["payload"]["parameters"]
+        assert params["mode"] in {"idle", "watch"}
+
+    def test_ack_status_is_valid_enum(self):
+        builder = TestAckPayloadStructure()
+        for status in ("accepted", "completed", "failed"):
+            doc = builder._build_sample_ack(status=status)
+            assert doc["payload"]["status"] in {"accepted", "completed", "failed"}
+
+    def test_ack_stage_is_valid_enum(self):
+        builder = TestAckPayloadStructure()
+        for stage in ("dispatch", "execution"):
+            doc = builder._build_sample_ack(stage=stage)
+            assert doc["payload"]["stage"] in {"dispatch", "execution"}
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility: unknown fields must not break parsing
+# ---------------------------------------------------------------------------
+
+
+class TestBackwardCompatibility:
+    """
+    When the cloud adds new fields (envelope, payload, or parameters),
+    the agent must still parse existing fields correctly.
+    """
+
+    ALL_FIXTURES = [
+        ("command-capture-image.json", "task:capture-image"),
+        ("command-set-rate.json", "control:set-telemetry-rate"),
+        ("command-print-pause.json", "print:pause"),
+        ("command-job-registered.json", "job:registered"),
+    ]
+
+    @pytest.mark.parametrize("fixture_name,command_name", ALL_FIXTURES)
+    def test_unknown_envelope_fields_ignored(self, fixture_name, command_name):
+        """Extra top-level fields (future cloud versions) don't break parsing."""
+        data = _load_fixture(fixture_name)
+        data["$newField"] = "future-value"
+        data["metadata"] = {"region": "us-east-1", "priority": 5}
+
+        msg = _parse_command(_to_bytes(data), command_name)
+        assert msg.command_id == data["$id"]
+        assert msg.command == command_name
+
+    @pytest.mark.parametrize("fixture_name,command_name", ALL_FIXTURES)
+    def test_unknown_payload_fields_ignored(self, fixture_name, command_name):
+        """Extra fields inside payload don't affect command/parameters extraction."""
+        data = _load_fixture(fixture_name)
+        data["payload"]["routingKey"] = "some.routing.key"
+        data["payload"]["retryCount"] = 3
+        data["payload"]["tags"] = ["urgent", "v2"]
+
+        msg = _parse_command(_to_bytes(data), command_name)
+        assert msg.command_id == data["$id"]
+        assert msg.command == command_name
+
+    @pytest.mark.parametrize("fixture_name,command_name", ALL_FIXTURES)
+    def test_unknown_parameter_fields_preserved(self, fixture_name, command_name):
+        """Extra fields inside parameters are passed through to handlers."""
+        data = _load_fixture(fixture_name)
+        data["payload"]["parameters"]["futureFlag"] = True
+        data["payload"]["parameters"]["experimentId"] = "exp-999"
+
+        msg = _parse_command(_to_bytes(data), command_name)
+        assert msg.parameters["futureFlag"] is True
+        assert msg.parameters["experimentId"] == "exp-999"
+
+    def test_higher_envelope_version_still_parses(self):
+        """A future $v=2 envelope should still parse (no version gating)."""
+        data = _load_fixture("command-print-pause.json")
+        data["$v"] = 2
+        data["$schemaVersion"] = "2.0.0"
+
+        msg = _parse_command(_to_bytes(data), "print:pause")
+        assert msg.command_id == data["$id"]
+        assert msg.command == "print:pause"
+
+    def test_capture_image_with_extra_params_preserves_known(self):
+        """capture-image with extra params still exposes known fields."""
+        data = _load_fixture("command-capture-image.json")
+        data["payload"]["parameters"]["compressionQuality"] = 85
+        data["payload"]["parameters"]["maxWidth"] = 1920
+
+        msg = _parse_command(_to_bytes(data), "task:capture-image")
+        assert msg.parameters["captureFrameId"] == "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+        assert msg.parameters["presignedUploadUrl"].startswith("https://")
+        assert msg.parameters["compressionQuality"] == 85
+
+    def test_set_rate_with_extra_params_preserves_known(self):
+        """set-rate with extra params still exposes known fields."""
+        data = _load_fixture("command-set-rate.json")
+        data["payload"]["parameters"]["adaptiveMode"] = True
+
+        msg = _parse_command(_to_bytes(data), "control:set-telemetry-rate")
+        assert msg.parameters["mode"] == "watch"
+        assert msg.parameters["maxHz"] == 2.0
+        assert msg.parameters["adaptiveMode"] is True

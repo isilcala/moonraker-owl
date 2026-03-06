@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+_BACKOFF_MAX_ATTEMPTS = 10
+"""Number of exponential-backoff retries before switching to perpetual fixed-interval."""
+
 
 class ReconnectReason(str, Enum):
     """Reason for requesting a reconnection."""
@@ -145,6 +148,9 @@ class ConnectionCoordinator:
         LOGGER.info("Establishing MQTT connection")
 
         try:
+            # clean_start=False: resume existing broker session (subscriptions +
+            # queued QoS 1/2 messages) across reconnects.  Session expires after
+            # session_expiry seconds of inactivity (default 24h).
             await self._mqtt_client.connect(
                 clean_start=False,
                 session_expiry=self._session_expiry,
@@ -267,13 +273,15 @@ class ConnectionCoordinator:
                     LOGGER.exception("Reconnected callback failed")
         else:
             self._state = ConnectionState.DISCONNECTED
-            LOGGER.error("Failed to reconnect after all attempts, will retry on next trigger")
-            # Note: We don't schedule automatic retry here.
-            # The TokenManager renewal loop will eventually succeed when the cloud
-            # comes back online, and _on_token_renewed will trigger a new reconnect.
+            LOGGER.warning("Reconnection abandoned (coordinator stopping)")
 
     async def _connect_with_backoff(self) -> bool:
-        """Attempt connection with exponential backoff.
+        """Attempt connection with exponential backoff, then perpetual retry.
+
+        First tries up to ``_BACKOFF_MAX_ATTEMPTS`` with exponential backoff.
+        If those all fail, switches to a fixed interval
+        (``reconnect_perpetual_seconds``) and retries indefinitely until
+        connection succeeds or the coordinator is stopped.
 
         Returns:
             True if connection succeeded, False otherwise.
@@ -281,12 +289,13 @@ class ConnectionCoordinator:
         delay = max(0.5, self._resilience.reconnect_initial_seconds)
         max_delay = max(delay, self._resilience.reconnect_max_seconds)
         jitter_ratio = max(0.0, min(1.0, self._resilience.reconnect_jitter_ratio))
+        perpetual_delay = self._resilience.reconnect_perpetual_seconds
 
         attempt = 0
-        max_attempts = 10  # Reasonable limit to prevent infinite loops
 
-        while not self._stop_event.is_set() and attempt < max_attempts:
+        while not self._stop_event.is_set():
             attempt += 1
+            in_perpetual = attempt > _BACKOFF_MAX_ATTEMPTS
 
             try:
                 LOGGER.debug("MQTT connection attempt %d", attempt)
@@ -298,20 +307,29 @@ class ConnectionCoordinator:
                 return True
 
             except Exception as exc:
-                LOGGER.warning(
-                    "Connection attempt %d failed: %s, retrying in %.1fs",
-                    attempt,
-                    exc,
-                    delay,
-                )
+                if in_perpetual:
+                    sleep_for = perpetual_delay
+                    LOGGER.warning(
+                        "Connection attempt %d failed: %s, perpetual retry in %.0fs",
+                        attempt,
+                        exc,
+                        sleep_for,
+                    )
+                else:
+                    LOGGER.warning(
+                        "Connection attempt %d failed: %s, retrying in %.1fs",
+                        attempt,
+                        exc,
+                        delay,
+                    )
 
-                # Apply jitter to delay
-                sleep_for = delay
-                if jitter_ratio > 0.0:
-                    jitter = delay * jitter_ratio
-                    lower = max(0.1, delay - jitter)
-                    upper = delay + jitter
-                    sleep_for = random.uniform(lower, upper)
+                    # Apply jitter to delay
+                    sleep_for = delay
+                    if jitter_ratio > 0.0:
+                        jitter = delay * jitter_ratio
+                        lower = max(0.1, delay - jitter)
+                        upper = delay + jitter
+                        sleep_for = random.uniform(lower, upper)
 
                 try:
                     await asyncio.wait_for(
@@ -323,7 +341,16 @@ class ConnectionCoordinator:
                 except asyncio.TimeoutError:
                     pass
 
-                # Exponential backoff
-                delay = min(delay * 2, max_delay)
+                if not in_perpetual:
+                    # Exponential backoff (only during initial phase)
+                    delay = min(delay * 2, max_delay)
+
+                    if attempt == _BACKOFF_MAX_ATTEMPTS:
+                        LOGGER.warning(
+                            "Exponential backoff exhausted after %d attempts, "
+                            "switching to perpetual retry every %.0fs",
+                            attempt,
+                            perpetual_delay,
+                        )
 
         return False

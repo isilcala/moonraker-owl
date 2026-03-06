@@ -12,6 +12,11 @@ from ..core import deep_merge
 
 LOGGER = logging.getLogger(__name__)
 
+_SECTION_COUNT_WARNING_THRESHOLD = 50
+"""Log a warning if the store accumulates more sections than expected.
+A typical Klipper setup has ~10-30 Moonraker objects.  Exceeding this
+threshold likely indicates a subscription misconfiguration or agent bug."""
+
 
 @dataclass(frozen=True)
 class SectionSnapshot:
@@ -281,6 +286,13 @@ class MoonrakerStateStore:
                 return
         else:
             base = copy.deepcopy(incoming)
+            if len(self._sections) >= _SECTION_COUNT_WARNING_THRESHOLD:
+                LOGGER.warning(
+                    "StateStore section count (%d) exceeds threshold (%d); "
+                    "possible subscription misconfiguration",
+                    len(self._sections) + 1,
+                    _SECTION_COUNT_WARNING_THRESHOLD,
+                )
 
         if name == "print_stats":
             # Debug: log what we received vs what we're storing

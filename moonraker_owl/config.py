@@ -50,6 +50,7 @@ class TelemetryCadenceConfig:
     events_max_per_second: int = 1
     events_max_per_minute: int = 20
     thumbnail_fetch_timeout_ms: int = 5000  # Timeout for fetching GCode metadata and moonrakerJobId from History API
+    timelapse_poll_interval_seconds: float = 5.0
 
 
 @dataclass(slots=True)
@@ -126,6 +127,7 @@ class ResilienceConfig:
     reconnect_initial_seconds: float = 1.0
     reconnect_max_seconds: float = 30.0
     reconnect_jitter_ratio: float = 0.5
+    reconnect_perpetual_seconds: float = 900.0
     session_expiry_seconds: int = 86400
     buffer_window_seconds: float = 60.0
     moonraker_breaker_threshold: int = 5
@@ -263,6 +265,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "events_max_per_second": "1",
                 "events_max_per_minute": "20",
                 "thumbnail_fetch_timeout_ms": "1000",
+                "timelapse_poll_interval_seconds": "5.0",
             },
             "logging": {
                 "level": "INFO",
@@ -276,6 +279,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 "reconnect_initial_seconds": "1.0",
                 "reconnect_max_seconds": "30.0",
                 "reconnect_jitter_ratio": "0.5",
+                "reconnect_perpetual_seconds": "900.0",
                 "session_expiry_seconds": "86400",
                 "buffer_window_seconds": "60.0",
                 "moonraker_breaker_threshold": "5",
@@ -428,6 +432,11 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             "thumbnail_fetch_timeout_ms",
             fallback=cadence_defaults.thumbnail_fetch_timeout_ms,
         ),
+        timelapse_poll_interval_seconds=parser.getfloat(
+            "telemetry_cadence",
+            "timelapse_poll_interval_seconds",
+            fallback=cadence_defaults.timelapse_poll_interval_seconds,
+        ),
     )
 
     logging_defaults = LoggingConfig()
@@ -458,6 +467,10 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
                 1.0,
                 parser.getfloat("resilience", "reconnect_jitter_ratio", fallback=0.5),
             ),
+        ),
+        reconnect_perpetual_seconds=max(
+            60.0,
+            parser.getfloat("resilience", "reconnect_perpetual_seconds", fallback=900.0),
         ),
         session_expiry_seconds=max(
             0,

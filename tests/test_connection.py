@@ -67,6 +67,7 @@ class FakeResilienceConfig:
         self.reconnect_initial_seconds = 0.05
         self.reconnect_max_seconds = 0.2
         self.reconnect_jitter_ratio = 0.0
+        self.reconnect_perpetual_seconds = 0.3
 
 
 @pytest.fixture
@@ -331,15 +332,21 @@ async def test_disconnected_callback_invoked(coordinator_setup):
 
 @pytest.mark.asyncio
 async def test_connect_with_backoff_retries(coordinator_setup):
-    """Test that _connect_with_backoff retries on failure."""
+    """Test that _connect_with_backoff retries on failure until stopped."""
     coordinator, mqtt_client, _ = coordinator_setup(connect_succeeds=False)
 
-    # This should attempt multiple times before giving up
+    async def stop_after_delay():
+        await asyncio.sleep(0.5)
+        coordinator._stop_event.set()
+
+    stop_task = asyncio.create_task(stop_after_delay())
+
     result = await coordinator._connect_with_backoff()
 
     assert result is False
     # Should have made multiple attempts
     assert mqtt_client.connect_call_count > 1
+    await stop_task
 
 
 @pytest.mark.asyncio
@@ -412,3 +419,56 @@ async def test_auth_failure_not_ignored_during_reconnecting(coordinator_setup):
     # Should be accepted
     assert coordinator._pending_reason == ReconnectReason.AUTH_FAILURE
     assert coordinator._reconnect_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_perpetual_retry_after_backoff_exhaustion(coordinator_setup):
+    """Test that connection retries perpetually after exponential backoff is exhausted.
+
+    After _BACKOFF_MAX_ATTEMPTS (10) failed exponential-backoff attempts,
+    the coordinator should keep retrying at a fixed interval until it succeeds.
+    """
+    from moonraker_owl.connection import _BACKOFF_MAX_ATTEMPTS
+
+    # Create a client that fails first N times then succeeds
+    succeed_after = _BACKOFF_MAX_ATTEMPTS + 3  # fail all backoff + 3 perpetual rounds
+    coordinator, mqtt_client, _ = coordinator_setup(connect_succeeds=False)
+
+    original_connect = mqtt_client.connect
+
+    async def connect_eventually(**kwargs):
+        mqtt_client.connect_call_count += 1
+        if mqtt_client.connect_call_count >= succeed_after:
+            mqtt_client.connect_succeeds = True
+            mqtt_client._connected = True
+            return
+        raise ConnectionError("Simulated connection failure")
+
+    # Patch connect to not double-count (original increments too)
+    mqtt_client.connect_call_count = 0
+    mqtt_client.connect = connect_eventually
+
+    result = await coordinator._connect_with_backoff()
+
+    assert result is True
+    # Must have gone past exponential backoff into perpetual retry
+    assert mqtt_client.connect_call_count >= succeed_after
+
+
+@pytest.mark.asyncio
+async def test_perpetual_retry_stops_on_stop_event(coordinator_setup):
+    """Test that perpetual retry stops when stop event is set."""
+    coordinator, mqtt_client, _ = coordinator_setup(connect_succeeds=False)
+
+    async def set_stop_after_delay():
+        await asyncio.sleep(0.3)
+        coordinator._stop_event.set()
+
+    stop_task = asyncio.create_task(set_stop_after_delay())
+
+    result = await coordinator._connect_with_backoff()
+
+    assert result is False
+    # Should have made at least one attempt before being stopped
+    assert mqtt_client.connect_call_count >= 1
+    await stop_task

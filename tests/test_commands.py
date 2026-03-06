@@ -195,32 +195,9 @@ class FakeTelemetry:
 
 @pytest.fixture
 def config() -> OwlConfig:
-    parser = ConfigParser()
-    parser.add_section("cloud")
-    parser.set("cloud", "device_id", "device-123")
-    parser.set("cloud", "tenant_id", "tenant-99")
-    parser.set("cloud", "printer_id", "printer-17")
+    from helpers import build_config
 
-    return OwlConfig(
-        cloud=CloudConfig(
-            base_url="https://api.owl.dev",
-            broker_host="broker.owl.dev",
-            broker_port=1883,
-            username="tenant-99:device-123",
-            password="token",
-        ),
-        moonraker=MoonrakerConfig(),
-        telemetry=TelemetryConfig(),
-        telemetry_cadence=TelemetryCadenceConfig(),
-        commands=CommandConfig(),
-        logging=LoggingConfig(),
-        resilience=ResilienceConfig(),
-        compression=CompressionConfig(),
-        camera=CameraConfig(),
-        metadata=MetadataConfig(),
-        raw=parser,
-        path=Path("moonraker-owl.cfg"),
-    )
+    return build_config()
 
 
 @pytest.mark.asyncio
@@ -1665,5 +1642,29 @@ async def test_firmware_restart_executes_and_sends_ack(config):
     assert completed["payload"]["commandId"] == "cmd-fwr-1"
 
     await processor.stop()
+
+
+# ── Hot/Cold Path Annotation Tests (ADR-0039) ─────────────────────────────
+
+
+def test_hot_cold_path_sets_are_disjoint() -> None:
+    """HOT_PATH_COMMANDS and COLD_PATH_COMMANDS must not overlap."""
+    from moonraker_owl.printer_command_names import PrinterCommandNames
+
+    overlap = PrinterCommandNames.HOT_PATH_COMMANDS & PrinterCommandNames.COLD_PATH_COMMANDS
+    assert not overlap, f"Overlap: {overlap}"
+
+
+def test_hot_cold_path_classifiers() -> None:
+    """is_hot_path and is_cold_path classify known commands correctly."""
+    from moonraker_owl.printer_command_names import PrinterCommandNames
+
+    assert PrinterCommandNames.is_hot_path("print:pause")
+    assert PrinterCommandNames.is_hot_path("heater:set-target")
+    assert not PrinterCommandNames.is_hot_path("task:upload-thumbnail")
+
+    assert PrinterCommandNames.is_cold_path("task:upload-thumbnail")
+    assert PrinterCommandNames.is_cold_path("task:capture-image")
+    assert not PrinterCommandNames.is_cold_path("print:pause")
 
 

@@ -101,3 +101,36 @@ class PrinterCommandNames:
 
     STATE_CONFIRMATION_COMMANDS = frozenset({PAUSE, RESUME, CANCEL})
     """Commands that require printer state confirmation before ACK."""
+
+    # ── Dispatch Path Annotations (ADR-0039) ────────────────────────────────
+    #
+    # Keep in sync with C# PrinterCommandNames.HotPathCommands.
+    #
+    # Hot Path: fire-and-forget MQTT dispatch, no Outbox, < 200 ms ACK target.
+    # Cold Path: Outbox + ACK wait, result processors, guaranteed delivery.
+    #
+    # The agent treats both paths identically (receive → ACK accepted → execute
+    # → ACK completed/failed). The distinction is server-side only, documented
+    # here for cross-codebase alignment.
+
+    HOT_PATH_COMMANDS: frozenset[str] = frozenset({
+        PAUSE, RESUME, CANCEL, EMERGENCY_STOP, FIRMWARE_RESTART, REPRINT,
+        HEATER_SET_TARGET, HEATER_TURN_OFF, FAN_SET_SPEED,
+        OBJECT_EXCLUDE, SET_TELEMETRY_RATE,
+    })
+    """Commands dispatched via Hot Path (ADR-0039): fire-and-forget MQTT."""
+
+    COLD_PATH_COMMANDS: frozenset[str] = frozenset({
+        UPLOAD_THUMBNAIL, CAPTURE_IMAGE, UPLOAD_TIMELAPSE,
+    })
+    """Commands dispatched via Cold Path (ADR-0039): Outbox + result processors."""
+
+    @classmethod
+    def is_hot_path(cls, command_name: str) -> bool:
+        """Return True if the command uses Hot Path dispatch."""
+        return command_name in cls.HOT_PATH_COMMANDS
+
+    @classmethod
+    def is_cold_path(cls, command_name: str) -> bool:
+        """Return True if the command uses Cold Path dispatch."""
+        return command_name in cls.COLD_PATH_COMMANDS

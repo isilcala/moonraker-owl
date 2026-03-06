@@ -13,17 +13,14 @@ is isolated here rather than scattered through the TelemetryPublisher.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-LOGGER = logging.getLogger(__name__)
+from .telemetry_state import TelemetryHasher
 
-# Precision for float normalization in hash computation
-HASH_FLOAT_PRECISION = 4
+LOGGER = logging.getLogger(__name__)
 
 
 class TelemetryCadenceError(RuntimeError):
@@ -73,29 +70,6 @@ class ChannelDecision:
     reason: Optional[str] = None
 
 
-def _normalize_for_hash(value: Any) -> Any:
-    """Normalize a value for deterministic hashing."""
-    if isinstance(value, dict):
-        return {key: _normalize_for_hash(value[key]) for key in sorted(value.keys())}
-    if isinstance(value, list):
-        return [_normalize_for_hash(item) for item in value]
-    if isinstance(value, float):
-        return round(value, HASH_FLOAT_PRECISION)
-    return value
-
-
-def compute_payload_hash(payload: Any) -> str:
-    """Compute a deterministic hash for a telemetry payload."""
-    normalized = _normalize_for_hash(payload)
-    blob = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.md5(blob).hexdigest()
-
-
-# Protocol for hasher compatibility with TelemetryHasher
-class _HasherProtocol:
-    def hash_payload(self, payload: Any) -> str: ...
-
-
 class ChannelCadenceController:
     """Centralized cadence evaluation for telemetry channels.
     
@@ -113,24 +87,22 @@ class ChannelCadenceController:
         self,
         *,
         monotonic: Optional[Callable[[], float]] = None,
-        hasher: Optional[_HasherProtocol] = None,
+        hasher: Optional[TelemetryHasher] = None,
     ) -> None:
         """Initialize the cadence controller.
         
         Args:
             monotonic: Clock function returning monotonic seconds. Defaults to time.monotonic.
-            hasher: Optional hasher with hash_payload method. If not provided, uses built-in.
+            hasher: Optional hasher instance. If not provided, creates a default TelemetryHasher.
         """
         self._monotonic = monotonic or time.monotonic
-        self._hasher = hasher
+        self._hasher = hasher or TelemetryHasher()
         self._schedules: Dict[str, ChannelSchedule] = {}
         self._state: Dict[str, ChannelRuntimeState] = {}
 
     def _compute_hash(self, payload: Dict[str, Any]) -> str:
-        """Compute hash using injected hasher or built-in function."""
-        if self._hasher is not None:
-            return self._hasher.hash_payload(payload)
-        return compute_payload_hash(payload)
+        """Compute hash using injected or default TelemetryHasher."""
+        return self._hasher.hash_payload(payload)
 
     def configure(
         self,

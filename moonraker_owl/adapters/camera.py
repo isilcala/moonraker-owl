@@ -157,15 +157,18 @@ class CameraClient:
                         image_height: Optional[int] = None
                         try:
                             img = Image.open(io.BytesIO(image_data))
-                            image_width, image_height = img.size
-                            LOGGER.debug(
-                                "Captured %d bytes from camera (%s): %dx%d pixels",
-                                len(image_data),
-                                content_type,
-                                image_width,
-                                image_height,
-                            )
-                        except Exception as e:
+                            try:
+                                image_width, image_height = img.size
+                                LOGGER.debug(
+                                    "Captured %d bytes from camera (%s): %dx%d pixels",
+                                    len(image_data),
+                                    content_type,
+                                    image_width,
+                                    image_height,
+                                )
+                            finally:
+                                img.close()
+                        except (OSError, ValueError) as e:
                             LOGGER.warning(
                                 "Failed to extract image dimensions: %s",
                                 str(e),

@@ -46,6 +46,45 @@ class AgentState(str, Enum):
     STOPPING = "stopping"
 
 
+_MONITOR_MIN_INTERVAL_SECONDS = 5
+"""Floor for the Moonraker health-check loop to avoid hammering the API."""
+
+_ALLOWED_TRANSITIONS: dict[AgentState, set[AgentState]] = {
+    AgentState.COLD_START: {
+        AgentState.COLD_START,
+        AgentState.AWAITING_MQTT,
+        AgentState.STOPPING,
+    },
+    AgentState.AWAITING_MQTT: {
+        AgentState.AWAITING_MOONRAKER,
+        AgentState.DEGRADED,
+        AgentState.STOPPING,
+    },
+    AgentState.AWAITING_MOONRAKER: {
+        AgentState.ACTIVE,
+        AgentState.DEGRADED,
+        AgentState.STOPPING,
+    },
+    AgentState.ACTIVE: {
+        AgentState.DEGRADED,
+        AgentState.RECOVERING,
+        AgentState.STOPPING,
+    },
+    AgentState.DEGRADED: {
+        AgentState.ACTIVE,
+        AgentState.DEGRADED,
+        AgentState.RECOVERING,
+        AgentState.STOPPING,
+    },
+    AgentState.RECOVERING: {
+        AgentState.ACTIVE,
+        AgentState.DEGRADED,
+        AgentState.STOPPING,
+    },
+    AgentState.STOPPING: set(),
+}
+
+
 class MoonrakerOwlApp:
     """Coordinates application startup and shutdown.
 
@@ -98,6 +137,7 @@ class MoonrakerOwlApp:
         self._commands_ready = False
         self._moonraker_failures = 0
         self._moonraker_monitor_task: Optional[asyncio.Task[None]] = None
+        self._startup_retry_task: Optional[asyncio.Task[None]] = None
         self._moonraker_breaker_tripped = False
         self._telemetry_status_listener: Callable[[dict[str, Any]], Awaitable[None]] = (
             self._handle_telemetry_status_update
@@ -144,7 +184,7 @@ class MoonrakerOwlApp:
         if not started:
             LOGGER.warning("Service startup incomplete; running in degraded mode")
             # Start background retry loop for service initialization
-            asyncio.create_task(self._startup_retry_loop())
+            self._startup_retry_task = asyncio.create_task(self._startup_retry_loop())
 
         try:
             await self._idle_loop()
@@ -201,6 +241,16 @@ class MoonrakerOwlApp:
         self, state: AgentState, *, detail: Optional[str] = None
     ) -> None:
         if state == self._state and detail == self._state_detail:
+            return
+
+        allowed = _ALLOWED_TRANSITIONS.get(self._state, set())
+        if state not in allowed:
+            LOGGER.error(
+                "Invalid state transition: %s -> %s (allowed: %s)",
+                self._state.value,
+                state.value,
+                ", ".join(s.value for s in sorted(allowed, key=lambda s: s.value)) or "none",
+            )
             return
 
         previous = self._state
@@ -641,7 +691,7 @@ class MoonrakerOwlApp:
     async def _monitor_moonraker(self) -> None:
         """Monitor printer health via PrinterBackend.assess_health()."""
         resilience = self._config.resilience
-        interval = max(5, resilience.heartbeat_interval_seconds)
+        interval = max(_MONITOR_MIN_INTERVAL_SECONDS, resilience.heartbeat_interval_seconds)
 
         while not self._stopping:
             try:
@@ -1039,28 +1089,64 @@ class MoonrakerOwlApp:
         await self._transition_state(AgentState.STOPPING, detail="shutdown requested")
         self._stopping = True
 
+        # Cancel startup retry loop if still running
+        if self._startup_retry_task is not None and not self._startup_retry_task.done():
+            self._startup_retry_task.cancel()
+            try:
+                await self._startup_retry_task
+            except asyncio.CancelledError:
+                pass
+            self._startup_retry_task = None
+
         # Stop connection coordinator first
-        if self._connection_coordinator is not None:
-            await self._connection_coordinator.stop_supervisor()
+        try:
+            if self._connection_coordinator is not None:
+                await self._connection_coordinator.stop_supervisor()
+        except Exception as exc:
+            LOGGER.warning("Error stopping connection coordinator: %s", exc)
 
-        await self._stop_moonraker_monitor()
-        await self._deactivate_components("shutdown", preserve_instances=False)
-        await self._stop_health_server()
-        await self._stop_metadata_reporter()
+        try:
+            await self._stop_moonraker_monitor()
+        except Exception as exc:
+            LOGGER.warning("Error stopping moonraker monitor: %s", exc)
 
-        if self._printer_backend is not None:
-            await self._printer_backend.stop()
-            self._printer_backend = None
+        try:
+            await self._deactivate_components("shutdown", preserve_instances=False)
+        except Exception as exc:
+            LOGGER.warning("Error deactivating components: %s", exc)
 
-        if self._mqtt_client is not None:
-            await self._mqtt_client.disconnect()
-            self._mqtt_client = None
-            await self._health.update("mqtt", False, "shutdown")
+        try:
+            await self._stop_health_server()
+        except Exception as exc:
+            LOGGER.warning("Error stopping health server: %s", exc)
 
-        if self._token_manager is not None:
-            LOGGER.info("Stopping TokenManager")
-            await self._token_manager.stop()
-            self._token_manager = None
+        try:
+            await self._stop_metadata_reporter()
+        except Exception as exc:
+            LOGGER.warning("Error stopping metadata reporter: %s", exc)
+
+        try:
+            if self._printer_backend is not None:
+                await self._printer_backend.stop()
+                self._printer_backend = None
+        except Exception as exc:
+            LOGGER.warning("Error stopping printer backend: %s", exc)
+
+        try:
+            if self._mqtt_client is not None:
+                await self._mqtt_client.disconnect()
+                self._mqtt_client = None
+                await self._health.update("mqtt", False, "shutdown")
+        except Exception as exc:
+            LOGGER.warning("Error disconnecting MQTT client: %s", exc)
+
+        try:
+            if self._token_manager is not None:
+                LOGGER.info("Stopping TokenManager")
+                await self._token_manager.stop()
+                self._token_manager = None
+        except Exception as exc:
+            LOGGER.warning("Error stopping token manager: %s", exc)
 
         if self._shutdown_event is not None:
             self._shutdown_event.set()

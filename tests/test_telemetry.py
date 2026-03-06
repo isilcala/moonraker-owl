@@ -85,6 +85,12 @@ class FakeMoonrakerClient:
     async def resubscribe(self) -> None:
         self.resubscribe_calls += 1
 
+    async def fetch_most_recent_job(self, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+        return None
+
+    async def fetch_gcode_metadata(self, filename: str, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+        return None
+
     async def execute_print_action(self, action: str) -> None:
         raise NotImplementedError
 
@@ -130,45 +136,7 @@ class FakeMQTTClient:
         return grouped
 
 
-def build_config(
-    *,
-    include_fields: Optional[list[str]] = None,
-    rate_hz: float = 5.0,
-    include_raw_payload: bool = False,
-) -> OwlConfig:
-    parser = ConfigParser()
-    parser.add_section("cloud")
-    parser.set("cloud", "device_id", "device-123")
-    parser.set("cloud", "tenant_id", "tenant-42")
-    parser.set("cloud", "printer_id", "printer-99")
-    parser.set("cloud", "username", "tenant-42:device-123")
-
-    config = OwlConfig(
-        cloud=CloudConfig(
-            base_url="https://api.owl.dev",
-            broker_host="broker.owl.dev",
-            broker_port=1883,
-            username="tenant-42:device-123",
-            password="token",
-        ),
-        moonraker=MoonrakerConfig(url="http://localhost:7125"),
-        telemetry=TelemetryConfig(
-            rate_hz=rate_hz,
-            include_raw_payload=include_raw_payload,
-            include_fields=include_fields or list(DEFAULT_TELEMETRY_FIELDS),
-        ),
-        telemetry_cadence=TelemetryCadenceConfig(),
-        commands=CommandConfig(),
-        logging=LoggingConfig(),
-        resilience=ResilienceConfig(),
-        compression=CompressionConfig(),
-        camera=CameraConfig(),
-        metadata=MetadataConfig(),
-        raw=parser,
-        path=Path("moonraker-owl.cfg"),
-    )
-
-    return config
+from helpers import build_config
 
 
 def _load_sample(name: str) -> Dict[str, Any]:
@@ -231,8 +199,8 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
         assert document["kind"] == "full"
         assert document["$v"] == 1
         assert document["deviceId"] == "device-123"
-        assert document.get("tenantId") == "tenant-42"
-        assert document.get("printerId") == "printer-99"
+        assert document.get("tenantId") == "tenant-99"
+        assert document.get("printerId") == "printer-17"
         assert document.get("$origin") == EXPECTED_ORIGIN
         assert document.get("$ts"), "Expected contract timestamp"
         assert document.get("$seq") is not None
@@ -1128,6 +1096,24 @@ def test_state_store_handles_notify_klippy_state_mapping_sequence() -> None:
     assert snapshot.get("webhooks", {}).get("state_message") == "Restart complete"
     assert snapshot.get("printer", {}).get("state") == "ready"
     assert snapshot.get("printer", {}).get("is_shutdown") is False
+
+
+def test_state_store_warns_on_excessive_section_count(caplog) -> None:
+    """StateStore logs a warning when section count exceeds threshold."""
+    import logging
+    from moonraker_owl.telemetry.state_store import _SECTION_COUNT_WARNING_THRESHOLD
+
+    store = MoonrakerStateStore()
+
+    # Add sections up to just below threshold — no warning
+    with caplog.at_level(logging.WARNING, logger="moonraker_owl.telemetry.state_store"):
+        for i in range(_SECTION_COUNT_WARNING_THRESHOLD):
+            store.ingest({"result": {"status": {f"sensor_{i}": {"value": i}}}})
+        assert "exceeds threshold" not in caplog.text
+
+        # Adding one more section (beyond threshold) triggers the warning
+        store.ingest({"result": {"status": {"sensor_overflow": {"value": 0}}}})
+        assert "exceeds threshold" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2222,6 +2208,41 @@ async def test_resubscribe_triggered_after_notify_klippy_state_ready() -> None:
     assert (
         moonraker.resubscribe_calls == first_calls
     ), "Duplicate ready notifications should not reschedule resubscribe"
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_resubscribe_rediscovers_sensors_after_klippy_ready() -> None:
+    """Sensor re-discovery runs during resubscribe so new sensors appear after
+    a Klippy firmware restart."""
+    initial_state = {
+        "result": {
+            "status": {
+                "printer": {"state": "shutdown"},
+                "print_stats": {"state": "error", "message": "Firmware restart"},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    await publisher.start()
+    await asyncio.sleep(0.05)
+
+    # Simulate Klippy coming back with new sensors available
+    moonraker.set_available_heaters(["extruder"], ["temperature_sensor chamber"])
+
+    await moonraker.emit({"method": "notify_klippy_ready", "params": None})
+    await asyncio.sleep(0.2)
+
+    # The newly discovered sensor should appear in subscription objects
+    assert moonraker.subscription_objects is not None
+    assert "temperature_sensor chamber" in moonraker.subscription_objects
 
     await publisher.stop()
 

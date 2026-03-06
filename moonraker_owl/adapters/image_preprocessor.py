@@ -149,67 +149,81 @@ class ImagePreprocessor:
         try:
             # Load image
             img = Image.open(io.BytesIO(image_data))
-            original_width, original_height = img.size
+            images_to_close = [img]
+            try:
+                original_width, original_height = img.size
 
-            # Check if resizing is needed
-            if original_width <= self._target_width:
-                # No resize needed, but still return metadata
-                return PreprocessResult(
-                    image_data=image_data,
-                    original_size=(original_width, original_height),
-                    processed_size=(original_width, original_height),
-                    was_resized=False,
-                    original_bytes=original_bytes,
-                    processed_bytes=original_bytes,
-                    content_type=content_type or "image/jpeg",
+                # Check if resizing is needed
+                if original_width <= self._target_width:
+                    # No resize needed, but still return metadata
+                    return PreprocessResult(
+                        image_data=image_data,
+                        original_size=(original_width, original_height),
+                        processed_size=(original_width, original_height),
+                        was_resized=False,
+                        original_bytes=original_bytes,
+                        processed_bytes=original_bytes,
+                        content_type=content_type or "image/jpeg",
+                    )
+
+                # Calculate new dimensions preserving aspect ratio
+                ratio = self._target_width / original_width
+                new_height = int(original_height * ratio)
+                new_size = (self._target_width, new_height)
+
+                # Resize with high-quality resampling
+                # Convert to RGB if necessary (handles RGBA, palette modes)
+                if img.mode in ("RGBA", "LA", "P"):
+                    # Create white background for transparency
+                    background = Image.new("RGB", img.size, (255, 255, 255))
+                    images_to_close.append(background)
+                    if img.mode == "P":
+                        converted = img.convert("RGBA")
+                        images_to_close.append(converted)
+                        img = converted
+                    background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+                    img = background
+                elif img.mode != "RGB":
+                    converted = img.convert("RGB")
+                    images_to_close.append(converted)
+                    img = converted
+
+                img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
+                images_to_close.append(img_resized)
+
+                # Encode as JPEG
+                buffer = io.BytesIO()
+                img_resized.save(buffer, format="JPEG", quality=self._jpeg_quality, optimize=True)
+                processed_data = buffer.getvalue()
+                processed_bytes = len(processed_data)
+
+                compression_ratio = (1 - processed_bytes / original_bytes) * 100
+                LOGGER.debug(
+                    "Image preprocessed: %dx%d -> %dx%d, %d -> %d bytes (%.1f%% reduction)",
+                    original_width,
+                    original_height,
+                    new_size[0],
+                    new_size[1],
+                    original_bytes,
+                    processed_bytes,
+                    compression_ratio,
                 )
 
-            # Calculate new dimensions preserving aspect ratio
-            ratio = self._target_width / original_width
-            new_height = int(original_height * ratio)
-            new_size = (self._target_width, new_height)
-
-            # Resize with high-quality resampling
-            # Convert to RGB if necessary (handles RGBA, palette modes)
-            if img.mode in ("RGBA", "LA", "P"):
-                # Create white background for transparency
-                background = Image.new("RGB", img.size, (255, 255, 255))
-                if img.mode == "P":
-                    img = img.convert("RGBA")
-                background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
-                img = background
-            elif img.mode != "RGB":
-                img = img.convert("RGB")
-
-            img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
-
-            # Encode as JPEG
-            buffer = io.BytesIO()
-            img_resized.save(buffer, format="JPEG", quality=self._jpeg_quality, optimize=True)
-            processed_data = buffer.getvalue()
-            processed_bytes = len(processed_data)
-
-            compression_ratio = (1 - processed_bytes / original_bytes) * 100
-            LOGGER.debug(
-                "Image preprocessed: %dx%d -> %dx%d, %d -> %d bytes (%.1f%% reduction)",
-                original_width,
-                original_height,
-                new_size[0],
-                new_size[1],
-                original_bytes,
-                processed_bytes,
-                compression_ratio,
-            )
-
-            return PreprocessResult(
-                image_data=processed_data,
-                original_size=(original_width, original_height),
-                processed_size=new_size,
-                was_resized=True,
-                original_bytes=original_bytes,
-                processed_bytes=processed_bytes,
-                content_type="image/jpeg",
-            )
+                return PreprocessResult(
+                    image_data=processed_data,
+                    original_size=(original_width, original_height),
+                    processed_size=new_size,
+                    was_resized=True,
+                    original_bytes=original_bytes,
+                    processed_bytes=processed_bytes,
+                    content_type="image/jpeg",
+                )
+            finally:
+                for im in images_to_close:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
 
         except Exception as e:
             LOGGER.warning(

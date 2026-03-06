@@ -171,7 +171,7 @@ class MoonrakerClient(PrinterAdapter):
                 timeout,
             )
             raise
-        except Exception as exc:
+        except (OSError, KeyError) as exc:
             LOGGER.warning("Failed to fetch available heaters: %s", exc)
             return {"available_heaters": [], "available_sensors": []}
 
@@ -459,20 +459,13 @@ class MoonrakerClient(PrinterAdapter):
                 filename,
             )
             raise
-        except Exception as exc:
+        except (OSError, KeyError, ValueError) as exc:
             LOGGER.warning(
                 "Failed to parse gcode metadata for %s: %s",
                 filename,
                 exc,
             )
             return None
-        except asyncio.TimeoutError:
-            LOGGER.warning(
-                "GCode execution timed out after %.1fs (script=%r)",
-                timeout,
-                script[:50] + "..." if len(script) > 50 else script,
-            )
-            raise
 
     async def fetch_most_recent_job(
         self, timeout: float = 5.0
@@ -520,7 +513,7 @@ class MoonrakerClient(PrinterAdapter):
                 timeout,
             )
             raise
-        except Exception as exc:
+        except (OSError, KeyError, ValueError) as exc:
             LOGGER.warning("Failed to parse history response: %s", exc)
             return None
 
