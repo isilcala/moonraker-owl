@@ -5,10 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections import deque
 from dataclasses import field
 from datetime import datetime, timezone
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Dict, Optional
 
 from ..printer_command_names import PrinterCommandNames
 from ..identifiers import uuid7
@@ -29,7 +28,6 @@ from .types import (
     MQTTCommandsClient,
     COMMAND_EXPECTED_STATES,
     _InflightCommand,
-    _CommandHistoryEntry,
     _PendingStateCommand,
 )
 from .parsing import _build_ack_topic, _extract_command_name, _parse_command, _resolve_identity
@@ -91,12 +89,6 @@ class CommandProcessor(
             max_entries=10000,
             cleanup_interval=100,
         )
-
-        # Legacy history tracking (kept for backward compatibility with tests)
-        # Will be removed once tests are updated to use idempotency guard
-        self._history: Dict[str, _CommandHistoryEntry] = {}
-        self._history_order: Deque[str] = deque()
-        self._history_limit = 64
 
         # State-based command completion tracking
         self._pending_state_commands: Dict[str, _PendingStateCommand] = {}
@@ -404,18 +396,6 @@ class CommandProcessor(
     ) -> None:
         if not command_id:
             return
-        self._history[command_id] = _CommandHistoryEntry(
-            status=status,
-            stage=stage,
-            error_code=error_code,
-            error_message=error_message,
-        )
-        self._history_order.append(command_id)
-        while len(self._history_order) > self._history_limit:
-            expired = self._history_order.popleft()
-            self._history.pop(expired, None)
-
-        # Also record in idempotency guard for TTL-based duplicate detection
         self._idempotency.mark_processed(
             command_id,
             status=status,
@@ -448,21 +428,6 @@ class CommandProcessor(
                 error_code=cached.error_code,
                 error_message=cached.error_message,
                 skipped=True,  # ADR-0013 Appendix D: indicate duplicate detection
-            )
-            return True
-
-        # Fallback: Check legacy history (for commands processed before upgrade)
-        entry = self._history.get(command_id)
-        if entry is not None:
-            LOGGER.debug("Replaying duplicate command %s with cached status (legacy)", command_id)
-            await self._publish_ack(
-                command_name,
-                command_id,
-                entry.status,
-                stage=entry.stage,
-                error_code=entry.error_code,
-                error_message=entry.error_message,
-                skipped=True,
             )
             return True
 

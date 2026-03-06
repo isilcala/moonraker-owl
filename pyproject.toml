@@ -19,6 +19,8 @@ dependencies = [
   "pydantic>=2.7",
   "cryptography>=42.0",
   "Pillow>=10.0",
+  "tomli>=2.0; python_version < '3.11'",
+  "tomli-w>=1.0",
 ]
 
 [project.optional-dependencies]

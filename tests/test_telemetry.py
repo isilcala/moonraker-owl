@@ -6,7 +6,6 @@ import gzip
 import json
 import time
 from contextlib import suppress
-from configparser import ConfigParser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -1309,8 +1308,7 @@ async def test_publish_system_status_publishes_error_snapshot() -> None:
 
 
 def test_telemetry_configuration_requires_device_id():
-    parser = ConfigParser()
-    parser.add_section("cloud")
+    raw = {"cloud": {}}
 
     config = OwlConfig(
         cloud=CloudConfig(),
@@ -1323,8 +1321,8 @@ def test_telemetry_configuration_requires_device_id():
         compression=CompressionConfig(),
         camera=CameraConfig(),
         metadata=MetadataConfig(),
-        raw=parser,
-        path=Path("moonraker-owl.cfg"),
+        raw=raw,
+        path=Path("moonraker-owl.toml"),
     )
 
     with pytest.raises(TelemetryConfigurationError):
@@ -1335,8 +1333,7 @@ def test_telemetry_configuration_requires_device_id():
 
 def test_telemetry_configuration_requires_device_id_v2():
     """Test that TelemetryPublisher raises error when device_id is missing."""
-    parser = ConfigParser()
-    parser.add_section("cloud")
+    raw = {"cloud": {}}
     # No device_id set
 
     config = OwlConfig(
@@ -1350,8 +1347,8 @@ def test_telemetry_configuration_requires_device_id_v2():
         compression=CompressionConfig(),
         camera=CameraConfig(),
         metadata=MetadataConfig(),
-        raw=parser,
-        path=Path("moonraker-owl.cfg"),
+        raw=raw,
+        path=Path("moonraker-owl.toml"),
     )
 
     with pytest.raises(TelemetryConfigurationError, match="Device ID is required"):
@@ -2243,6 +2240,49 @@ async def test_resubscribe_rediscovers_sensors_after_klippy_ready() -> None:
     # The newly discovered sensor should appear in subscription objects
     assert moonraker.subscription_objects is not None
     assert "temperature_sensor chamber" in moonraker.subscription_objects
+
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_resubscribe_removes_stale_sensors_after_klippy_ready() -> None:
+    """Sensors no longer reported by Moonraker are cleaned from subscriptions
+    after a Klippy firmware restart, preventing stale subscription accumulation."""
+    initial_state = {
+        "result": {
+            "status": {
+                "printer": {"state": "shutdown"},
+                "print_stats": {"state": "error", "message": "Firmware restart"},
+            }
+        }
+    }
+
+    moonraker = FakeMoonrakerClient(initial_state)
+    mqtt = FakeMQTTClient()
+    config = build_config(rate_hz=1 / 30)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    # First discovery: extruder + chamber sensor
+    moonraker.set_available_heaters(
+        ["extruder"], ["temperature_sensor chamber"]
+    )
+    await publisher.start()
+    await asyncio.sleep(0.1)
+
+    assert moonraker.subscription_objects is not None
+    assert "temperature_sensor chamber" in moonraker.subscription_objects
+
+    # Simulate hardware removal: chamber sensor no longer reported
+    moonraker.set_available_heaters(["extruder"], [])
+
+    await moonraker.emit({"method": "notify_klippy_ready", "params": None})
+    await asyncio.sleep(0.2)
+
+    # Stale sensor should be removed from subscriptions
+    assert "temperature_sensor chamber" not in moonraker.subscription_objects
+    # Core sensor should still be present
+    assert "extruder" in moonraker.subscription_objects
 
     await publisher.stop()
 

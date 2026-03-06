@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol
 
-from ..telemetry.selectors import SensorFilter
+from .selectors import SensorFilter
 
 LOGGER = logging.getLogger(__name__)
 
@@ -96,18 +96,29 @@ def discover_moonraker_sensors(
     heater_info: dict[str, list[str]],
     current_objects: dict[str, Optional[list[str]]],
     sensor_filter: SensorFilter,
+    *,
+    static_objects: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Build updated subscription objects from Moonraker heater discovery.
 
     Examines ``heater_info`` (as returned by ``source.fetch_available_heaters()``)
     and adds any new heaters/sensors to *current_objects* **in-place**, honouring
-    the *sensor_filter* allowlist/denylist rules.
+    the *sensor_filter* allowlist/denylist rules.  Also removes dynamically-
+    discovered sensors that Moonraker no longer reports (e.g. after hardware
+    removal and a Klippy firmware restart).
+
+    Args:
+        static_objects: Keys from the initial manifest that should never be
+            removed by stale-sensor cleanup (user-configured subscriptions).
 
     Returns:
         List of newly added object names.
     """
     available_heaters = heater_info.get("available_heaters", [])
     available_sensors = heater_info.get("available_sensors", [])
+
+    # Set of all sensors currently reported by Moonraker
+    reported: set[str] = set(available_heaters) | set(available_sensors) | {"fan"}
 
     added_objects: list[str] = []
 
@@ -144,5 +155,15 @@ def discover_moonraker_sensors(
             else:
                 current_objects[sensor] = ["temperature"]
             added_objects.append(sensor)
+
+    # Remove dynamically-discovered sensors no longer reported by Moonraker.
+    # Static manifest entries (user-configured) are never removed.
+    stale = [
+        key
+        for key in current_objects
+        if is_heater_object(key) and key not in reported and key not in static_objects
+    ]
+    for key in stale:
+        del current_objects[key]
 
     return added_objects

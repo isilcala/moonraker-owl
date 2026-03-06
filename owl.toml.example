@@ -1,7 +1,7 @@
 # =============================================================================
-# moonraker-owl Configuration
+# moonraker-owl Configuration (TOML)
 # =============================================================================
-# Copy this file to ~/printer_data/config/moonraker-owl.cfg and customize.
+# Copy this file to ~/printer_data/config/moonraker-owl.toml and customize.
 # After installation, run `moonraker-owl link` to connect to Owl Cloud.
 #
 # Documentation: https://github.com/project-owl/agent
@@ -14,32 +14,32 @@
 # DO NOT manually edit device credentials unless instructed.
 [cloud]
 # Owl Cloud API endpoint (Staging environment)
-base_url = https://owl.elencala.com
+base_url = "https://owl.elencala.com"
 
 # MQTT broker for real-time communication (Staging environment)
 # Uses TLS on port 8883 - Traefik terminates TLS and forwards to EMQX
-broker_host = mqtt.owl.elencala.com
+broker_host = "mqtt.owl.elencala.com"
 broker_port = 8883
 
 # === Device Credentials (auto-populated by `moonraker-owl link`) ===
-# device_id = <auto>
-# printer_id = <auto>
-# tenant_id = <auto>
-# device_private_key = <auto>
-# username = <auto>
+# device_id = "<auto>"
+# printer_id = "<auto>"
+# tenant_id = "<auto>"
+# device_private_key = "<auto>"
+# username = "<auto>"
 
 # -----------------------------------------------------------------------------
 # [moonraker] - Local Moonraker Connection
 # -----------------------------------------------------------------------------
 [moonraker]
 # Moonraker API URL (usually localhost on the same machine)
-url = http://127.0.0.1:7125
+url = "http://127.0.0.1:7125"
 
-# Transport protocol: websocket (recommended) or http
-transport = websocket
+# Transport protocol: "websocket" (recommended) or "http"
+transport = "websocket"
 
 # Optional: Moonraker API key (if authentication is enabled)
-# api_key =
+# api_key = ""
 
 # -----------------------------------------------------------------------------
 # [telemetry] - Telemetry Publishing Settings
@@ -50,16 +50,38 @@ transport = websocket
 # Range: 0.01 - 10.0
 rate_hz = 0.033
 
-# Moonraker objects to subscribe for telemetry
-# Comma-separated list of Moonraker object names
-include_fields = print_stats,webhooks.state,webhooks.state_message,gcode_move.speed_factor,gcode_move.extrude_factor,history,gcode_macro _OBICO_LAYER_CHANGE,fan.speed,toolhead,virtual_sdcard,display_status,idle_timeout,gcode_macro TIMELAPSE_TAKE_FRAME,extruder,heater_bed,exclude_object
+# Moonraker objects to subscribe for telemetry (TOML array of strings)
+include_fields = [
+    "print_stats",
+    "webhooks.state",
+    "webhooks.state_message",
+    "gcode_move.speed_factor",
+    "gcode_move.extrude_factor",
+    "history",
+    "gcode_macro _OBICO_LAYER_CHANGE",
+    "fan.speed",
+    "toolhead",
+    "virtual_sdcard",
+    "display_status",
+    "idle_timeout",
+    "gcode_macro TIMELAPSE_TAKE_FRAME",
+    "extruder",
+    "heater_bed",
+    "exclude_object",
+]
 
 # Objects to exclude from telemetry (overrides include_fields)
-exclude_fields =
+exclude_fields = []
 
 # Include raw Moonraker payload in telemetry (adds ~450 bytes per message)
 # Only enable for debugging
 include_raw_payload = false
+
+# Sensor filtering (optional)
+# Explicit list of sensor names to report (in addition to core sensors)
+# sensor_allowlist = ["temperature_sensor chamber", "heater_generic chamber_heater"]
+# Sensors to exclude from reporting
+# sensor_denylist = ["temperature_sensor mcu_temp"]
 
 # -----------------------------------------------------------------------------
 # [telemetry_cadence] - Channel-Specific Timing
@@ -81,6 +103,10 @@ sensors_force_publish_seconds = 300
 events_max_per_second = 1
 events_max_per_minute = 20
 
+# Timelapse polling interval (seconds)
+# How often the publisher checks for timelapse readiness during a print job.
+timelapse_poll_interval_seconds = 5.0
+
 # Timeout for fetching GCode metadata and moonrakerJobId from History API (milliseconds)
 # This affects print job correlation for thumbnails and timelapse uploads.
 # Increase this value if you experience timeouts (check agent logs).
@@ -101,22 +127,22 @@ ack_timeout_seconds = 30.0
 enabled = true
 
 # Webcam snapshot URL
-# - Use 'auto' for automatic discovery via Moonraker's webcam API (recommended)
+# - Use "auto" for automatic discovery via Moonraker's webcam API (recommended)
 # - Or specify a manual URL for external cameras not configured in Moonraker
 # Examples:
-#   auto                                          (auto-detect from Moonraker)
-#   http://localhost/webcam/?action=snapshot      (crowsnest via nginx)
-#   http://192.168.1.100:8080/snapshot            (external IP camera)
-snapshot_url = auto
+#   "auto"                                          (auto-detect from Moonraker)
+#   "http://localhost/webcam/?action=snapshot"      (crowsnest via nginx)
+#   "http://192.168.1.100:8080/snapshot"            (external IP camera)
+snapshot_url = "auto"
 
-# Camera name to use when snapshot_url is 'auto'
-# - Use 'auto' to select the first available webcam
+# Camera name to use when snapshot_url is "auto"
+# - Use "auto" to select the first available webcam
 # - Or specify a name matching your moonraker.conf [webcam name] section
 # Examples:
-#   auto        (use first available)
-#   bed_cam     (use webcam named 'bed_cam')
-#   nozzle_cam  (use webcam named 'nozzle_cam')
-camera_name = auto
+#   "auto"        (use first available)
+#   "bed_cam"     (use webcam named "bed_cam")
+#   "nozzle_cam"  (use webcam named "nozzle_cam")
+camera_name = "auto"
 
 # Capture request timeout (seconds)
 capture_timeout_seconds = 10.0
@@ -141,8 +167,8 @@ preprocess_jpeg_quality = 85
 # Enable payload compression for bandwidth reduction
 enabled = true
 
-# Channels to compress (comma-separated)
-channels = sensors,objects
+# Channels to compress (TOML array)
+channels = ["sensors", "objects"]
 
 # Minimum payload size to trigger compression (bytes)
 min_size_bytes = 1024
@@ -151,11 +177,11 @@ min_size_bytes = 1024
 # [logging] - Logging Configuration
 # -----------------------------------------------------------------------------
 [logging]
-# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-level = INFO
+# Log level: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+level = "INFO"
 
 # Log file path (use ~ for home directory)
-path = ~/printer_data/logs/moonraker-owl.log
+path = "~/printer_data/logs/moonraker-owl.log"
 
 # Enable detailed network logging (verbose, for debugging only)
 log_network = false
@@ -187,5 +213,5 @@ heartbeat_interval_seconds = 30
 
 # Health check HTTP endpoint (for monitoring/orchestration)
 health_enabled = false
-health_host = 127.0.0.1
+health_host = "127.0.0.1"
 health_port = 3333

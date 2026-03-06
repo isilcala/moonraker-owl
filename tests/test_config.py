@@ -4,7 +4,7 @@ from moonraker_owl.config import load_config, DEFAULT_TELEMETRY_RATE_HZ, CORE_SE
 
 
 def test_load_config_defaults(tmp_path: Path) -> None:
-    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path = tmp_path / "moonraker-owl.toml"
     config = load_config(config_path)
 
     assert config.cloud.broker_host
@@ -24,19 +24,18 @@ def test_load_config_defaults(tmp_path: Path) -> None:
 
 
 def test_load_config_parses_broker_host_with_port(tmp_path: Path) -> None:
-    config_path = tmp_path / "moonraker-owl.cfg"
-    config_path.write_text("[cloud]\nbroker_host = localhost:61198\n", encoding="utf-8")
+    config_path = tmp_path / "moonraker-owl.toml"
+    config_path.write_text('[cloud]\nbroker_host = "localhost:61198"\n', encoding="utf-8")
 
     config = load_config(config_path)
 
     assert config.cloud.broker_host == "localhost"
     assert config.cloud.broker_port == 61198
-    assert config.raw.get("cloud", "broker_host") == "localhost"
-    assert config.raw.get("cloud", "broker_port") == "61198"
+    assert config.raw["cloud"]["broker_host"] == "localhost:61198"
 
 
 def test_load_config_overrides_cadence(tmp_path: Path) -> None:
-    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path = tmp_path / "moonraker-owl.toml"
     config_path.write_text(
         """
 [telemetry_cadence]
@@ -54,20 +53,20 @@ events_max_per_second = 3
 
 
 def test_load_config_overrides_defaults(tmp_path):
-    config_file = tmp_path / "moonraker-owl.cfg"
+    config_file = tmp_path / "moonraker-owl.toml"
     config_file.write_text(
         """
 [cloud]
-base_url = https://example.com
-broker_host = mqtt.example.com
+base_url = "https://example.com"
+broker_host = "mqtt.example.com"
 broker_port = 1883
 
 [moonraker]
-url = http://localhost:7125
+url = "http://localhost:7125"
 
 [telemetry]
-device_id = device-123
-tenant_id = tenant-456
+device_id = "device-123"
+tenant_id = "tenant-456"
 rate_hz = 10
 
 [telemetry_cadence]
@@ -83,7 +82,7 @@ status_heartbeat_seconds = 45
 
 
 def test_load_config_sensor_filter_defaults(tmp_path: Path) -> None:
-    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path = tmp_path / "moonraker-owl.toml"
     config = load_config(config_path)
 
     assert config.telemetry.sensor_allowlist == []
@@ -91,9 +90,9 @@ def test_load_config_sensor_filter_defaults(tmp_path: Path) -> None:
 
 
 def test_load_config_sensor_filter_allowlist(tmp_path: Path) -> None:
-    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path = tmp_path / "moonraker-owl.toml"
     config_path.write_text(
-        "[telemetry]\nsensor_allowlist = temperature_sensor chamber, heater_generic bed_heater\n",
+        '[telemetry]\nsensor_allowlist = ["temperature_sensor chamber", "heater_generic bed_heater"]\n',
         encoding="utf-8",
     )
     config = load_config(config_path)
@@ -106,9 +105,9 @@ def test_load_config_sensor_filter_allowlist(tmp_path: Path) -> None:
 
 
 def test_load_config_sensor_filter_denylist(tmp_path: Path) -> None:
-    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path = tmp_path / "moonraker-owl.toml"
     config_path.write_text(
-        "[telemetry]\nsensor_denylist = temperature_sensor mcu_temp\n",
+        '[telemetry]\nsensor_denylist = ["temperature_sensor mcu_temp"]\n',
         encoding="utf-8",
     )
     config = load_config(config_path)

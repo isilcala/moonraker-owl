@@ -1153,8 +1153,7 @@ class MoonrakerOwlApp:
 
 
 def _resolve_device_id(config: OwlConfig) -> Optional[str]:
-    parser = config.raw
-    device_id = parser.get("cloud", "device_id", fallback="")
+    device_id = config.cloud.device_id or ""
     if device_id:
         return device_id
 

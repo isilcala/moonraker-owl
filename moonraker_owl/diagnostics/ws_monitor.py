@@ -79,13 +79,13 @@ async def _monitor(config: OwlConfig, *, method: Optional[str], raw: bool) -> No
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Tail Moonraker websocket payloads using the owl.cfg configuration",
+        description="Tail Moonraker websocket payloads using the owl.toml configuration",
     )
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("owl.cfg"),
-        help="Path to the moonraker-owl configuration file (default: owl.cfg)",
+        default=Path("owl.toml"),
+        help="Path to the moonraker-owl configuration file (default: owl.toml)",
     )
     parser.add_argument(
         "--method",

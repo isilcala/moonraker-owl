@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import copy
 import os
-from configparser import ConfigParser
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Dict, List, Optional
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
+
+import tomli_w
 
 from . import constants
 
@@ -59,6 +66,9 @@ class CloudConfig:
     broker_host: str = constants.DEFAULT_BROKER_HOST
     broker_port: int = 8883
     broker_use_tls: bool = True  # Enable TLS for MQTT connection (default: True for port 8883)
+    device_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    printer_id: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
     device_private_key: Optional[str] = None  # Base64-encoded Ed25519 private key for JWT authentication
@@ -215,7 +225,7 @@ class OwlConfig:
     compression: CompressionConfig
     camera: CameraConfig
     metadata: MetadataConfig
-    raw: ConfigParser
+    raw: Dict[str, Any]
     path: Path
 
     @property
@@ -227,98 +237,32 @@ class OwlConfig:
         return list(self.telemetry.exclude_fields)
 
 
-def _parse_list(value: str, *, default: Iterable[str]) -> List[str]:
-    if not value:
-        return list(default)
-    return [item.strip() for item in value.split(",") if item.strip()]
+def _get(section: Dict[str, Any], key: str, default: Any) -> Any:
+    """Get a value from a TOML section dict, coercing numeric types as needed."""
+    value = section.get(key, default)
+    if isinstance(default, float) and isinstance(value, int):
+        return float(value)
+    if isinstance(default, int) and isinstance(value, float) and value == int(value):
+        return int(value)
+    return value
 
 
 def load_config(path: Optional[Path] = None) -> OwlConfig:
-    """Load configuration from disk, applying defaults where necessary."""
+    """Load configuration from a TOML file, applying defaults where necessary."""
 
     config_path = path or constants.DEFAULT_CONFIG_PATH
-    parser = ConfigParser()
-    parser.read_dict(
-        {
-            "cloud": {
-                "base_url": constants.DEFAULT_LINK_BASE_URL,
-                "broker_host": constants.DEFAULT_BROKER_HOST,
-                "broker_port": str(8883),
-            },
-            "moonraker": {
-                "url": f"http://{constants.DEFAULT_MOONRAKER_HOST}:{constants.DEFAULT_MOONRAKER_PORT}",
-                "transport": "websocket",
-            },
-            "telemetry": {
-                "rate_hz": str(DEFAULT_TELEMETRY_RATE_HZ),
-                "include_fields": ",".join(DEFAULT_TELEMETRY_FIELDS),
-                "exclude_fields": ",".join(DEFAULT_TELEMETRY_EXCLUDE_FIELDS),
-            },
-            "commands": {
-                "ack_timeout_seconds": "30.0",
-            },
-            "telemetry_cadence": {
-                "status_heartbeat_seconds": "60",
-                "status_idle_interval_seconds": "60",
-                "status_active_interval_seconds": "15",
-                "sensors_force_publish_seconds": "300",
-                "events_max_per_second": "1",
-                "events_max_per_minute": "20",
-                "thumbnail_fetch_timeout_ms": "1000",
-                "timelapse_poll_interval_seconds": "5.0",
-            },
-            "logging": {
-                "level": "INFO",
-                "path": str(constants.DEFAULT_LOG_PATH),
-                "log_network": "false",
-                # Log rotation: 10MB per file, keep 3 backups (~40MB total)
-                "max_bytes": "10485760",
-                "backup_count": "3",
-            },
-            "resilience": {
-                "reconnect_initial_seconds": "1.0",
-                "reconnect_max_seconds": "30.0",
-                "reconnect_jitter_ratio": "0.5",
-                "reconnect_perpetual_seconds": "900.0",
-                "session_expiry_seconds": "86400",
-                "buffer_window_seconds": "60.0",
-                "moonraker_breaker_threshold": "5",
-                "heartbeat_interval_seconds": "30",
-                "health_enabled": "false",
-                "health_host": "127.0.0.1",
-                "health_port": "0",
-            },
-            "compression": {
-                "enabled": "true",
-                "channels": "sensors",
-                "min_size_bytes": "1024",
-            },
-            "camera": {
-                "enabled": "false",
-                "snapshot_url": "auto",
-                "camera_name": "auto",
-                "capture_timeout_seconds": "10.0",
-                "max_retries": "2",
-                "preprocess_enabled": "true",
-                "preprocess_target_width": "800",
-                "preprocess_jpeg_quality": "85",
-            },
-            "metadata": {
-                "enabled": "true",
-                "refresh_interval_hours": "24.0",
-                "initial_retry_delay_seconds": "30.0",
-                "max_retry_delay_seconds": "600.0",
-                "request_timeout_seconds": "30.0",
-            },
-        }
-    )
+    raw: Dict[str, Any] = {}
 
     if config_path.exists():
-        parser.read(config_path)
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
 
-    broker_host_value = parser.get("cloud", "broker_host")
-    broker_port_value = parser.getint("cloud", "broker_port", fallback=8883)
+    cloud_raw = raw.get("cloud", {})
 
+    broker_host_value = str(cloud_raw.get("broker_host", constants.DEFAULT_BROKER_HOST))
+    broker_port_value = int(cloud_raw.get("broker_port", 8883))
+
+    # Support "host:port" shorthand in broker_host
     if ":" in broker_host_value:
         host_part, port_part = broker_host_value.rsplit(":", 1)
         try:
@@ -328,242 +272,125 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         else:
             broker_host_value = host_part
             broker_port_value = parsed_port
-            parser.set("cloud", "broker_host", host_part)
-            parser.set("cloud", "broker_port", str(parsed_port))
 
     # Default TLS to True for port 8883, False for 1883
     default_use_tls = broker_port_value == 8883
-    broker_use_tls = parser.getboolean("cloud", "broker_use_tls", fallback=default_use_tls)
 
     cloud = CloudConfig(
-        base_url=parser.get("cloud", "base_url"),
+        base_url=str(cloud_raw.get("base_url", constants.DEFAULT_LINK_BASE_URL)),
         broker_host=broker_host_value,
         broker_port=broker_port_value,
-        broker_use_tls=broker_use_tls,
-        username=parser.get("cloud", "username", fallback=None),
-        password=parser.get("cloud", "password", fallback=None),
-        device_private_key=parser.get("cloud", "device_private_key", fallback=None),
+        broker_use_tls=bool(cloud_raw.get("broker_use_tls", default_use_tls)),
+        device_id=cloud_raw.get("device_id") or None,
+        tenant_id=cloud_raw.get("tenant_id") or None,
+        printer_id=cloud_raw.get("printer_id") or None,
+        username=cloud_raw.get("username") or None,
+        password=cloud_raw.get("password") or None,
+        device_private_key=cloud_raw.get("device_private_key") or None,
     )
 
+    mr_raw = raw.get("moonraker", {})
     moonraker = MoonrakerConfig(
-        url=parser.get("moonraker", "url"),
-        transport=parser.get("moonraker", "transport"),
-        api_key=parser.get("moonraker", "api_key", fallback=None),
+        url=str(mr_raw.get("url", f"http://{constants.DEFAULT_MOONRAKER_HOST}:{constants.DEFAULT_MOONRAKER_PORT}")),
+        transport=str(mr_raw.get("transport", "websocket")),
+        api_key=mr_raw.get("api_key") or None,
     )
 
-    default_rate_hz = TelemetryConfig().rate_hz
+    tel_raw = raw.get("telemetry", {})
+    default_rate_hz = DEFAULT_TELEMETRY_RATE_HZ
     try:
-        rate_hz_value = parser.getfloat("telemetry", "rate_hz", fallback=default_rate_hz)
-    except ValueError:
+        rate_hz_value = float(tel_raw.get("rate_hz", default_rate_hz))
+    except (ValueError, TypeError):
         rate_hz_value = default_rate_hz
 
     telemetry = TelemetryConfig(
         rate_hz=rate_hz_value,
-        include_raw_payload=parser.getboolean(
-            "telemetry", "include_raw_payload", fallback=False
-        ),
-        include_fields=_parse_list(
-            parser.get(
-                "telemetry",
-                "include_fields",
-                fallback=",".join(DEFAULT_TELEMETRY_FIELDS),
-            ),
-            default=DEFAULT_TELEMETRY_FIELDS,
-        ),
-        exclude_fields=_parse_list(
-            parser.get(
-                "telemetry",
-                "exclude_fields",
-                fallback=",".join(DEFAULT_TELEMETRY_EXCLUDE_FIELDS),
-            ),
-            default=DEFAULT_TELEMETRY_EXCLUDE_FIELDS,
-        ),
-        sensor_allowlist=_parse_list(
-            parser.get("telemetry", "sensor_allowlist", fallback=""),
-            default=[],
-        ),
-        sensor_denylist=_parse_list(
-            parser.get("telemetry", "sensor_denylist", fallback=""),
-            default=[],
-        ),
+        include_raw_payload=bool(tel_raw.get("include_raw_payload", False)),
+        include_fields=list(tel_raw.get("include_fields", DEFAULT_TELEMETRY_FIELDS)),
+        exclude_fields=list(tel_raw.get("exclude_fields", DEFAULT_TELEMETRY_EXCLUDE_FIELDS)),
+        sensor_allowlist=list(tel_raw.get("sensor_allowlist", [])),
+        sensor_denylist=list(tel_raw.get("sensor_denylist", [])),
     )
 
+    cmd_raw = raw.get("commands", {})
     commands = CommandConfig(
-        ack_timeout_seconds=parser.getfloat(
-            "commands", "ack_timeout_seconds", fallback=30.0
-        ),
+        ack_timeout_seconds=float(_get(cmd_raw, "ack_timeout_seconds", 30.0)),
     )
 
-    cadence_defaults = TelemetryCadenceConfig()
-
+    cad_raw = raw.get("telemetry_cadence", {})
+    cad_defaults = TelemetryCadenceConfig()
     telemetry_cadence = TelemetryCadenceConfig(
-        status_heartbeat_seconds=parser.getint(
-            "telemetry_cadence",
-            "status_heartbeat_seconds",
-            fallback=cadence_defaults.status_heartbeat_seconds,
-        ),
-        status_idle_interval_seconds=parser.getfloat(
-            "telemetry_cadence",
-            "status_idle_interval_seconds",
-            fallback=cadence_defaults.status_idle_interval_seconds,
-        ),
-        status_active_interval_seconds=parser.getfloat(
-            "telemetry_cadence",
-            "status_active_interval_seconds",
-            fallback=cadence_defaults.status_active_interval_seconds,
-        ),
-        sensors_force_publish_seconds=parser.getfloat(
-            "telemetry_cadence",
-            "sensors_force_publish_seconds",
-            fallback=cadence_defaults.sensors_force_publish_seconds,
-        ),
-        events_max_per_second=parser.getint(
-            "telemetry_cadence",
-            "events_max_per_second",
-            fallback=cadence_defaults.events_max_per_second,
-        ),
-        events_max_per_minute=parser.getint(
-            "telemetry_cadence",
-            "events_max_per_minute",
-            fallback=cadence_defaults.events_max_per_minute,
-        ),
-        thumbnail_fetch_timeout_ms=parser.getint(
-            "telemetry_cadence",
-            "thumbnail_fetch_timeout_ms",
-            fallback=cadence_defaults.thumbnail_fetch_timeout_ms,
-        ),
-        timelapse_poll_interval_seconds=parser.getfloat(
-            "telemetry_cadence",
-            "timelapse_poll_interval_seconds",
-            fallback=cadence_defaults.timelapse_poll_interval_seconds,
-        ),
+        status_heartbeat_seconds=int(_get(cad_raw, "status_heartbeat_seconds", cad_defaults.status_heartbeat_seconds)),
+        status_idle_interval_seconds=float(_get(cad_raw, "status_idle_interval_seconds", cad_defaults.status_idle_interval_seconds)),
+        status_active_interval_seconds=float(_get(cad_raw, "status_active_interval_seconds", cad_defaults.status_active_interval_seconds)),
+        sensors_force_publish_seconds=float(_get(cad_raw, "sensors_force_publish_seconds", cad_defaults.sensors_force_publish_seconds)),
+        events_max_per_second=int(_get(cad_raw, "events_max_per_second", cad_defaults.events_max_per_second)),
+        events_max_per_minute=int(_get(cad_raw, "events_max_per_minute", cad_defaults.events_max_per_minute)),
+        thumbnail_fetch_timeout_ms=int(_get(cad_raw, "thumbnail_fetch_timeout_ms", cad_defaults.thumbnail_fetch_timeout_ms)),
+        timelapse_poll_interval_seconds=float(_get(cad_raw, "timelapse_poll_interval_seconds", cad_defaults.timelapse_poll_interval_seconds)),
     )
 
-    logging_defaults = LoggingConfig()
+    log_raw = raw.get("logging", {})
+    log_defaults = LoggingConfig()
+    log_path_str = log_raw.get("path", str(constants.DEFAULT_LOG_PATH))
     logging_config = LoggingConfig(
-        level=parser.get("logging", "level", fallback="INFO"),
-        path=Path(
-            parser.get("logging", "path", fallback=str(constants.DEFAULT_LOG_PATH))
-        ).expanduser(),
-        log_network=parser.getboolean("logging", "log_network", fallback=False),
-        max_bytes=parser.getint(
-            "logging", "max_bytes", fallback=logging_defaults.max_bytes
-        ),
-        backup_count=parser.getint(
-            "logging", "backup_count", fallback=logging_defaults.backup_count
-        ),
+        level=str(log_raw.get("level", "INFO")),
+        path=Path(str(log_path_str)).expanduser() if log_path_str else log_defaults.path,
+        log_network=bool(log_raw.get("log_network", False)),
+        max_bytes=int(_get(log_raw, "max_bytes", log_defaults.max_bytes)),
+        backup_count=int(_get(log_raw, "backup_count", log_defaults.backup_count)),
     )
 
+    res_raw = raw.get("resilience", {})
     resilience = ResilienceConfig(
-        reconnect_initial_seconds=parser.getfloat(
-            "resilience", "reconnect_initial_seconds", fallback=1.0
-        ),
-        reconnect_max_seconds=parser.getfloat(
-            "resilience", "reconnect_max_seconds", fallback=30.0
-        ),
-        reconnect_jitter_ratio=max(
-            0.0,
-            min(
-                1.0,
-                parser.getfloat("resilience", "reconnect_jitter_ratio", fallback=0.5),
-            ),
-        ),
-        reconnect_perpetual_seconds=max(
-            60.0,
-            parser.getfloat("resilience", "reconnect_perpetual_seconds", fallback=900.0),
-        ),
-        session_expiry_seconds=max(
-            0,
-            parser.getint("resilience", "session_expiry_seconds", fallback=86400),
-        ),
-        buffer_window_seconds=max(
-            0.0,
-            parser.getfloat("resilience", "buffer_window_seconds", fallback=60.0),
-        ),
-        moonraker_breaker_threshold=max(
-            1,
-            parser.getint("resilience", "moonraker_breaker_threshold", fallback=5),
-        ),
-        heartbeat_interval_seconds=max(
-            1,
-            parser.getint("resilience", "heartbeat_interval_seconds", fallback=30),
-        ),
-        health_enabled=parser.getboolean(
-            "resilience", "health_enabled", fallback=False
-        ),
-        health_host=parser.get("resilience", "health_host", fallback="127.0.0.1"),
-        health_port=parser.getint("resilience", "health_port", fallback=0),
+        reconnect_initial_seconds=float(_get(res_raw, "reconnect_initial_seconds", 1.0)),
+        reconnect_max_seconds=float(_get(res_raw, "reconnect_max_seconds", 30.0)),
+        reconnect_jitter_ratio=max(0.0, min(1.0, float(_get(res_raw, "reconnect_jitter_ratio", 0.5)))),
+        reconnect_perpetual_seconds=max(60.0, float(_get(res_raw, "reconnect_perpetual_seconds", 900.0))),
+        session_expiry_seconds=max(0, int(_get(res_raw, "session_expiry_seconds", 86400))),
+        buffer_window_seconds=max(0.0, float(_get(res_raw, "buffer_window_seconds", 60.0))),
+        moonraker_breaker_threshold=max(1, int(_get(res_raw, "moonraker_breaker_threshold", 5))),
+        heartbeat_interval_seconds=max(1, int(_get(res_raw, "heartbeat_interval_seconds", 30))),
+        health_enabled=bool(res_raw.get("health_enabled", False)),
+        health_host=str(res_raw.get("health_host", "127.0.0.1")),
+        health_port=int(_get(res_raw, "health_port", 0)),
     )
 
     # Compression config - environment variable takes precedence
-    compression_defaults = CompressionConfig()
+    comp_defaults = CompressionConfig()
     if CompressionConfig.is_disabled_by_env():
         compression = CompressionConfig(enabled=False)
     else:
+        comp_raw = raw.get("compression", {})
         compression = CompressionConfig(
-            enabled=parser.getboolean(
-                "compression", "enabled", fallback=compression_defaults.enabled
-            ),
-            channels=_parse_list(
-                parser.get("compression", "channels", fallback="sensors,objects"),
-                default=compression_defaults.channels,
-            ),
-            min_size_bytes=parser.getint(
-                "compression", "min_size_bytes", fallback=compression_defaults.min_size_bytes
-            ),
+            enabled=bool(comp_raw.get("enabled", comp_defaults.enabled)),
+            channels=list(comp_raw.get("channels", comp_defaults.channels)),
+            min_size_bytes=int(_get(comp_raw, "min_size_bytes", comp_defaults.min_size_bytes)),
         )
 
     # Camera config
-    camera_defaults = CameraConfig()
+    cam_raw = raw.get("camera", {})
+    cam_defaults = CameraConfig()
     camera = CameraConfig(
-        enabled=parser.getboolean("camera", "enabled", fallback=camera_defaults.enabled),
-        snapshot_url=parser.get(
-            "camera", "snapshot_url", fallback=camera_defaults.snapshot_url
-        ),
-        camera_name=parser.get(
-            "camera", "camera_name", fallback=camera_defaults.camera_name
-        ),
-        capture_timeout_seconds=parser.getfloat(
-            "camera", "capture_timeout_seconds", fallback=camera_defaults.capture_timeout_seconds
-        ),
-        max_retries=parser.getint(
-            "camera", "max_retries", fallback=camera_defaults.max_retries
-        ),
-        preprocess_enabled=parser.getboolean(
-            "camera", "preprocess_enabled", fallback=camera_defaults.preprocess_enabled
-        ),
-        preprocess_target_width=parser.getint(
-            "camera", "preprocess_target_width", fallback=camera_defaults.preprocess_target_width
-        ),
-        preprocess_jpeg_quality=parser.getint(
-            "camera", "preprocess_jpeg_quality", fallback=camera_defaults.preprocess_jpeg_quality
-        ),
+        enabled=bool(cam_raw.get("enabled", cam_defaults.enabled)),
+        snapshot_url=str(cam_raw.get("snapshot_url", cam_defaults.snapshot_url)),
+        camera_name=str(cam_raw.get("camera_name", cam_defaults.camera_name)),
+        capture_timeout_seconds=float(_get(cam_raw, "capture_timeout_seconds", cam_defaults.capture_timeout_seconds)),
+        max_retries=int(_get(cam_raw, "max_retries", cam_defaults.max_retries)),
+        preprocess_enabled=bool(cam_raw.get("preprocess_enabled", cam_defaults.preprocess_enabled)),
+        preprocess_target_width=int(_get(cam_raw, "preprocess_target_width", cam_defaults.preprocess_target_width)),
+        preprocess_jpeg_quality=int(_get(cam_raw, "preprocess_jpeg_quality", cam_defaults.preprocess_jpeg_quality)),
     )
 
     # Metadata config
-    metadata_defaults = MetadataConfig()
+    meta_raw = raw.get("metadata", {})
+    meta_defaults = MetadataConfig()
     metadata = MetadataConfig(
-        enabled=parser.getboolean(
-            "metadata", "enabled", fallback=metadata_defaults.enabled
-        ),
-        refresh_interval_hours=parser.getfloat(
-            "metadata", "refresh_interval_hours", fallback=metadata_defaults.refresh_interval_hours
-        ),
-        initial_retry_delay_seconds=parser.getfloat(
-            "metadata",
-            "initial_retry_delay_seconds",
-            fallback=metadata_defaults.initial_retry_delay_seconds,
-        ),
-        max_retry_delay_seconds=parser.getfloat(
-            "metadata",
-            "max_retry_delay_seconds",
-            fallback=metadata_defaults.max_retry_delay_seconds,
-        ),
-        request_timeout_seconds=parser.getfloat(
-            "metadata",
-            "request_timeout_seconds",
-            fallback=metadata_defaults.request_timeout_seconds,
-        ),
+        enabled=bool(meta_raw.get("enabled", meta_defaults.enabled)),
+        refresh_interval_hours=float(_get(meta_raw, "refresh_interval_hours", meta_defaults.refresh_interval_hours)),
+        initial_retry_delay_seconds=float(_get(meta_raw, "initial_retry_delay_seconds", meta_defaults.initial_retry_delay_seconds)),
+        max_retry_delay_seconds=float(_get(meta_raw, "max_retry_delay_seconds", meta_defaults.max_retry_delay_seconds)),
+        request_timeout_seconds=float(_get(meta_raw, "request_timeout_seconds", meta_defaults.request_timeout_seconds)),
     )
 
     return OwlConfig(
@@ -577,15 +404,15 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         compression=compression,
         camera=camera,
         metadata=metadata,
-        raw=parser,
+        raw=copy.deepcopy(raw),
         path=config_path,
     )
 
 
 def save_config(config: OwlConfig) -> None:
-    """Persist the current configuration to disk."""
+    """Persist the current configuration to disk as TOML."""
 
     config_path = config.path
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with config_path.open("w", encoding="utf-8") as stream:
-        config.raw.write(stream)
+    with config_path.open("wb") as stream:
+        tomli_w.dump(config.raw, stream)

@@ -41,6 +41,7 @@ from ..adapters import MQTTConnectionError
 from ..config import CompressionConfig, OwlConfig
 from ..core import deep_merge
 from ..identifiers import uuid7
+from ..serialization import json_default
 from ..tracing import create_traceparent
 from .cadence import (
     ChannelCadenceController,
@@ -197,6 +198,7 @@ class TelemetryPublisher:
         self._subscription_objects: dict[str, Optional[list[str]]] = (
             build_subscription_manifest(self._include_fields, self._exclude_fields)
         )
+        self._static_manifest_keys = frozenset(self._subscription_objects)
         self._source.set_subscription_objects(self._subscription_objects)
 
         self._poll_specs = tuple(poll_specs or DEFAULT_POLL_SPECS)
@@ -321,19 +323,24 @@ class TelemetryPublisher:
             LOGGER.warning("Failed to discover heaters/sensors: %s", exc)
             return
 
+        objects_before = set(self._subscription_objects)
+
         added = discover_moonraker_sensors(
             self._source,
             heater_info,
             self._subscription_objects,
             self._sensor_filter,
+            static_objects=self._static_manifest_keys,
         )
 
+        changed = added or set(self._subscription_objects) != objects_before
         if added:
             LOGGER.debug(
                 "Discovered %d temperature sensors: %s",
                 len(added),
                 ", ".join(added),
             )
+        if changed:
             self._source.set_subscription_objects(self._subscription_objects)
 
     async def stop(self) -> None:
@@ -875,7 +882,7 @@ class TelemetryPublisher:
         include_raw = bool(self._config.telemetry.include_raw_payload)
         raw_json: Optional[str] = None
         if include_raw:
-            raw_json = json.dumps(payload, default=_json_default)
+            raw_json = json.dumps(payload, default=json_default)
 
         now_monotonic = time.monotonic()
 
@@ -1548,7 +1555,7 @@ class TelemetryPublisher:
         *,
         retain: bool = False,
     ) -> None:
-        payload_bytes = json.dumps(document, default=_json_default).encode("utf-8")
+        payload_bytes = json.dumps(document, default=json_default).encode("utf-8")
         properties = Properties(PacketTypes.PUBLISH)
 
         # Add W3C Trace Context for distributed tracing
@@ -1979,11 +1986,9 @@ def _extract_state_from_params(params: Any) -> Optional[str]:
 
 
 def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str]:
-    raw = config.raw
-
-    tenant_id = raw.get("cloud", "tenant_id", fallback="")
-    device_id = raw.get("cloud", "device_id", fallback="")
-    printer_id = raw.get("cloud", "printer_id", fallback="")
+    tenant_id = config.cloud.tenant_id or ""
+    device_id = config.cloud.device_id or ""
+    printer_id = config.cloud.printer_id or ""
 
     username = config.cloud.username or ""
 
@@ -2091,12 +2096,5 @@ def _merge_payload_dicts(target: Dict[str, Any], updates: Dict[str, Any]) -> Non
     """Merge payload dictionaries using shared deep_merge utility."""
 
     deep_merge(target, updates)
-
-
-def _json_default(value: Any) -> Any:
-    try:
-        return str(value)
-    except Exception:  # pragma: no cover - defensive fallback
-        return repr(value)
 
 

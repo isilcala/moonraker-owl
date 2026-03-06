@@ -64,11 +64,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.command == "show-config":
         print(f"Configuration loaded from {config.path!s}\n")
-        for section in config.raw.sections():
-            print(f"[{section}]")
-            for key, value in config.raw[section].items():
-                print(f"{key} = {value}")
-            print()
+        for section, values in config.raw.items():
+            if isinstance(values, dict):
+                print(f"[{section}]")
+                for key, value in values.items():
+                    print(f"{key} = {value}")
+                print()
         return 0
 
     LOGGER.error("Unknown command: %s", args.command)

@@ -30,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VENV_DIR="${PROJECT_DIR}/.venv"
 CONFIG_DIR="${HOME}/printer_data/config"
-CONFIG_FILE="${CONFIG_DIR}/${APP_NAME}.cfg"
+CONFIG_FILE="${CONFIG_DIR}/${APP_NAME}.toml"
 LOG_DIR="${HOME}/printer_data/logs"
 SERVICE_NAME="${APP_NAME}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -157,12 +157,12 @@ create_config() {
         print_warn "Keeping existing configuration."
     else
         # Copy example config (must exist in distribution)
-        if [[ ! -f "${PROJECT_DIR}/owl.cfg.example" ]]; then
-            print_error "owl.cfg.example not found in ${PROJECT_DIR}"
+        if [[ ! -f "${PROJECT_DIR}/owl.toml.example" ]]; then
+            print_error "owl.toml.example not found in ${PROJECT_DIR}"
             print_error "The installation package appears to be incomplete."
             exit 1
         fi
-        cp "${PROJECT_DIR}/owl.cfg.example" "${CONFIG_FILE}"
+        cp "${PROJECT_DIR}/owl.toml.example" "${CONFIG_FILE}"
         print_step "Configuration file created at ${CONFIG_FILE}"
     fi
 }

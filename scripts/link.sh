@@ -14,7 +14,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VENV_DIR="${PROJECT_DIR}/.venv"
-CONFIG_FILE="${HOME}/printer_data/config/moonraker-owl.cfg"
+CONFIG_FILE="${HOME}/printer_data/config/moonraker-owl.toml"
 
 # Check if venv exists
 if [[ ! -d "${VENV_DIR}" ]]; then

@@ -38,7 +38,7 @@ cd moonraker-owl
 The installer will:
 - Create a Python virtual environment in `.venv/`
 - Install moonraker-owl and dependencies
-- Create the configuration file at `~/printer_data/config/moonraker-owl.cfg`
+- Create the configuration file at `~/printer_data/config/moonraker-owl.toml`
 - Register and enable the systemd service
 
 ### 3. Link to Owl Cloud
@@ -50,7 +50,7 @@ Before starting the service, you must link your printer:
 3. Run the link command:
 
 ```bash
-~/moonraker-owl/.venv/bin/moonraker-owl --config ~/printer_data/config/moonraker-owl.cfg link
+~/moonraker-owl/.venv/bin/moonraker-owl --config ~/printer_data/config/moonraker-owl.toml link
 ```
 
 4. Enter the link code when prompted
@@ -70,7 +70,7 @@ sudo systemctl status moonraker-owl
 journalctl -u moonraker-owl -f
 
 # View configuration
-~/moonraker-owl/.venv/bin/moonraker-owl --config ~/printer_data/config/moonraker-owl.cfg show-config
+~/moonraker-owl/.venv/bin/moonraker-owl --config ~/printer_data/config/moonraker-owl.toml show-config
 ```
 
 ## Moonraker Update Manager
@@ -96,7 +96,7 @@ sudo systemctl restart moonraker
 
 ## Configuration
 
-The configuration file is located at `~/printer_data/config/moonraker-owl.cfg`.
+The configuration file is located at `~/printer_data/config/moonraker-owl.toml`.
 
 ### Key Settings
 
@@ -109,7 +109,7 @@ The configuration file is located at `~/printer_data/config/moonraker-owl.cfg`.
 | `[camera]` | `snapshot_url` | Webcam snapshot URL |
 | `[logging]` | `level` | Log level (DEBUG, INFO, WARNING, ERROR) |
 
-See `owl.cfg.example` for all available options with descriptions.
+See `owl.toml.example` for all available options with descriptions.
 
 ### Default Environment
 
@@ -229,7 +229,7 @@ rm -rf ~/moonraker-owl
 
 1. Check if linked:
    ```bash
-   cat ~/printer_data/config/moonraker-owl.cfg | grep device_id
+   cat ~/printer_data/config/moonraker-owl.toml | grep device_id
    ```
    If empty, run the link command first.
 
@@ -262,7 +262,7 @@ rm -rf ~/moonraker-owl
 |------|------|
 | Source code | `~/moonraker-owl/` |
 | Virtual environment | `~/moonraker-owl/.venv/` |
-| Configuration | `~/printer_data/config/moonraker-owl.cfg` |
+| Configuration | `~/printer_data/config/moonraker-owl.toml` |
 | Logs | `~/printer_data/logs/moonraker-owl.log` |
 | Credentials | `~/.owl/device.json` |
 | Service file | `/etc/systemd/system/moonraker-owl.service` |
@@ -283,7 +283,7 @@ pip install -e ".[dev]"
 pytest
 
 # Run with debug logging
-moonraker-owl --config owl.cfg start
+moonraker-owl --config owl.toml start
 ```
 
 ## Support

@@ -109,10 +109,9 @@ def _extract_command_name(topic: str, device_id: str) -> Optional[str]:
 
 
 def _resolve_identity(config: OwlConfig) -> tuple[Optional[str], str, Optional[str]]:
-    parser = config.raw
-    device_id = parser.get("cloud", "device_id", fallback="").strip()
-    tenant_id = parser.get("cloud", "tenant_id", fallback="").strip()
-    printer_id = parser.get("cloud", "printer_id", fallback="").strip()
+    device_id = (config.cloud.device_id or "").strip()
+    tenant_id = (config.cloud.tenant_id or "").strip()
+    printer_id = (config.cloud.printer_id or "").strip()
 
     username = (config.cloud.username or "").strip()
     if not device_id and ":" in username:

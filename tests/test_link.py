@@ -1,6 +1,10 @@
 import json
-from configparser import ConfigParser
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore[no-redef]
 
 import pytest
 from aiohttp import web
@@ -81,7 +85,7 @@ async def test_link_device_allows_missing_tenant_id():
 
 
 def test_perform_linking_updates_config_and_credentials(monkeypatch, tmp_path: Path):
-    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path = tmp_path / "moonraker-owl.toml"
     config = load_config(config_path)
 
     fake_creds = DeviceCredentials(
@@ -115,19 +119,19 @@ def test_perform_linking_updates_config_and_credentials(monkeypatch, tmp_path: P
     assert stored["tenantId"] == "tenant-42"
     assert stored["devicePrivateKey"] == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
 
-    parser = ConfigParser()
-    parser.read(config_path)
+    with open(config_path, "rb") as f:
+        saved = tomllib.load(f)
 
-    assert parser.get("cloud", "username") == "tenant-42:device-42"
-    assert parser.get("cloud", "device_private_key") == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
-    assert parser.get("cloud", "tenant_id") == "tenant-42"
-    assert parser.get("cloud", "device_id") == "device-42"
+    assert saved["cloud"]["username"] == "tenant-42:device-42"
+    assert saved["cloud"]["device_private_key"] == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
+    assert saved["cloud"]["tenant_id"] == "tenant-42"
+    assert saved["cloud"]["device_id"] == "device-42"
 
 
 def test_perform_linking_requires_force_when_credentials_exist(
     monkeypatch, tmp_path: Path
 ):
-    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path = tmp_path / "moonraker-owl.toml"
     config = load_config(config_path)
     credentials_path = tmp_path / "existing.json"
     credentials_path.write_text("{}", encoding="utf-8")
@@ -142,7 +146,7 @@ def test_perform_linking_requires_force_when_credentials_exist(
 
 
 def test_update_config_with_credentials_without_tenant(tmp_path: Path):
-    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path = tmp_path / "moonraker-owl.toml"
     config = load_config(config_path)
 
     creds = DeviceCredentials(
@@ -158,12 +162,12 @@ def test_update_config_with_credentials_without_tenant(tmp_path: Path):
     _update_config_with_credentials(config, creds)
     save_config(config)
 
-    parser = ConfigParser()
-    parser.read(config_path)
+    with open(config_path, "rb") as f:
+        saved = tomllib.load(f)
 
-    assert parser.has_section("cloud")
-    assert parser.get("cloud", "username") == "device-1"
-    assert not parser.has_option("cloud", "tenant_id")
+    assert "cloud" in saved
+    assert saved["cloud"]["username"] == "device-1"
+    assert "tenant_id" not in saved["cloud"]
 
 
 def test_credentials_file_has_secure_permissions(monkeypatch, tmp_path: Path):
@@ -175,7 +179,7 @@ def test_credentials_file_has_secure_permissions(monkeypatch, tmp_path: Path):
     if not hasattr(os, "chmod") or sys.platform.startswith("win"):
         pytest.skip("File permissions test only runs on Unix systems")
     
-    config_path = tmp_path / "moonraker-owl.cfg"
+    config_path = tmp_path / "moonraker-owl.toml"
     config = load_config(config_path)
 
     fake_creds = DeviceCredentials(
@@ -212,8 +216,8 @@ def test_credentials_file_has_secure_permissions(monkeypatch, tmp_path: Path):
 
 
 def test_device_private_key_stored_in_config(tmp_path: Path):
-    """Test that device_private_key is properly stored in owl.cfg."""
-    config_path = tmp_path / "moonraker-owl.cfg"
+    """Test that device_private_key is properly stored in owl.toml."""
+    config_path = tmp_path / "moonraker-owl.toml"
     config = load_config(config_path)
 
     creds = DeviceCredentials(
@@ -233,4 +237,4 @@ def test_device_private_key_stored_in_config(tmp_path: Path):
     reloaded_config = load_config(config_path)
     
     assert reloaded_config.cloud.device_private_key == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
-    assert reloaded_config.raw.get("cloud", "device_private_key") == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
+    assert reloaded_config.raw.get("cloud", {}).get("device_private_key") == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="

@@ -2,7 +2,6 @@
 
 import gzip
 import json
-from configparser import ConfigParser
 from pathlib import Path
 
 import pytest
@@ -75,15 +74,15 @@ def test_load_config_parses_compression_section(tmp_path):
     
     config_content = """
 [cloud]
-device_id = test-device
-broker_host = test.broker.com
+device_id = "test-device"
+broker_host = "test.broker.com"
 
 [compression]
 enabled = false
-channels = sensors,status
+channels = ["sensors", "status"]
 min_size_bytes = 512
 """
-    config_file = tmp_path / "owl.cfg"
+    config_file = tmp_path / "owl.toml"
     config_file.write_text(config_content)
     
     config = load_config(config_file)
@@ -99,13 +98,13 @@ def test_load_config_respects_env_override(tmp_path, monkeypatch):
     
     config_content = """
 [cloud]
-device_id = test-device
-broker_host = test.broker.com
+device_id = "test-device"
+broker_host = "test.broker.com"
 
 [compression]
 enabled = true
 """
-    config_file = tmp_path / "owl.cfg"
+    config_file = tmp_path / "owl.toml"
     config_file.write_text(config_content)
     
     # Environment variable should override config file
@@ -122,14 +121,14 @@ def test_load_config_uses_defaults_when_compression_section_missing(tmp_path):
     
     config_content = """
 [cloud]
-device_id = test-device
-broker_host = test.broker.com
+device_id = "test-device"
+broker_host = "test.broker.com"
 """
-    config_file = tmp_path / "owl.cfg"
+    config_file = tmp_path / "owl.toml"
     config_file.write_text(config_content)
     
     config = load_config(config_file)
     
     assert config.compression.enabled is True
-    assert config.compression.channels == ["sensors"]
+    assert config.compression.channels == ["sensors", "objects"]
     assert config.compression.min_size_bytes == 1024

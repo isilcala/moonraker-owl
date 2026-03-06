@@ -1,0 +1,77 @@
+[cloud]
+base_url = "http://localhost:5024"
+broker_host = "192.168.50.10"
+broker_port = 1883
+device_id = "019aca84-9ea2-7b44-aa1a-75ab93c6e22a"
+username = "00000000-0000-0000-0000-000000000001:019aca84-9ea2-7b44-aa1a-75ab93c6e22a"
+password = "R4JunE/Mq1cXNzPwMnxfy6w8VR5ghS8Or+YAt95SWvY="
+printer_id = "019ac983-c7c9-7060-974c-fb071d741440"
+tenant_id = "00000000-0000-0000-0000-000000000001"
+device_private_key = "3+adQFTOPP/TAXtHjY5zyKSO3Zshox4HTDjDbe8DrU4="
+
+[moonraker]
+url = "http://192.168.50.231:7125"
+transport = "websocket"
+
+[telemetry]
+rate_hz = 0.02
+include_fields = [
+    "print_stats",
+    "toolhead",
+    "gcode_move",
+    "heater_bed",
+    "extruder",
+    "fan",
+    "display_status",
+    "idle_timeout",
+    "virtual_sdcard",
+    "exclude_object",
+    "gcode_macro TIMELAPSE_TAKE_FRAME",
+]
+exclude_fields = []
+
+[commands]
+ack_timeout_seconds = 30.0
+
+[telemetry_cadence]
+status_heartbeat_seconds = 60
+status_idle_interval_seconds = 60
+status_active_interval_seconds = 15
+sensors_force_publish_seconds = 300
+events_max_per_second = 1
+events_max_per_minute = 20
+overview_heartbeat_seconds = 60
+overview_idle_interval_seconds = 60
+overview_active_interval_seconds = 15
+telemetry_watchdog_seconds = 300
+
+[logging]
+level = "DEBUG"
+path = "D:\\Projects\\Owl\\Owl.Moonraker\\moonraker-owl.log"
+log_network = false
+
+[resilience]
+reconnect_initial_seconds = 1.0
+reconnect_max_seconds = 30.0
+reconnect_jitter_ratio = 0.5
+session_expiry_seconds = 86400
+buffer_window_seconds = 60.0
+moonraker_breaker_threshold = 5
+heartbeat_interval_seconds = 30
+health_enabled = true
+health_host = "127.0.0.1"
+health_port = 3333
+
+[compression]
+enabled = false
+channels = ["sensors", "objects"]
+min_size_bytes = 1024
+
+[camera]
+enabled = true
+snapshot_url = "http://192.168.50.231/webcam/?action=snapshot"
+capture_timeout_seconds = 10.0
+max_retries = 2
+preprocess_enabled = true
+preprocess_target_width = 1280
+preprocess_jpeg_quality = 85

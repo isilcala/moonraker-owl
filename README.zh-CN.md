@@ -39,7 +39,7 @@ sudo chmod +x ./scripts/install.sh
 安装脚本将自动：
 - 在 `.venv/` 目录创建 Python 虚拟环境
 - 安装 moonraker-owl 及其依赖
-- 在 `~/printer_data/config/moonraker-owl.cfg` 创建配置文件
+- 在 `~/printer_data/config/moonraker-owl.toml` 创建配置文件
 - 注册并启用 systemd 服务
 
 ### 3. 链接到 Owl Cloud
@@ -51,7 +51,7 @@ sudo chmod +x ./scripts/install.sh
 3. 运行链接命令：
 
 ```bash
-~/moonraker-owl/.venv/bin/moonraker-owl --config ~/printer_data/config/moonraker-owl.cfg link
+~/moonraker-owl/.venv/bin/moonraker-owl --config ~/printer_data/config/moonraker-owl.toml link
 ```
 
 4. 按提示输入链接码
@@ -71,7 +71,7 @@ sudo systemctl status moonraker-owl
 journalctl -u moonraker-owl -f
 
 # 查看配置
-~/moonraker-owl/.venv/bin/moonraker-owl --config ~/printer_data/config/moonraker-owl.cfg show-config
+~/moonraker-owl/.venv/bin/moonraker-owl --config ~/printer_data/config/moonraker-owl.toml show-config
 ```
 
 ## Moonraker Update Manager 配置
@@ -97,7 +97,7 @@ sudo systemctl restart moonraker
 
 ## 配置说明
 
-配置文件位于 `~/printer_data/config/moonraker-owl.cfg`。
+配置文件位于 `~/printer_data/config/moonraker-owl.toml`。
 
 ### 主要设置
 
@@ -110,7 +110,7 @@ sudo systemctl restart moonraker
 | `[camera]` | `snapshot_url` | 摄像头快照 URL |
 | `[logging]` | `level` | 日志级别 (DEBUG, INFO, WARNING, ERROR) |
 
-查看 `owl.cfg.example` 获取所有可用选项及详细说明。
+查看 `owl.toml.example` 获取所有可用选项及详细说明。
 
 ### 默认环境
 
@@ -229,7 +229,7 @@ rm -rf ~/moonraker-owl
 
 1. 检查是否已链接：
    ```bash
-   cat ~/printer_data/config/moonraker-owl.cfg | grep device_id
+   cat ~/printer_data/config/moonraker-owl.toml | grep device_id
    ```
    如果为空，请先运行链接命令。
 
@@ -262,7 +262,7 @@ rm -rf ~/moonraker-owl
 |------|------|
 | 源代码 | `~/moonraker-owl/` |
 | 虚拟环境 | `~/moonraker-owl/.venv/` |
-| 配置文件 | `~/printer_data/config/moonraker-owl.cfg` |
+| 配置文件 | `~/printer_data/config/moonraker-owl.toml` |
 | 日志文件 | `~/printer_data/logs/moonraker-owl.log` |
 | 凭证文件 | `~/.owl/device.json` |
 | 服务文件 | `/etc/systemd/system/moonraker-owl.service` |
@@ -283,7 +283,7 @@ pip install -e ".[dev]"
 pytest
 
 # 使用调试日志运行
-moonraker-owl --config owl.cfg start
+moonraker-owl --config owl.toml start
 ```
 
 ## 支持

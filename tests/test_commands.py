@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from configparser import ConfigParser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -687,9 +686,6 @@ async def test_sensors_set_rate_clock_skew_correction(config):
 
 
 def test_command_processor_requires_device_id():
-    parser = ConfigParser()
-    parser.add_section("cloud")
-
     config = OwlConfig(
         cloud=CloudConfig(),
         moonraker=MoonrakerConfig(),
@@ -701,8 +697,8 @@ def test_command_processor_requires_device_id():
         compression=CompressionConfig(),
         camera=CameraConfig(),
         metadata=MetadataConfig(),
-        raw=parser,
-        path=Path("moonraker-owl.cfg"),
+        raw={},
+        path=Path("moonraker-owl.toml"),
     )
 
     with pytest.raises(CommandConfigurationError):

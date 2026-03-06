@@ -189,15 +189,13 @@ def _update_config_with_credentials(
     config.cloud.username = broker_username
     # Note: password field no longer used - JWT authentication only
 
-    if not config.raw.has_section("cloud"):
-        config.raw.add_section("cloud")
-
-    config.raw.set("cloud", "username", broker_username)
-    config.raw.set("cloud", "device_id", credentials.device_id)
-    config.raw.set("cloud", "printer_id", credentials.printer_id)
-    config.raw.set("cloud", "device_private_key", credentials.device_private_key)
+    cloud_section = config.raw.setdefault("cloud", {})
+    cloud_section["username"] = broker_username
+    cloud_section["device_id"] = credentials.device_id
+    cloud_section["printer_id"] = credentials.printer_id
+    cloud_section["device_private_key"] = credentials.device_private_key
 
     if tenant_id:
-        config.raw.set("cloud", "tenant_id", tenant_id)
-    elif config.raw.has_option("cloud", "tenant_id"):
-        config.raw.remove_option("cloud", "tenant_id")
+        cloud_section["tenant_id"] = tenant_id
+    else:
+        cloud_section.pop("tenant_id", None)

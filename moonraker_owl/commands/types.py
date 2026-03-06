@@ -91,14 +91,6 @@ class _InflightCommand:
 
 
 @dataclass(slots=True)
-class _CommandHistoryEntry:
-    status: str
-    stage: str
-    error_code: Optional[str]
-    error_message: Optional[str]
-
-
-@dataclass(slots=True)
 class _PendingStateCommand:
     """Tracks a command awaiting state confirmation."""
 

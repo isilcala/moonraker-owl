@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from configparser import ConfigParser
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from moonraker_owl.config import (
     CameraConfig,
@@ -37,18 +36,23 @@ def build_config(
     Shared across test modules to avoid repeating the same boilerplate.
     """
     username = f"{tenant_id}:{device_id}"
-    parser = ConfigParser()
-    parser.add_section("cloud")
-    parser.set("cloud", "device_id", device_id)
-    parser.set("cloud", "tenant_id", tenant_id)
-    parser.set("cloud", "printer_id", printer_id)
-    parser.set("cloud", "username", username)
+    raw: Dict[str, Any] = {
+        "cloud": {
+            "device_id": device_id,
+            "tenant_id": tenant_id,
+            "printer_id": printer_id,
+            "username": username,
+        }
+    }
 
     return OwlConfig(
         cloud=CloudConfig(
             base_url="https://api.owl.dev",
             broker_host="broker.owl.dev",
             broker_port=1883,
+            device_id=device_id,
+            tenant_id=tenant_id,
+            printer_id=printer_id,
             username=username,
             password="token",
         ),
@@ -65,6 +69,6 @@ def build_config(
         compression=CompressionConfig(),
         camera=CameraConfig(),
         metadata=MetadataConfig(),
-        raw=parser,
-        path=Path("moonraker-owl.cfg"),
+        raw=raw,
+        path=Path("moonraker-owl.toml"),
     )
