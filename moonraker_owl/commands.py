@@ -265,6 +265,11 @@ class CommandProcessor:
         self._command_timeout_seconds = 30.0
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
+        # Capture concurrency control: prevent overlapping captures (C-01)
+        self._capture_semaphore = asyncio.Semaphore(1)
+        self._last_capture_time: Optional[float] = None
+        self._min_capture_interval = 2.0  # seconds
+
     async def start(self) -> None:
         if self._handler_registered:
             raise RuntimeError("CommandProcessor already started")
@@ -1214,6 +1219,10 @@ class CommandProcessor:
         The agent captures a snapshot from the webcam and uploads it
         to the presigned S3 URL.
 
+        Uses a semaphore to prevent overlapping captures (camera is a
+        shared resource) and enforces a minimum interval between captures
+        to avoid hardware contention.
+
         Parameters:
             frameId (str): The capture frame ID for correlation
             uploadUrl (str): Presigned URL for uploading
@@ -1221,6 +1230,41 @@ class CommandProcessor:
             maxFileSizeBytes (int, optional): Maximum file size allowed
             allowedContentTypes (list, optional): Allowed MIME types
         """
+        try:
+            await asyncio.wait_for(
+                self._capture_semaphore.acquire(), timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "frameId": (message.parameters or {}).get("frameId"),
+                "errorCode": "capture_busy",
+                "errorMessage": "Another capture is already in progress",
+            }
+
+        try:
+            # Enforce minimum interval between captures
+            import time as _time
+            now = _time.monotonic()
+            if self._last_capture_time is not None:
+                elapsed = now - self._last_capture_time
+                if elapsed < self._min_capture_interval:
+                    wait = self._min_capture_interval - elapsed
+                    LOGGER.debug(
+                        "Capture cooldown: waiting %.1fs before next capture", wait
+                    )
+                    await asyncio.sleep(wait)
+
+            result = await self._execute_capture_image_inner(message)
+            self._last_capture_time = _time.monotonic()
+            return result
+        finally:
+            self._capture_semaphore.release()
+
+    async def _execute_capture_image_inner(
+        self, message: CommandMessage
+    ) -> Dict[str, Any]:
+        """Inner implementation of capture-image, called under semaphore."""
         if self._s3_upload is None:
             raise CommandProcessingError(
                 "S3 upload client unavailable",
