@@ -26,7 +26,7 @@ LOG_DIR="${HOME}/printer_data/logs"
 LOG_FILE="${LOG_DIR}/${APP_NAME}.log"
 SERVICE_NAME="${APP_NAME}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-CREDENTIALS_DIR="${HOME}/.owl"
+CREDENTIALS_DIR="${HOME}/.moonraker-owl"
 
 # Colors for output
 RED='\033[0;31m'

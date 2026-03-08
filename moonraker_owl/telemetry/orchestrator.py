@@ -74,7 +74,7 @@ class TelemetryOrchestrator:
         )
 
         self._sensors_mode = "idle"
-        self._sensors_max_hz = 0.033
+        self._sensors_interval_seconds = 30.0
         self._watch_window_expires: Optional[datetime] = None
 
         # State tracking for event detection
@@ -166,7 +166,7 @@ class TelemetryOrchestrator:
         self.session_tracker = PrintSessionTracker()
         self.heater_monitor = HeaterMonitor()
         self._sensors_mode = "idle"
-        self._sensors_max_hz = 0.033
+        self._sensors_interval_seconds = 30.0
         self._watch_window_expires = None
         # Reset state tracking but preserve callbacks
         # When snapshot is provided (token renewal), initialize last states from
@@ -245,18 +245,18 @@ class TelemetryOrchestrator:
         self._detect_state_changes()
 
     def set_sensors_mode(
-        self, *, mode: str, max_hz: float, watch_window_expires: Optional[datetime]
+        self, *, mode: str, interval_seconds: float, watch_window_expires: Optional[datetime]
     ) -> None:
         self._sensors_mode = mode
-        self._sensors_max_hz = max_hz
+        self._sensors_interval_seconds = interval_seconds
         self._watch_window_expires = watch_window_expires
 
     def set_telemetry_mode(
-        self, *, mode: str, max_hz: float, watch_window_expires: Optional[datetime]
+        self, *, mode: str, interval_seconds: float, watch_window_expires: Optional[datetime]
     ) -> None:
         """Backward-compatible wrapper for the legacy telemetry channel name."""
 
-        self.set_sensors_mode(mode=mode, max_hz=max_hz, watch_window_expires=watch_window_expires)
+        self.set_sensors_mode(mode=mode, interval_seconds=interval_seconds, watch_window_expires=watch_window_expires)
 
     @property
     def origin(self) -> str:
@@ -304,7 +304,7 @@ class TelemetryOrchestrator:
         sensors_payload = self.sensors_selector.build(
             self.store,
             mode=self._sensors_mode,
-            max_hz=self._sensors_max_hz,
+            interval_seconds=self._sensors_interval_seconds,
             watch_window_expires=self._watch_window_expires,
             observed_at=observed_at,
             force_emit="sensors" in forced,

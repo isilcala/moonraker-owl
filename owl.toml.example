@@ -8,10 +8,11 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# [cloud] - Owl Cloud Connection
+# [cloud] - Owl Cloud Connection (Infrastructure Only)
 # -----------------------------------------------------------------------------
-# These settings are populated automatically after running `moonraker-owl link`.
-# DO NOT manually edit device credentials unless instructed.
+# Network infrastructure settings for reaching the Owl Cloud.
+# Device credentials are stored separately in ~/.moonraker-owl/credentials.json
+# and are populated automatically by `moonraker-owl link`.
 [cloud]
 # Owl Cloud API endpoint (Staging environment)
 base_url = "https://owl.elencala.com"
@@ -20,13 +21,6 @@ base_url = "https://owl.elencala.com"
 # Uses TLS on port 8883 - Traefik terminates TLS and forwards to EMQX
 broker_host = "mqtt.owl.elencala.com"
 broker_port = 8883
-
-# === Device Credentials (auto-populated by `moonraker-owl link`) ===
-# device_id = "<auto>"
-# printer_id = "<auto>"
-# tenant_id = "<auto>"
-# device_private_key = "<auto>"
-# username = "<auto>"
 
 # -----------------------------------------------------------------------------
 # [moonraker] - Local Moonraker Connection

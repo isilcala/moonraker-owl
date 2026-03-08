@@ -11,7 +11,7 @@ from typing import Optional
 
 import aiohttp
 
-from .config import OwlConfig, save_config
+from .config import OwlConfig
 from .constants import DEFAULT_CREDENTIALS_PATH
 
 LOGGER = logging.getLogger(__name__)
@@ -136,8 +136,6 @@ def perform_linking(
         raise DeviceLinkingError(f"Linking failed unexpectedly: {exc}") from exc
 
     _persist_credentials(target_path, credentials)
-    _update_config_with_credentials(config, credentials)
-    save_config(config)
 
     LOGGER.info(
         "Linked printer %s (device %s) to tenant %s",
@@ -175,27 +173,3 @@ def _persist_credentials(path: Path, credentials: DeviceCredentials) -> None:
     if hasattr(os, "chmod"):
         os.chmod(path, 0o600)  # rw-------
         LOGGER.info("Set credentials file permissions to 0600")
-
-
-def _update_config_with_credentials(
-    config: OwlConfig, credentials: DeviceCredentials
-) -> None:
-    tenant_id = credentials.tenant_id
-    if tenant_id:
-        broker_username = f"{tenant_id}:{credentials.device_id}"
-    else:
-        broker_username = credentials.device_id
-
-    config.cloud.username = broker_username
-    # Note: password field no longer used - JWT authentication only
-
-    cloud_section = config.raw.setdefault("cloud", {})
-    cloud_section["username"] = broker_username
-    cloud_section["device_id"] = credentials.device_id
-    cloud_section["printer_id"] = credentials.printer_id
-    cloud_section["device_private_key"] = credentials.device_private_key
-
-    if tenant_id:
-        cloud_section["tenant_id"] = tenant_id
-    else:
-        cloud_section.pop("tenant_id", None)

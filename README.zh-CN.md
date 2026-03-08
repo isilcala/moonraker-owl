@@ -229,9 +229,9 @@ rm -rf ~/moonraker-owl
 
 1. 检查是否已链接：
    ```bash
-   cat ~/printer_data/config/moonraker-owl.toml | grep device_id
+   cat ~/.moonraker-owl/credentials.json
    ```
-   如果为空，请先运行链接命令。
+   如果文件不存在，请先运行链接命令。
 
 2. 查看日志：
    ```bash
@@ -264,7 +264,8 @@ rm -rf ~/moonraker-owl
 | 虚拟环境 | `~/moonraker-owl/.venv/` |
 | 配置文件 | `~/printer_data/config/moonraker-owl.toml` |
 | 日志文件 | `~/printer_data/logs/moonraker-owl.log` |
-| 凭证文件 | `~/.owl/device.json` |
+| 凭证文件 | `~/.moonraker-owl/credentials.json` |
+| 云端配置缓存 | `~/.moonraker-owl/cloud-config.json` |
 | 服务文件 | `/etc/systemd/system/moonraker-owl.service` |
 
 ## 开发

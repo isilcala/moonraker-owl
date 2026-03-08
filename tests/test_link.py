@@ -1,16 +1,11 @@
 import json
 from pathlib import Path
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore[no-redef]
-
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from moonraker_owl.config import load_config, save_config
+from moonraker_owl.config import load_config, load_credentials, merge_credentials
 from moonraker_owl.link import (
     DeviceCredentials,
     DeviceLinkingError,
@@ -119,14 +114,6 @@ def test_perform_linking_updates_config_and_credentials(monkeypatch, tmp_path: P
     assert stored["tenantId"] == "tenant-42"
     assert stored["devicePrivateKey"] == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
 
-    with open(config_path, "rb") as f:
-        saved = tomllib.load(f)
-
-    assert saved["cloud"]["username"] == "tenant-42:device-42"
-    assert saved["cloud"]["device_private_key"] == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
-    assert saved["cloud"]["tenant_id"] == "tenant-42"
-    assert saved["cloud"]["device_id"] == "device-42"
-
 
 def test_perform_linking_requires_force_when_credentials_exist(
     monkeypatch, tmp_path: Path
@@ -145,29 +132,25 @@ def test_perform_linking_requires_force_when_credentials_exist(
         )
 
 
-def test_update_config_with_credentials_without_tenant(tmp_path: Path):
+def test_merge_credentials_without_tenant(tmp_path: Path):
     config_path = tmp_path / "moonraker-owl.toml"
     config = load_config(config_path)
 
-    creds = DeviceCredentials(
-        tenant_id="",
-        printer_id="printer-1",
-        device_id="device-1",
-        device_private_key="dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",
-        linked_at="",
+    creds_path = tmp_path / "credentials.json"
+    creds_path.write_text(
+        json.dumps({
+            "printerId": "printer-1",
+            "deviceId": "device-1",
+            "devicePrivateKey": "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",
+        }),
+        encoding="utf-8",
     )
 
-    from moonraker_owl.link import _update_config_with_credentials
+    merge_credentials(config, creds_path)
 
-    _update_config_with_credentials(config, creds)
-    save_config(config)
-
-    with open(config_path, "rb") as f:
-        saved = tomllib.load(f)
-
-    assert "cloud" in saved
-    assert saved["cloud"]["username"] == "device-1"
-    assert "tenant_id" not in saved["cloud"]
+    assert config.cloud.device_id == "device-1"
+    assert config.cloud.username == "device-1"
+    assert config.cloud.tenant_id is None
 
 
 def test_credentials_file_has_secure_permissions(monkeypatch, tmp_path: Path):
@@ -215,26 +198,57 @@ def test_credentials_file_has_secure_permissions(monkeypatch, tmp_path: Path):
     assert file_mode == 0o600, f"Expected 0o600, got {oct(file_mode)}"
 
 
-def test_device_private_key_stored_in_config(tmp_path: Path):
-    """Test that device_private_key is properly stored in owl.toml."""
+def test_merge_credentials_populates_cloud_config(tmp_path: Path):
+    """Test that merge_credentials loads JSON and populates CloudConfig."""
     config_path = tmp_path / "moonraker-owl.toml"
     config = load_config(config_path)
 
-    creds = DeviceCredentials(
-        tenant_id="tenant-test",
-        printer_id="printer-test",
-        device_id="device-test",
-        device_private_key="dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",
-        linked_at="2025-10-06T00:00:00Z",
+    creds_path = tmp_path / "credentials.json"
+    creds_path.write_text(
+        json.dumps({
+            "tenantId": "tenant-test",
+            "printerId": "printer-test",
+            "deviceId": "device-test",
+            "devicePrivateKey": "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA==",
+        }),
+        encoding="utf-8",
     )
 
-    from moonraker_owl.link import _update_config_with_credentials
+    merge_credentials(config, creds_path)
 
-    _update_config_with_credentials(config, creds)
-    save_config(config)
+    assert config.cloud.device_private_key == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
+    assert config.cloud.device_id == "device-test"
+    assert config.cloud.printer_id == "printer-test"
+    assert config.cloud.tenant_id == "tenant-test"
+    assert config.cloud.username == "tenant-test:device-test"
 
-    # Reload config and verify private key is present
-    reloaded_config = load_config(config_path)
-    
-    assert reloaded_config.cloud.device_private_key == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
-    assert reloaded_config.raw.get("cloud", {}).get("device_private_key") == "dGVzdF9wcml2YXRlX2tleV80NF9ieXRlc19iYXNlNjRfZW5jb2RlZA=="
+
+def test_merge_credentials_skips_when_file_missing(tmp_path: Path):
+    """Test that merge_credentials handles missing credentials file gracefully."""
+    config_path = tmp_path / "moonraker-owl.toml"
+    config = load_config(config_path)
+
+    merge_credentials(config, tmp_path / "nonexistent.json")
+
+    assert config.cloud.device_id is None
+    assert config.cloud.device_private_key is None
+
+
+def test_load_credentials_returns_none_when_missing(tmp_path: Path, monkeypatch):
+    """Test load_credentials returns None for non-existent file."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fakehome")
+    result = load_credentials(tmp_path / "nonexistent.json")
+    assert result is None
+
+
+def test_load_credentials_reads_json(tmp_path: Path):
+    """Test load_credentials correctly parses JSON."""
+    creds_path = tmp_path / "credentials.json"
+    creds_path.write_text(
+        json.dumps({"deviceId": "dev-1", "tenantId": "t-1"}),
+        encoding="utf-8",
+    )
+    result = load_credentials(creds_path)
+    assert result is not None
+    assert result["deviceId"] == "dev-1"
+    assert result["tenantId"] == "t-1"

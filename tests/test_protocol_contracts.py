@@ -52,7 +52,7 @@ class TestCommandContractParsing:
         assert msg.command_id == "22222222-2222-7222-8222-222222222222"
         assert msg.command == "control:set-telemetry-rate"
         assert msg.parameters["mode"] == "watch"
-        assert msg.parameters["maxHz"] == 2.0
+        assert msg.parameters["intervalSeconds"] == 0.5
         assert "issuedAt" in msg.parameters
         assert "serverUtcNow" in msg.parameters
 
@@ -462,5 +462,5 @@ class TestBackwardCompatibility:
 
         msg = _parse_command(_to_bytes(data), "control:set-telemetry-rate")
         assert msg.parameters["mode"] == "watch"
-        assert msg.parameters["maxHz"] == 2.0
+        assert msg.parameters["intervalSeconds"] == 0.5
         assert msg.parameters["adaptiveMode"] is True

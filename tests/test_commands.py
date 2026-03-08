@@ -166,21 +166,21 @@ class FakeTelemetry:
         self,
         *,
         mode: str,
-        max_hz: float,
+        interval_seconds: float,
         duration_seconds: Optional[int],
         requested_at: Optional[datetime],
     ) -> Optional[datetime]:
         self.applied.append(
             {
                 "mode": mode,
-                "max_hz": max_hz,
+                "interval_seconds": interval_seconds,
                 "duration_seconds": duration_seconds,
                 "requested_at": requested_at,
             }
         )
         # Update internal state after applying
         self._current_mode = mode
-        self._current_interval = 1.0 / max_hz if max_hz > 0 else 30.0
+        self._current_interval = interval_seconds if interval_seconds > 0 else 30.0
         if duration_seconds and duration_seconds > 0 and requested_at:
             self._watch_window_expires = requested_at + timedelta(seconds=duration_seconds)
         else:
@@ -447,7 +447,7 @@ async def test_command_processor_handles_sensors_set_rate(config):
             "command": "control:set-telemetry-rate",
             "parameters": {
                 "mode": "watch",
-                "maxHz": 5.0,
+                "intervalSeconds": 0.2,
                 "durationSeconds": 120,
                 "issuedAt": "2025-01-01T12:00:00Z",
             },
@@ -462,7 +462,7 @@ async def test_command_processor_handles_sensors_set_rate(config):
     assert len(telemetry.applied) == 1
     apply_args = telemetry.applied[0]
     assert apply_args["mode"] == "watch"
-    assert apply_args["max_hz"] == pytest.approx(5.0)
+    assert apply_args["interval_seconds"] == pytest.approx(0.2)
     assert apply_args["duration_seconds"] == 120
     assert apply_args["requested_at"] == datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -473,7 +473,7 @@ async def test_command_processor_handles_sensors_set_rate(config):
     details = completed["details"]
     assert details is not None
     assert details["mode"] == "watch"
-    assert details["maxHz"] == 5.0
+    assert details["intervalSeconds"] == pytest.approx(0.2)
     assert details["durationSeconds"] == 120
     assert details["watchWindowExpires"] == "2025-01-01T13:00:00+00:00"
 
@@ -508,14 +508,14 @@ async def test_sensors_set_rate_deduplication_extends_watch_window(config):
 
     await processor.start()
 
-    # First command: sets watch mode at 1 Hz
+    # First command: sets watch mode at 1 Hz (interval=1s)
     first_message = {
         "$id": "cmd-1",
         "payload": {
             "command": "control:set-telemetry-rate",
             "parameters": {
                 "mode": "watch",
-                "maxHz": 1.0,
+                "intervalSeconds": 1.0,
                 "durationSeconds": 120,
                 "issuedAt": "2025-01-01T12:00:00Z",
             },
@@ -533,7 +533,7 @@ async def test_sensors_set_rate_deduplication_extends_watch_window(config):
             "command": "control:set-telemetry-rate",
             "parameters": {
                 "mode": "watch",
-                "maxHz": 1.0,
+                "intervalSeconds": 1.0,
                 "durationSeconds": 120,
                 "issuedAt": "2025-01-01T12:01:00Z",
             },
@@ -572,7 +572,7 @@ async def test_sensors_set_rate_different_mode_triggers_full_apply(config):
             "$id": "cmd-1",
             "payload": {
                 "command": "control:set-telemetry-rate",
-                "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
+                "parameters": {"mode": "watch", "intervalSeconds": 1.0, "durationSeconds": 120},
             },
         },
     )
@@ -585,7 +585,7 @@ async def test_sensors_set_rate_different_mode_triggers_full_apply(config):
             "$id": "cmd-2",
             "payload": {
                 "command": "control:set-telemetry-rate",
-                "parameters": {"mode": "idle", "maxHz": 0.033},
+                "parameters": {"mode": "idle", "intervalSeconds": 30.3},
             },
         },
     )
@@ -597,7 +597,7 @@ async def test_sensors_set_rate_different_mode_triggers_full_apply(config):
 
 @pytest.mark.asyncio
 async def test_sensors_set_rate_different_hz_triggers_full_apply(config):
-    """Test that changing maxHz triggers full apply instead of extend."""
+    """Test that changing intervalSeconds triggers full apply instead of extend."""
     mqtt = FakeMQTT()
     telemetry = FakeTelemetry()
     processor = CommandProcessor(
@@ -616,7 +616,7 @@ async def test_sensors_set_rate_different_hz_triggers_full_apply(config):
             "$id": "cmd-1",
             "payload": {
                 "command": "control:set-telemetry-rate",
-                "parameters": {"mode": "watch", "maxHz": 1.0, "durationSeconds": 120},
+                "parameters": {"mode": "watch", "intervalSeconds": 1.0, "durationSeconds": 120},
             },
         },
     )
@@ -629,7 +629,7 @@ async def test_sensors_set_rate_different_hz_triggers_full_apply(config):
             "$id": "cmd-2",
             "payload": {
                 "command": "control:set-telemetry-rate",
-                "parameters": {"mode": "watch", "maxHz": 2.0, "durationSeconds": 120},
+                "parameters": {"mode": "watch", "intervalSeconds": 0.5, "durationSeconds": 120},
             },
         },
     )
@@ -662,7 +662,7 @@ async def test_sensors_set_rate_clock_skew_correction(config):
             "command": "control:set-telemetry-rate",
             "parameters": {
                 "mode": "watch",
-                "maxHz": 1.0,
+                "intervalSeconds": 1.0,
                 "durationSeconds": 120,
                 "serverUtcNow": "2025-01-01T12:00:00Z",
                 # issuedAt is also from server's perspective

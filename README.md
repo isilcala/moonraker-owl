@@ -98,6 +98,20 @@ sudo systemctl restart moonraker
 
 The configuration file is located at `~/printer_data/config/moonraker-owl.toml`.
 
+### Configuration Architecture
+
+The agent uses a three-tier configuration model:
+
+| Tier | Source | Scope | Example Settings |
+|------|--------|-------|------------------|
+| **A** (Infra) | `moonraker-owl.toml` | Local on-device | `base_url`, `broker_host`, `moonraker.url`, `logging.level` |
+| **B** (Credentials) | `~/.moonraker-owl/credentials.json` | Per-device secrets | `device_id`, `device_secret` |
+| **C** (Cloud) | Cloud API + LKG cache | Fleet-managed | Telemetry cadence, camera settings, compression |
+
+- **Tier A** — edited by the user in the TOML file. Infrastructure settings that vary per physical installation.
+- **Tier B** — written automatically during the `link` command. Stored separately from the config file so TOML remains safe to share. Legacy `~/.owl/device.json` is auto-migrated.
+- **Tier C** — fetched from the cloud API on startup and periodically refreshed. A last-known-good (LKG) cache at `~/.moonraker-owl/cloud-config.json` is used when the cloud is unreachable. Changes pushed via MQTT notifications are applied immediately without restart.
+
 ### Key Settings
 
 | Section | Setting | Description |
@@ -229,9 +243,9 @@ rm -rf ~/moonraker-owl
 
 1. Check if linked:
    ```bash
-   cat ~/printer_data/config/moonraker-owl.toml | grep device_id
+   cat ~/.moonraker-owl/credentials.json
    ```
-   If empty, run the link command first.
+   If the file doesn't exist, run the link command first.
 
 2. Check logs:
    ```bash
@@ -264,7 +278,8 @@ rm -rf ~/moonraker-owl
 | Virtual environment | `~/moonraker-owl/.venv/` |
 | Configuration | `~/printer_data/config/moonraker-owl.toml` |
 | Logs | `~/printer_data/logs/moonraker-owl.log` |
-| Credentials | `~/.owl/device.json` |
+| Credentials | `~/.moonraker-owl/credentials.json` |
+| Cloud config cache | `~/.moonraker-owl/cloud-config.json` |
 | Service file | `/etc/systemd/system/moonraker-owl.service` |
 
 ## Development

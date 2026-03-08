@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +18,10 @@ except ModuleNotFoundError:  # Python < 3.11
 import tomli_w
 
 from . import constants
+
+LOGGER = logging.getLogger(__name__)
+
+
 
 DEFAULT_TELEMETRY_FIELDS = [
     # Subscribe to entire print_stats object (null) to ensure we receive all state changes.
@@ -416,3 +422,50 @@ def save_config(config: OwlConfig) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with config_path.open("wb") as stream:
         tomli_w.dump(config.raw, stream)
+
+
+def load_credentials(
+    path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Load device credentials from a JSON file.
+
+    Returns:
+        Parsed credential dict, or None if the file does not exist.
+    """
+    target = path or constants.DEFAULT_CREDENTIALS_PATH
+
+    if not target.exists():
+        return None
+
+    with target.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def merge_credentials(config: OwlConfig, credentials_path: Optional[Path] = None) -> None:
+    """Load credentials from JSON and merge into the config's CloudConfig.
+
+    Credential fields from the JSON file take precedence over TOML values.
+    This allows TOML to provide fallback values while the authoritative
+    credentials live in the secure JSON file.
+    """
+    creds = load_credentials(credentials_path)
+    if creds is None:
+        return
+
+    cloud = config.cloud
+    if creds.get("deviceId"):
+        cloud.device_id = str(creds["deviceId"])
+    if creds.get("tenantId"):
+        cloud.tenant_id = str(creds["tenantId"])
+    if creds.get("printerId"):
+        cloud.printer_id = str(creds["printerId"])
+    if creds.get("devicePrivateKey"):
+        cloud.device_private_key = str(creds["devicePrivateKey"])
+
+    # Derive MQTT username from credentials
+    if cloud.tenant_id and cloud.device_id:
+        cloud.username = f"{cloud.tenant_id}:{cloud.device_id}"
+    elif cloud.device_id:
+        cloud.username = cloud.device_id
+
+

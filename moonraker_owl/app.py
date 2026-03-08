@@ -14,8 +14,9 @@ from typing import Any, Awaitable, Callable, Optional
 from . import constants
 from .adapters import MQTTClient, MQTTConnectionError
 from .backends import MoonrakerBackend
+from .cloud_config import CloudConfigManager
 from .commands import CommandConfigurationError, CommandProcessor
-from .config import OwlConfig, load_config
+from .config import OwlConfig, load_config, merge_credentials
 from .connection import ConnectionCoordinator, ReconnectReason
 from .core import PrinterBackend, PrinterHealthAssessment
 from .core.job_registry import PrintJobRegistry
@@ -112,6 +113,7 @@ class MoonrakerOwlApp:
                            MoonrakerBackend from config.
         """
         self._config = config or load_config()
+        merge_credentials(self._config)
         self._context = AppContext(config=self._config)
         # Create default backend if not provided
         self._printer_backend: Optional[PrinterBackend] = (
@@ -152,6 +154,8 @@ class MoonrakerOwlApp:
         self._job_registry = PrintJobRegistry()
         # Metadata reporter for device capability reporting (ADR-0032)
         self._metadata_reporter: Optional[MetadataReporter] = None
+        # Cloud configuration manager (ADR-0040 — Tier C config)
+        self._cloud_config_manager: Optional[CloudConfigManager] = None
 
     @property
     def _moonraker_client(self) -> Any:
@@ -384,6 +388,19 @@ class MoonrakerOwlApp:
         # Start MetadataReporter (ADR-0032) - non-blocking, fire-and-forget
         await self._start_metadata_reporter(device_id)
 
+        # Initialize CloudConfigManager (ADR-0040 — Tier C config)
+        # Load LKG cache first (Layer 2, sync, immediate) so runtime
+        # components start with best-known Tier C values.
+        ccm = CloudConfigManager(
+            config=self._config,
+            device_id=device_id,
+            base_url=self._config.cloud.base_url,
+            token_provider=self._token_manager.get_token,
+        )
+        ccm.register_callback(self._on_cloud_config_changed)
+        ccm.load_lkg()
+        self._cloud_config_manager = ccm
+
         self._mqtt_client = MQTTClient(
             self._config.cloud, client_id=client_id, token_manager=self._token_manager
         )
@@ -459,6 +476,13 @@ class MoonrakerOwlApp:
                 await self._printer_backend.stop()
                 self._printer_backend = None
             return False
+
+        # Subscribe to cloud config notification topics (ADR-0040)
+        self._subscribe_config_notifications()
+
+        # Unconditional cloud config fetch after initial MQTT connect (Layer 3)
+        if self._cloud_config_manager is not None:
+            await self._cloud_config_manager.fetch(force=True)
 
         await self._transition_state(
             AgentState.AWAITING_MOONRAKER,
@@ -999,6 +1023,13 @@ class MoonrakerOwlApp:
         self._mqtt_ready = True
         await self._health.update("mqtt", True, None)
 
+        # Re-subscribe to config notifications (subscriptions lost on reconnect)
+        self._subscribe_config_notifications()
+
+        # Re-fetch cloud config after reconnection
+        if self._cloud_config_manager is not None:
+            await self._cloud_config_manager.fetch(force=True)
+
         # Determine if we should preserve print state based on reconnect reason
         # Token renewal is a planned reconnection - preserve state to avoid
         # spurious print:started events while a print is still in progress
@@ -1079,11 +1110,78 @@ class MoonrakerOwlApp:
         because a fresh token might allow us to reconnect after the cloud service
         comes back online.
         """
+        # TTL-aware cloud config refresh (skips if within 30 min of last fetch)
+        if self._cloud_config_manager is not None:
+            await self._cloud_config_manager.fetch()
+
         if self._connection_coordinator is not None:
             LOGGER.debug("Requesting MQTT reconnect after token renewal")
             self._connection_coordinator.request_reconnect(
                 ReconnectReason.TOKEN_RENEWED
             )
+
+    # ------------------------------------------------------------------
+    # Cloud Config MQTT notifications (ADR-0040)
+    # ------------------------------------------------------------------
+
+    def _subscribe_config_notifications(self) -> None:
+        """Subscribe to cloud config notification MQTT topics."""
+        mqtt = self._mqtt_client
+        if mqtt is None or self._base_topic is None:
+            return
+
+        broadcast_topic = "owl/broadcasts/config-update"
+        device_topic = f"{self._base_topic}/config/notify"
+
+        try:
+            mqtt.subscribe_with_handler(
+                broadcast_topic, self._on_config_notification, qos=1
+            )
+            mqtt.subscribe_with_handler(
+                device_topic, self._on_config_notification, qos=1
+            )
+            LOGGER.info(
+                "Subscribed to config notifications: %s, %s",
+                broadcast_topic,
+                device_topic,
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to subscribe to config notifications: %s", exc)
+
+    async def _on_config_notification(self, topic: str, payload: bytes) -> None:
+        """Handle an MQTT config notification.
+
+        Parses optional ``jitterWindowSeconds`` and schedules a deferred fetch.
+        Device-specific notifications use 0 jitter for immediate updates.
+        """
+        ccm = self._cloud_config_manager
+        if ccm is None:
+            return
+
+        # Device-specific topic → immediate (0 jitter)
+        is_device_specific = self._base_topic is not None and topic.startswith(
+            self._base_topic
+        )
+
+        jitter = 0.0
+        if not is_device_specific:
+            try:
+                data = json.loads(payload) if payload else {}
+                jitter = float(data.get("jitterWindowSeconds", 0))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+        ccm.schedule_fetch(jitter_seconds=jitter)
+
+    async def _on_cloud_config_changed(self, config: OwlConfig) -> None:
+        """Callback fired when cloud config was updated.
+
+        Propagates new Tier C values to live runtime components.
+        """
+        publisher = self._telemetry_publisher
+        if publisher is not None:
+            publisher.refresh_base_config()
+        LOGGER.info("Cloud config hot-reload applied")
 
     async def _stop_services(self) -> None:
         await self._transition_state(AgentState.STOPPING, detail="shutdown requested")
@@ -1124,6 +1222,13 @@ class MoonrakerOwlApp:
             await self._stop_metadata_reporter()
         except Exception as exc:
             LOGGER.warning("Error stopping metadata reporter: %s", exc)
+
+        try:
+            if self._cloud_config_manager is not None:
+                await self._cloud_config_manager.stop()
+                self._cloud_config_manager = None
+        except Exception as exc:
+            LOGGER.warning("Error stopping cloud config manager: %s", exc)
 
         try:
             if self._printer_backend is not None:

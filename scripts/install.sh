@@ -34,7 +34,7 @@ CONFIG_FILE="${CONFIG_DIR}/${APP_NAME}.toml"
 LOG_DIR="${HOME}/printer_data/logs"
 SERVICE_NAME="${APP_NAME}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-CREDENTIALS_DIR="${HOME}/.owl"
+CREDENTIALS_DIR="${HOME}/.moonraker-owl"
 
 # CN pip mirror (Tsinghua University)
 PIP_MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"

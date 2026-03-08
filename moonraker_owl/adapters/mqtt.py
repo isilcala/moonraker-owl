@@ -256,6 +256,39 @@ class MQTTClient:
         if result != mqtt.MQTT_ERR_SUCCESS:
             raise MQTTConnectionError(f"Subscribe failed with rc={result}")
 
+    def subscribe_with_handler(
+        self,
+        topic: str,
+        handler: MessageHandler,
+        qos: int = 1,
+    ) -> None:
+        """Subscribe to *topic* and route matching messages to *handler*.
+
+        Uses paho-mqtt's ``message_callback_add`` so the handler fires
+        independently of the global ``set_message_handler`` callback.
+        """
+        if not self._client:
+            raise RuntimeError("MQTT client not connected")
+
+        loop = self._loop
+
+        def _bridge(
+            client: mqtt.Client, userdata: Any, message: mqtt.MQTTMessage
+        ) -> None:
+            if not loop:
+                return
+            try:
+                result = handler(message.topic, message.payload)
+                if asyncio.iscoroutine(result):
+                    asyncio.run_coroutine_threadsafe(result, loop)
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.exception("Topic handler raised for %s", topic)
+
+        self._client.message_callback_add(topic, _bridge)
+        result, _ = self._client.subscribe(topic, qos=qos)
+        if result != mqtt.MQTT_ERR_SUCCESS:
+            raise MQTTConnectionError(f"Subscribe failed with rc={result}")
+
     def set_message_handler(self, handler: Optional[MessageHandler]) -> None:
         self._message_handler = handler
 

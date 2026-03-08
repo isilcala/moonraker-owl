@@ -1914,7 +1914,7 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
 
     expires_at = publisher.apply_sensors_rate(
         mode="watch",
-        max_hz=2.0,
+        interval_seconds=0.5,
         duration_seconds=90,
         requested_at=request_at,
     )
@@ -1951,7 +1951,7 @@ def test_forced_interval_tracks_watch_mode() -> None:
 
     watch_expires = publisher.apply_sensors_rate(
         mode="watch",
-        max_hz=1.0,
+        interval_seconds=1.0,
         duration_seconds=120,
         requested_at=datetime.now(timezone.utc),
     )
@@ -1963,7 +1963,7 @@ def test_forced_interval_tracks_watch_mode() -> None:
 
     publisher.apply_sensors_rate(
         mode="idle",
-        max_hz=1.0 / idle_interval if idle_interval > 0 else 0.0,
+        interval_seconds=idle_interval,
         duration_seconds=None,
         requested_at=datetime.now(timezone.utc),
     )
@@ -2380,7 +2380,7 @@ async def test_watch_cadence_enforces_max_rate() -> None:
 
     publisher.apply_sensors_rate(
         mode="watch",
-        max_hz=1.0,
+        interval_seconds=1.0,
         duration_seconds=None,
         requested_at=datetime.now(timezone.utc),
     )
@@ -2437,7 +2437,7 @@ def test_rate_request_reapplied_after_reset() -> None:
 
     expires_at = publisher.apply_sensors_rate(
         mode="watch",
-        max_hz=2.0,
+        interval_seconds=0.5,
         duration_seconds=120,
         requested_at=request_at,
     )
@@ -2455,7 +2455,7 @@ def test_rate_request_reapplied_after_reset() -> None:
 
     publisher._reapply_rate_request(now=fake_now)
 
-    expected_interval = max(0.1, 1.0 / 2.0)
+    expected_interval = max(0.1, 0.5)
     remaining_window = fake_now + timedelta(seconds=90)
 
     assert publisher._current_mode == "watch"
@@ -2469,7 +2469,7 @@ def test_rate_request_reapplied_after_reset() -> None:
     active_request = publisher._active_rate_request
     assert active_request is not None
     assert active_request.mode == "watch"
-    assert active_request.max_hz == pytest.approx(2.0)
+    assert active_request.interval_seconds == pytest.approx(0.5)
     assert active_request.duration_seconds == 90
     assert active_request.requested_at == fake_now
     assert active_request.expires_at == remaining_window

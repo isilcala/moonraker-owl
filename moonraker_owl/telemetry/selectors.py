@@ -221,7 +221,7 @@ class SensorsSelector:
         store: MoonrakerStateStore,
         *,
         mode: str,
-        max_hz: float,
+        interval_seconds: float,
         watch_window_expires: Optional[datetime],
         observed_at: datetime,
         force_emit: bool = False,
@@ -229,7 +229,7 @@ class SensorsSelector:
         sensors = self._collect_sensors(store)
         cadence: Dict[str, Any] = {
             "mode": mode,
-            "maxHz": max_hz,
+            "intervalSeconds": interval_seconds,
         }
         if watch_window_expires is not None:
             cadence["watchWindowExpires"] = watch_window_expires.replace(
@@ -242,7 +242,7 @@ class SensorsSelector:
         }
 
         # Only hash the sensors data for deduplication.
-        # Cadence metadata (mode, maxHz, watchWindowExpires) changes frequently
+        # Cadence metadata (mode, intervalSeconds, watchWindowExpires) changes frequently
         # and should not trigger re-emission if sensor values haven't changed.
         contract_hash = json.dumps(sensors, sort_keys=True, default=str)
         if not force_emit and contract_hash == self._last_contract_hash:

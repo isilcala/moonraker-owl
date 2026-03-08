@@ -109,15 +109,20 @@ class ControlCommandsMixin:
         )
 
         mode = str(params.get("mode", "idle")).strip().lower() or "idle"
-        max_hz_value = params.get("maxHz", 0.0)
-        try:
-            max_hz = float(max_hz_value)
-        except (TypeError, ValueError):
-            raise CommandProcessingError(
-                "maxHz must be numeric",
-                code="invalid_parameters",
-                command_id=message.command_id,
-            )
+
+        # Parse intervalSeconds (required)
+        interval_value = params.get("intervalSeconds")
+        if interval_value is not None:
+            try:
+                interval_seconds = float(interval_value)
+            except (TypeError, ValueError):
+                raise CommandProcessingError(
+                    "intervalSeconds must be numeric",
+                    code="invalid_parameters",
+                    command_id=message.command_id,
+                )
+        else:
+            interval_seconds = 0.0
 
         requested_at = _parse_iso8601(params.get("issuedAt"))
         if requested_at is None:
@@ -164,7 +169,7 @@ class ControlCommandsMixin:
         current_mode, current_interval, current_expires = (
             self._telemetry.get_current_sensors_state()
         )
-        target_interval = 1.0 / max_hz if max_hz > 0 else None
+        target_interval = interval_seconds if interval_seconds > 0 else None
 
         # Allow small floating-point tolerance for interval comparison
         intervals_match = (
@@ -182,12 +187,11 @@ class ControlCommandsMixin:
         )
 
         LOGGER.info(
-            "[SetTelemetryRate] Request: mode=%s, maxHz=%.2f, duration=%s, target_interval=%.2fs, "
+            "[SetTelemetryRate] Request: mode=%s, intervalSeconds=%.2f, duration=%s, "
             "intervals_match=%s, is_extend_only=%s",
             mode,
-            max_hz,
+            interval_seconds,
             duration_seconds,
-            target_interval or 0.0,
             intervals_match,
             is_extend_only,
         )
@@ -202,7 +206,7 @@ class ControlCommandsMixin:
             # Full cadence reconfiguration needed
             expires_at = self._telemetry.apply_sensors_rate(
                 mode=mode,
-                max_hz=max_hz,
+                interval_seconds=interval_seconds,
                 duration_seconds=duration_seconds,
                 requested_at=effective_requested_at,
             )
@@ -211,7 +215,7 @@ class ControlCommandsMixin:
 
         details: Dict[str, Any] = {
             "mode": mode,
-            "maxHz": max(0.0, max_hz),
+            "intervalSeconds": max(0.0, interval_seconds),
         }
         if duration_seconds is not None:
             details["durationSeconds"] = duration_seconds

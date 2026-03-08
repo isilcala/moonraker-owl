@@ -155,7 +155,7 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
     orchestrator.ingest(baseline_snapshot)
     orchestrator.set_sensors_mode(
         mode="watch",
-        max_hz=1.0,
+        interval_seconds=1.0,
         watch_window_expires=datetime(2025, 10, 10, 16, 44, 3, tzinfo=timezone.utc),
     )
 
@@ -181,7 +181,7 @@ def test_orchestrator_builds_channel_payloads(baseline_snapshot: dict) -> None:
     sensors_frame = frames["sensors"]
     sensors = sensors_frame.payload
     assert sensors["cadence"]["mode"] == "watch"
-    assert sensors["cadence"]["maxHz"] == 1.0
+    assert sensors["cadence"]["intervalSeconds"] == 1.0
     assert len(sensors["sensors"]) == 3
 
     events_frame = frames["events"]
@@ -271,7 +271,7 @@ def test_watch_window_flag_reflects_idle_mode(baseline_snapshot: dict) -> None:
     orchestrator = TelemetryOrchestrator(clock=clock)
     orchestrator.ingest(baseline_snapshot)
     orchestrator.set_sensors_mode(
-        mode="idle", max_hz=0.033, watch_window_expires=None
+        mode="idle", interval_seconds=30.0, watch_window_expires=None
     )
 
     frames = orchestrator.build_payloads()
@@ -401,7 +401,7 @@ def test_sensors_dedup_ignores_watch_window_expiry_changes(baseline_snapshot: di
     # Set watch mode with initial window expiring in 30 seconds
     orchestrator.set_sensors_mode(
         mode="watch", 
-        max_hz=1.0, 
+        interval_seconds=1.0, 
         watch_window_expires=now + timedelta(seconds=30)
     )
     
@@ -412,7 +412,7 @@ def test_sensors_dedup_ignores_watch_window_expiry_changes(baseline_snapshot: di
     # Simulate time passing - window now expires in 29 seconds (1 second elapsed)
     orchestrator.set_sensors_mode(
         mode="watch",
-        max_hz=1.0,
+        interval_seconds=1.0,
         watch_window_expires=now + timedelta(seconds=29)
     )
     
@@ -425,7 +425,7 @@ def test_sensors_dedup_ignores_watch_window_expiry_changes(baseline_snapshot: di
     # Simulate watch window being extended (user opened sensors panel again)
     orchestrator.set_sensors_mode(
         mode="watch",
-        max_hz=1.0,
+        interval_seconds=1.0,
         watch_window_expires=now + timedelta(seconds=45)
     )
     

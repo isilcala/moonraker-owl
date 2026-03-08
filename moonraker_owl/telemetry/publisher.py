@@ -100,7 +100,7 @@ class _PollGroup:
 @dataclass
 class _RateRequest:
     mode: str
-    max_hz: float
+    interval_seconds: float
     requested_at: datetime
     duration_seconds: Optional[int]
     expires_at: Optional[datetime]
@@ -186,7 +186,6 @@ class TelemetryPublisher:
 
         self._min_interval = 0.05
         idle_hz = config.telemetry.rate_hz or 0.033
-        self._idle_hz = idle_hz
         self._idle_interval = _hz_to_interval(idle_hz) or 30.0
         self._watch_interval = _hz_to_interval(1.0) or 1.0
         self._sensors_interval = self._idle_interval
@@ -250,7 +249,7 @@ class TelemetryPublisher:
         )
         self._orchestrator.set_sensors_mode(
             mode="idle",
-            max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
+            interval_seconds=self._idle_interval,
             watch_window_expires=None,
         )
 
@@ -264,7 +263,7 @@ class TelemetryPublisher:
         # Emit an initial cadence log to capture baseline configuration.
         self.apply_sensors_rate(
             mode="idle",
-            max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
+            interval_seconds=self._idle_interval,
             duration_seconds=None,
             requested_at=datetime.now(timezone.utc),
         )
@@ -1266,9 +1265,41 @@ class TelemetryPublisher:
         LOGGER.debug("Watch window expired, reverting to idle")
         self.apply_sensors_rate(
             mode="idle",
-            max_hz=self._idle_hz,
+            interval_seconds=self._idle_interval,
             duration_seconds=None,
             requested_at=current_time,
+        )
+
+    def refresh_base_config(self) -> None:
+        """Re-read Tier C values from OwlConfig and reconfigure cadence.
+
+        Call this after :func:`apply_cloud_config` has mutated the shared
+        ``OwlConfig`` so that derived fields and channel schedules pick up
+        the new cloud-managed values.
+        """
+        cfg = self._config
+        new_idle_hz = cfg.telemetry.rate_hz or 0.033
+        new_idle_interval = _hz_to_interval(new_idle_hz) or 30.0
+
+        self._idle_interval = new_idle_interval
+        self._status_idle_interval = cfg.telemetry_cadence.status_idle_interval_seconds
+        self._status_active_interval = cfg.telemetry_cadence.status_active_interval_seconds
+        self._sensors_force_publish_seconds = cfg.telemetry_cadence.sensors_force_publish_seconds
+
+        # If in idle mode, propagate the new idle interval to sensors
+        if self._current_mode == "idle":
+            self._sensors_interval = new_idle_interval
+
+        # Update sensor filter from config
+        self._sensor_filter = SensorFilter(
+            allowlist=cfg.telemetry.sensor_allowlist,
+            denylist=cfg.telemetry.sensor_denylist,
+        )
+
+        self._refresh_channel_schedules()
+        LOGGER.info(
+            "Base config refreshed: idle_interval=%.1fs",
+            new_idle_interval,
         )
 
     def get_current_sensors_state(
@@ -1318,7 +1349,7 @@ class TelemetryPublisher:
         self._watch_window_expires = new_expires
         self._orchestrator.set_sensors_mode(
             mode=self._current_mode,
-            max_hz=1.0 / self._sensors_interval if self._sensors_interval > 0 else 0.0,
+            interval_seconds=self._sensors_interval,
             watch_window_expires=new_expires,
         )
 
@@ -1336,12 +1367,12 @@ class TelemetryPublisher:
         self,
         *,
         mode: str,
-        max_hz: float,
+        interval_seconds: float,
         duration_seconds: Optional[int],
         requested_at: Optional[datetime] = None,
     ) -> Optional[datetime]:
         mode = (mode or "idle").strip().lower() or "idle"
-        max_hz = max(0.0, max_hz)
+        interval_seconds = max(0.0, interval_seconds)
         requested_at = requested_at or datetime.now(timezone.utc)
         normalized_duration = (
             duration_seconds if duration_seconds and duration_seconds > 0 else None
@@ -1350,14 +1381,13 @@ class TelemetryPublisher:
         if normalized_duration is not None:
             expires_at = requested_at + timedelta(seconds=normalized_duration)
 
-        interval = _hz_to_interval(max_hz)
+        interval = interval_seconds
         if mode == "watch":
             interval = min(interval or self._watch_interval, self._watch_interval)
         else:
             interval = interval or self._idle_interval
 
         interval = interval or self._idle_interval
-        effective_hz = 0.0 if interval <= 0 else 1.0 / interval
 
         previous_mode = self._current_mode
         previous_interval = self._sensors_interval
@@ -1370,7 +1400,7 @@ class TelemetryPublisher:
         self._refresh_channel_schedules()
         self._orchestrator.set_sensors_mode(
             mode=mode,
-            max_hz=effective_hz,
+            interval_seconds=interval,
             watch_window_expires=expires_at,
         )
 
@@ -1395,7 +1425,7 @@ class TelemetryPublisher:
         self._event.set()
         self._active_rate_request = _RateRequest(
             mode=mode,
-            max_hz=max_hz,
+            interval_seconds=interval_seconds,
             requested_at=requested_at,
             duration_seconds=normalized_duration,
             expires_at=expires_at,
@@ -1647,7 +1677,7 @@ class TelemetryPublisher:
         self._orchestrator.reset(snapshot=store_snapshot)
         self._orchestrator.set_sensors_mode(
             mode="idle",
-            max_hz=1.0 / self._idle_interval if self._idle_interval > 0 else 0.0,
+            interval_seconds=self._idle_interval,
             watch_window_expires=None,
         )
         self._current_mode = "idle"
@@ -1713,7 +1743,7 @@ class TelemetryPublisher:
 
         self.apply_sensors_rate(
             mode=request.mode,
-            max_hz=request.max_hz,
+            interval_seconds=request.interval_seconds,
             duration_seconds=remaining_seconds,
             requested_at=current_time,
         )

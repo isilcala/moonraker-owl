@@ -9,7 +9,7 @@
         "command": "control:set-telemetry-rate",
         "parameters": {
             "mode": "watch",
-            "maxHz": 2.0,
+            "intervalSeconds": 0.5,
             "durationSeconds": 300,
             "issuedAt": "2025-01-15T10:32:00+00:00",
             "serverUtcNow": "2025-01-15T10:32:00.000Z",
