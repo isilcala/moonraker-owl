@@ -184,3 +184,27 @@ class TestDiscoveryFlow:
             result = await discovery._discover_from_moonraker("auto")
 
         assert result == "http://first/snapshot"
+
+
+class TestRemoteMoonrakerDiscovery:
+    """Tests for camera discovery when Moonraker is on a remote host."""
+
+    @pytest.fixture
+    def remote_discovery(self):
+        """Create a CameraDiscovery for a remote Moonraker."""
+        return CameraDiscovery("http://192.168.50.231:7125")
+
+    def test_resolve_relative_url_uses_remote_host(self, remote_discovery):
+        """Relative URLs should resolve against the Moonraker host, not 127.0.0.1."""
+        url = "/webcam/?action=snapshot"
+        assert remote_discovery._resolve_webcam_url(url) == "http://192.168.50.231/webcam/?action=snapshot"
+
+    def test_resolve_relative_url_without_slash_uses_remote_host(self, remote_discovery):
+        """Relative URLs without leading slash should also use remote host."""
+        url = "webcam/?action=snapshot"
+        assert remote_discovery._resolve_webcam_url(url) == "http://192.168.50.231/webcam/?action=snapshot"
+
+    def test_absolute_url_unchanged(self, remote_discovery):
+        """Absolute URLs should remain untouched regardless of Moonraker host."""
+        url = "http://10.0.0.5:8080/snapshot"
+        assert remote_discovery._resolve_webcam_url(url) == url

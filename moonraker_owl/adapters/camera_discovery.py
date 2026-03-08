@@ -24,12 +24,13 @@ import aiohttp
 
 LOGGER = logging.getLogger(__name__)
 
-# Common snapshot URL patterns to probe as fallback
-FALLBACK_PROBE_URLS = [
-    "http://127.0.0.1/webcam/?action=snapshot",      # crowsnest via nginx (port 80)
-    "http://127.0.0.1:8080/?action=snapshot",        # mjpg-streamer direct
-    "http://127.0.0.1/webcam/snapshot",              # Alternative crowsnest path
-    "http://127.0.0.1:8080/snapshot",                # ustreamer
+# Common snapshot URL path patterns to probe as fallback.
+# The host is resolved dynamically from the Moonraker base URL.
+_FALLBACK_PROBE_PATHS = [
+    "/webcam/?action=snapshot",      # crowsnest via nginx (port 80)
+    ":8080/?action=snapshot",        # mjpg-streamer direct
+    "/webcam/snapshot",              # Alternative crowsnest path
+    ":8080/snapshot",                # ustreamer
 ]
 
 
@@ -229,8 +230,8 @@ class CameraDiscovery:
         - Relative to nginx (port 80): /webcam/?action=snapshot
         - Relative to Moonraker: webcam/?action=snapshot
 
-        For relative URLs, we assume they're served via nginx on port 80,
-        which is the standard Klipper setup.
+        For relative URLs, we resolve against the Moonraker host's IP
+        on port 80, which is the standard Klipper setup with crowsnest/nginx.
         """
         if not url:
             return ""
@@ -241,9 +242,10 @@ class CameraDiscovery:
         if parsed.scheme and parsed.netloc:
             return url
 
-        # Relative URL - resolve against localhost:80 (nginx)
-        # This is the standard Klipper setup with crowsnest/nginx
-        base_url = "http://127.0.0.1"
+        # Relative URL - resolve against the Moonraker host on port 80 (nginx)
+        # Extract host from the Moonraker base URL since the webcam is on the same machine
+        moonraker_parsed = urlparse(self._moonraker_base_url)
+        base_url = f"http://{moonraker_parsed.hostname}"
 
         if url.startswith("/"):
             return f"{base_url}{url}"
@@ -297,10 +299,20 @@ class CameraDiscovery:
         return None
 
     async def _probe_fallback_urls(self) -> Optional[str]:
-        """Probe common webcam URLs as fallback."""
+        """Probe common webcam URLs as fallback.
+
+        URLs are constructed from the Moonraker host so that discovery
+        works when the printer is on a remote machine (not localhost).
+        """
         LOGGER.debug("Probing fallback webcam URLs...")
 
-        for url in FALLBACK_PROBE_URLS:
+        host = urlparse(self._moonraker_base_url).hostname or "127.0.0.1"
+        for path in _FALLBACK_PROBE_PATHS:
+            if path.startswith(":"):
+                # Path includes a custom port (e.g., ":8080/snapshot")
+                url = f"http://{host}{path}"
+            else:
+                url = f"http://{host}{path}"
             if await self._probe_url(url):
                 LOGGER.info("Found webcam via fallback probe: %s", url)
                 return url
