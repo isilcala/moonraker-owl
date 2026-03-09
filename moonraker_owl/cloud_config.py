@@ -83,11 +83,16 @@ def apply_cloud_config(config: OwlConfig, cloud_data: Dict[str, Any]) -> None:
     tel = cloud_data.get("telemetry")
     if isinstance(tel, dict):
         tc = config.telemetry
-        if "status_interval_seconds" in tel:
-            tc.rate_hz = 1.0 / max(tel["status_interval_seconds"], 0.1)
         if "sensors_interval_seconds" in tel:
-            # stored for use by cadence controller, not directly on TelemetryConfig
-            pass
+            # Primary mapping: sensorsIntervalSeconds drives the sensors idle rate
+            tc.rate_hz = 1.0 / max(tel["sensors_interval_seconds"], 0.1)
+        elif "status_interval_seconds" in tel:
+            # Legacy fallback: if only statusIntervalSeconds is present, use it as
+            # the overall telemetry rate (pre-ADR-0040 servers)
+            tc.rate_hz = 1.0 / max(tel["status_interval_seconds"], 0.1)
+        if "status_interval_seconds" in tel:
+            # statusIntervalSeconds also updates the status channel cadence directly
+            config.telemetry_cadence.status_idle_interval_seconds = float(tel["status_interval_seconds"])
         if "include_fields" in tel:
             tc.include_fields = list(tel["include_fields"])
         if "exclude_fields" in tel:

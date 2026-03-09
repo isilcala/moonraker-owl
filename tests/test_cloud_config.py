@@ -106,8 +106,8 @@ def test_apply_cloud_config_updates_all_sections(tmp_path: Path):
     snake = _snake_dict(SAMPLE_CLOUD_RESPONSE)
     apply_cloud_config(config, snake)
 
-    # Telemetry: statusIntervalSeconds=10 → rate_hz = 1/10 = 0.1
-    assert config.telemetry.rate_hz == pytest.approx(0.1)
+    # Telemetry: sensorsIntervalSeconds=5 → rate_hz = 1/5 = 0.2
+    assert config.telemetry.rate_hz == pytest.approx(0.2)
     assert config.telemetry.include_fields == ["print_stats", "extruder"]
     assert config.telemetry.exclude_fields == ["fan"]
     assert config.telemetry.include_raw_payload is True
@@ -152,6 +152,35 @@ def test_apply_cloud_config_partial_update(tmp_path: Path):
     # Only camera should change
     assert config.camera.enabled is True
     assert config.telemetry.rate_hz == original_rate
+
+
+def test_apply_cloud_config_sensors_interval_drives_rate_hz(tmp_path: Path):
+    """sensorsIntervalSeconds is the primary source for rate_hz."""
+    config = _make_config(tmp_path)
+    apply_cloud_config(config, {
+        "telemetry": {
+            "sensors_interval_seconds": 5,
+            "status_interval_seconds": 30,
+        }
+    })
+    # sensors_interval_seconds=5 → rate_hz = 1/5 = 0.2
+    assert config.telemetry.rate_hz == pytest.approx(0.2)
+    # status_interval_seconds=30 updates the status cadence
+    assert config.telemetry_cadence.status_idle_interval_seconds == pytest.approx(30.0)
+
+
+def test_apply_cloud_config_status_interval_fallback(tmp_path: Path):
+    """When only status_interval_seconds is present (legacy), it drives rate_hz."""
+    config = _make_config(tmp_path)
+    apply_cloud_config(config, {
+        "telemetry": {
+            "status_interval_seconds": 10,
+        }
+    })
+    # Legacy path: status_interval_seconds → rate_hz = 1/10 = 0.1
+    assert config.telemetry.rate_hz == pytest.approx(0.1)
+    assert config.telemetry_cadence.status_idle_interval_seconds == pytest.approx(10.0)
+
 
 
 # ---------------------------------------------------------------------------

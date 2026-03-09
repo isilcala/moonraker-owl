@@ -14,7 +14,6 @@ url = "http://192.168.50.231:7125"
 transport = "websocket"
 
 [telemetry]
-rate_hz = 0.02
 include_fields = [
     "print_stats",
     "toolhead",
@@ -40,10 +39,6 @@ status_active_interval_seconds = 15
 sensors_force_publish_seconds = 300
 events_max_per_second = 1
 events_max_per_minute = 20
-overview_heartbeat_seconds = 60
-overview_idle_interval_seconds = 60
-overview_active_interval_seconds = 15
-telemetry_watchdog_seconds = 300
 
 [logging]
 level = "DEBUG"

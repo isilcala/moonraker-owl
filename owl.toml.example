@@ -36,14 +36,12 @@ transport = "websocket"
 # api_key = ""
 
 # -----------------------------------------------------------------------------
-# [telemetry] - Telemetry Publishing Settings
+# [telemetry] - Telemetry Field Subscriptions (Tier A: local configuration)
 # -----------------------------------------------------------------------------
+# NOTE: Telemetry rates (sensors interval, status interval, watch mode) are
+# cloud-managed Tier C parameters delivered via the device config API.
+# They are NOT configurable in this file.
 [telemetry]
-# Base telemetry rate in Hz (messages per second)
-# Default: 0.033 (~1 message per 30 seconds)
-# Range: 0.01 - 10.0
-rate_hz = 0.033
-
 # Moonraker objects to subscribe for telemetry (TOML array of strings)
 include_fields = [
     "print_stats",
@@ -78,8 +76,11 @@ include_raw_payload = false
 # sensor_denylist = ["temperature_sensor mcu_temp"]
 
 # -----------------------------------------------------------------------------
-# [telemetry_cadence] - Channel-Specific Timing
+# [telemetry_cadence] - Channel-Specific Timing (Tier C: cloud-managed)
 # -----------------------------------------------------------------------------
+# NOTE: All cadence parameters below are cloud-managed defaults.
+# They can be set here for local testing/override but will be overwritten
+# by the cloud device config on the next successful fetch.
 [telemetry_cadence]
 # Status channel heartbeat (seconds between forced publishes)
 status_heartbeat_seconds = 60
