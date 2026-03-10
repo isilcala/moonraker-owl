@@ -185,9 +185,8 @@ class TelemetryPublisher:
         self._status_listeners: list[Callable[[Dict[str, Any]], Any]] = []
 
         self._min_interval = 0.05
-        idle_hz = config.telemetry.rate_hz or 0.033
-        self._idle_interval = _hz_to_interval(idle_hz) or 30.0
-        self._watch_interval = _hz_to_interval(1.0) or 1.0
+        self._idle_interval = max(0.1, config.telemetry.sensors_interval_seconds)
+        self._watch_interval = 1.0
         self._sensors_interval = self._idle_interval
         # Note: events channel does NOT use cadence controller.
         # Rate limiting for events is handled by EventCollector's token bucket algorithm.
@@ -240,6 +239,8 @@ class TelemetryPublisher:
         self._sensor_filter = SensorFilter(
             allowlist=config.telemetry.sensor_allowlist,
             denylist=config.telemetry.sensor_denylist,
+            max_custom_sensors=config.telemetry.max_custom_sensors,
+            max_sensor_count=config.telemetry.max_sensor_count,
         )
         self._orchestrator = TelemetryOrchestrator(
             clock=lambda: datetime.now(timezone.utc),
@@ -1278,8 +1279,7 @@ class TelemetryPublisher:
         the new cloud-managed values.
         """
         cfg = self._config
-        new_idle_hz = cfg.telemetry.rate_hz or 0.033
-        new_idle_interval = _hz_to_interval(new_idle_hz) or 30.0
+        new_idle_interval = max(0.1, cfg.telemetry.sensors_interval_seconds)
 
         self._idle_interval = new_idle_interval
         self._status_idle_interval = cfg.telemetry_cadence.status_idle_interval_seconds
@@ -1294,6 +1294,8 @@ class TelemetryPublisher:
         self._sensor_filter = SensorFilter(
             allowlist=cfg.telemetry.sensor_allowlist,
             denylist=cfg.telemetry.sensor_denylist,
+            max_custom_sensors=cfg.telemetry.max_custom_sensors,
+            max_sensor_count=cfg.telemetry.max_sensor_count,
         )
 
         self._refresh_channel_schedules()
@@ -2044,12 +2046,6 @@ def _resolve_printer_identity(config: OwlConfig) -> tuple[str, str, str]:
         )
 
     return tenant_id, device_id, printer_id
-
-
-def _hz_to_interval(rate_hz: float) -> Optional[float]:
-    if rate_hz <= 0:
-        return None
-    return max(0.1, 1.0 / rate_hz)
 
 
 def build_subscription_manifest(

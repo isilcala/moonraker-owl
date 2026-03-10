@@ -140,7 +140,7 @@ snapshot_url = "auto"
 camera_name = "auto"
 
 # Capture request timeout (seconds)
-capture_timeout_seconds = 10.0
+capture_timeout_seconds = 5.0
 
 # Retry attempts for failed captures
 max_retries = 2

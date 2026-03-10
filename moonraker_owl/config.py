@@ -51,7 +51,8 @@ DEFAULT_TELEMETRY_FIELDS = [
 DEFAULT_TELEMETRY_EXCLUDE_FIELDS: list[str] = []
 
 
-DEFAULT_TELEMETRY_RATE_HZ: float = 1 / 30
+# Default sensors idle interval: 30 seconds between sensor publishes.
+DEFAULT_SENSORS_INTERVAL_SECONDS: float = 30.0
 
 
 @dataclass(slots=True)
@@ -103,7 +104,7 @@ CORE_SENSORS: frozenset[str] = frozenset({
 
 @dataclass(slots=True)
 class TelemetryConfig:
-    rate_hz: float = DEFAULT_TELEMETRY_RATE_HZ
+    sensors_interval_seconds: float = DEFAULT_SENSORS_INTERVAL_SECONDS
     include_raw_payload: bool = False  # Set to True to include raw Moonraker payload (adds ~450 bytes per message)
     include_fields: List[str] = field(
         default_factory=lambda: list(DEFAULT_TELEMETRY_FIELDS)
@@ -121,6 +122,10 @@ class TelemetryConfig:
     Applied after allowlist. Can exclude core sensors if desired.
     Example: ['temperature_sensor mcu_temp']
     """
+    max_custom_sensors: int = 0
+    """Maximum non-core (custom) sensors allowed. Tier-assigned: Free=0, Plus=3, Pro=8."""
+    max_sensor_count: int = 6
+    """Hard cap on total sensor count (core + custom). Tier-assigned: Free=6, Plus=9, Pro=14."""
 
 
 @dataclass(slots=True)
@@ -203,7 +208,7 @@ class CameraConfig:
     camera_name: str = "auto"
     """Webcam name to use when snapshot_url is 'auto'. Use 'auto' for first available."""
 
-    capture_timeout_seconds: float = 10.0
+    capture_timeout_seconds: float = 5.0
     """Timeout for camera capture requests."""
 
     max_retries: int = 2
@@ -303,14 +308,9 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
     )
 
     tel_raw = raw.get("telemetry", {})
-    default_rate_hz = DEFAULT_TELEMETRY_RATE_HZ
-    try:
-        rate_hz_value = float(tel_raw.get("rate_hz", default_rate_hz))
-    except (ValueError, TypeError):
-        rate_hz_value = default_rate_hz
 
     telemetry = TelemetryConfig(
-        rate_hz=rate_hz_value,
+        sensors_interval_seconds=float(tel_raw.get("sensors_interval_seconds", DEFAULT_SENSORS_INTERVAL_SECONDS)),
         include_raw_payload=bool(tel_raw.get("include_raw_payload", False)),
         include_fields=list(tel_raw.get("include_fields", DEFAULT_TELEMETRY_FIELDS)),
         exclude_fields=list(tel_raw.get("exclude_fields", DEFAULT_TELEMETRY_EXCLUDE_FIELDS)),

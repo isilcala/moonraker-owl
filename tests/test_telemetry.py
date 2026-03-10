@@ -161,7 +161,7 @@ async def test_publisher_emits_initial_full_snapshots() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=20.0)
+    config = build_config(sensors_interval_seconds=0.1)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -245,7 +245,7 @@ async def test_pipeline_emits_schema_envelopes() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=20.0)
+    config = build_config(sensors_interval_seconds=0.1)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -705,7 +705,7 @@ async def test_publisher_emits_status_full_update() -> None:
     sample = _load_sample("moonraker-sample-printing.json")
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=50.0)
+    config = build_config(sensors_interval_seconds=0.1)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -745,7 +745,7 @@ async def test_publisher_emits_status_full_update() -> None:
 async def test_publisher_emits_events_channel() -> None:
     moonraker = FakeMoonrakerClient({"result": {}})
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=50.0)
+    config = build_config(sensors_interval_seconds=0.1)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1209,7 +1209,7 @@ async def test_heater_merge_forces_telemetry_publish() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=20.0)
+    config = build_config(sensors_interval_seconds=0.1)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1407,7 +1407,7 @@ async def test_temperature_target_preserved_across_updates() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=50.0, include_fields=["extruder", "heater_bed"])
+    config = build_config(sensors_interval_seconds=0.1, include_fields=["extruder", "heater_bed"])
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1484,7 +1484,7 @@ async def test_fan_sensor_emits_speed_as_percent() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=50.0, include_fields=["extruder", "fan"])
+    config = build_config(sensors_interval_seconds=0.1, include_fields=["extruder", "fan"])
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1532,7 +1532,7 @@ async def test_fractional_temperature_changes_dont_emit_after_floor_rounding() -
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=50.0, include_fields=["extruder"])
+    config = build_config(sensors_interval_seconds=0.1, include_fields=["extruder"])
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1604,7 +1604,7 @@ async def test_idle_cadence_flushes_latest_payload() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=0.5, include_fields=["extruder"])
+    config = build_config(sensors_interval_seconds=2.0, include_fields=["extruder"])
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1664,7 +1664,7 @@ async def test_restart_fetches_fresh_status_state() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1715,7 +1715,7 @@ async def test_start_recovers_after_loop_termination() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1742,7 +1742,7 @@ async def test_restart_emits_current_sensors_after_start() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1805,7 +1805,7 @@ async def test_restart_replays_full_status_when_state_unchanged() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1844,7 +1844,7 @@ async def test_publish_system_status_emits_error_snapshot() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1877,7 +1877,7 @@ async def test_status_listener_invoked_for_system_status() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1908,7 +1908,7 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
 
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1940,7 +1940,7 @@ def test_watch_window_expiration_reverts_to_idle_rate() -> None:
 def test_forced_interval_tracks_watch_mode() -> None:
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -1976,7 +1976,7 @@ def test_forced_interval_tracks_watch_mode() -> None:
 def test_reset_runtime_state_requeues_previous_snapshot() -> None:
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2017,7 +2017,7 @@ def test_reset_runtime_state_preserves_print_state_when_requested() -> None:
     """
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2055,7 +2055,7 @@ def test_reset_runtime_state_clears_print_state_by_default() -> None:
     """Test that default reset clears StateStore (existing behavior)."""
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2095,7 +2095,7 @@ def test_preserve_print_state_prevents_spurious_print_started_event() -> None:
     """
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2146,7 +2146,7 @@ async def test_resubscribe_triggered_after_klippy_ready() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2176,7 +2176,7 @@ async def test_resubscribe_triggered_after_notify_klippy_state_ready() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2224,7 +2224,7 @@ async def test_resubscribe_rediscovers_sensors_after_klippy_ready() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2259,7 +2259,7 @@ async def test_resubscribe_removes_stale_sensors_after_klippy_ready() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2307,7 +2307,7 @@ async def test_status_channel_forced_after_klippy_ready() -> None:
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
     # Use slow rate to ensure force is needed
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2371,7 +2371,7 @@ async def test_watch_cadence_enforces_max_rate() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2431,7 +2431,7 @@ def test_rate_request_reapplied_after_reset() -> None:
     request_at = datetime(2025, 10, 10, 16, 42, 3, tzinfo=timezone.utc)
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2478,7 +2478,7 @@ def test_rate_request_reapplied_after_reset() -> None:
 def test_forced_publish_respects_one_hz_cap() -> None:
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2611,7 +2611,7 @@ async def test_status_listener_handles_future_return() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2657,7 +2657,7 @@ async def test_status_recovery_retained_after_error_snapshot() -> None:
 
     moonraker = FakeMoonrakerClient(sample)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2701,7 +2701,7 @@ async def test_status_listener_receives_aggregated_status_updates() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2836,7 +2836,7 @@ async def test_query_print_stats_on_job_start_adr0003():
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=10.0)
+    config = build_config(sensors_interval_seconds=0.1)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
     await publisher.start()
@@ -2894,7 +2894,7 @@ async def test_query_print_stats_on_job_finished():
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(rate_hz=10.0)
+    config = build_config(sensors_interval_seconds=0.1)
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
     await publisher.start()

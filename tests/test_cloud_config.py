@@ -34,6 +34,8 @@ SAMPLE_CLOUD_RESPONSE: Dict[str, Any] = {
         "includeRawPayload": True,
         "sensorAllowlist": ["temperature_sensor chamber"],
         "sensorDenylist": ["temperature_sensor mcu_temp"],
+        "maxCustomSensors": 3,
+        "maxSensorCount": 9,
     },
     "cadence": {
         "statusHeartbeatSeconds": 30,
@@ -106,13 +108,15 @@ def test_apply_cloud_config_updates_all_sections(tmp_path: Path):
     snake = _snake_dict(SAMPLE_CLOUD_RESPONSE)
     apply_cloud_config(config, snake)
 
-    # Telemetry: sensorsIntervalSeconds=5 → rate_hz = 1/5 = 0.2
-    assert config.telemetry.rate_hz == pytest.approx(0.2)
+    # Telemetry: sensorsIntervalSeconds=5 → sensors_interval_seconds=5.0
+    assert config.telemetry.sensors_interval_seconds == 5.0
     assert config.telemetry.include_fields == ["print_stats", "extruder"]
     assert config.telemetry.exclude_fields == ["fan"]
     assert config.telemetry.include_raw_payload is True
     assert config.telemetry.sensor_allowlist == ["temperature_sensor chamber"]
     assert config.telemetry.sensor_denylist == ["temperature_sensor mcu_temp"]
+    assert config.telemetry.max_custom_sensors == 3
+    assert config.telemetry.max_sensor_count == 9
 
     # Cadence
     assert config.telemetry_cadence.status_heartbeat_seconds == 30
@@ -145,17 +149,17 @@ def test_apply_cloud_config_updates_all_sections(tmp_path: Path):
 
 def test_apply_cloud_config_partial_update(tmp_path: Path):
     config = _make_config(tmp_path)
-    original_rate = config.telemetry.rate_hz
+    original_interval = config.telemetry.sensors_interval_seconds
 
     apply_cloud_config(config, {"camera": {"enabled": True}})
 
     # Only camera should change
     assert config.camera.enabled is True
-    assert config.telemetry.rate_hz == original_rate
+    assert config.telemetry.sensors_interval_seconds == original_interval
 
 
-def test_apply_cloud_config_sensors_interval_drives_rate_hz(tmp_path: Path):
-    """sensorsIntervalSeconds is the primary source for rate_hz."""
+def test_apply_cloud_config_sensors_interval_drives_idle_rate(tmp_path: Path):
+    """sensorsIntervalSeconds is the primary source for sensors_interval_seconds."""
     config = _make_config(tmp_path)
     apply_cloud_config(config, {
         "telemetry": {
@@ -163,22 +167,23 @@ def test_apply_cloud_config_sensors_interval_drives_rate_hz(tmp_path: Path):
             "status_interval_seconds": 30,
         }
     })
-    # sensors_interval_seconds=5 → rate_hz = 1/5 = 0.2
-    assert config.telemetry.rate_hz == pytest.approx(0.2)
+    assert config.telemetry.sensors_interval_seconds == 5.0
     # status_interval_seconds=30 updates the status cadence
     assert config.telemetry_cadence.status_idle_interval_seconds == pytest.approx(30.0)
 
 
-def test_apply_cloud_config_status_interval_fallback(tmp_path: Path):
-    """When only status_interval_seconds is present (legacy), it drives rate_hz."""
+def test_apply_cloud_config_status_interval_does_not_affect_sensors(tmp_path: Path):
+    """When only status_interval_seconds is present, sensors interval stays at default."""
     config = _make_config(tmp_path)
+    original_sensors = config.telemetry.sensors_interval_seconds
     apply_cloud_config(config, {
         "telemetry": {
             "status_interval_seconds": 10,
         }
     })
-    # Legacy path: status_interval_seconds → rate_hz = 1/10 = 0.1
-    assert config.telemetry.rate_hz == pytest.approx(0.1)
+    # sensors_interval_seconds unchanged (no sensors_interval_seconds in payload)
+    assert config.telemetry.sensors_interval_seconds == original_sensors
+    # status cadence updated
     assert config.telemetry_cadence.status_idle_interval_seconds == pytest.approx(10.0)
 
 
@@ -527,15 +532,15 @@ def test_refresh_base_config_updates_idle_rate():
     from test_telemetry import FakeMoonrakerClient, FakeMQTTClient
     from moonraker_owl.telemetry import TelemetryPublisher
 
-    config = build_config(rate_hz=1 / 30)
+    config = build_config(sensors_interval_seconds=30.0)
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
     mqtt = FakeMQTTClient()
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
     assert publisher._idle_interval == pytest.approx(30.0)
 
-    # Simulate cloud config changing the rate
-    config.telemetry.rate_hz = 0.5
+    # Simulate cloud config changing the sensors interval
+    config.telemetry.sensors_interval_seconds = 2.0
     config.telemetry_cadence.status_idle_interval_seconds = 120
     config.telemetry_cadence.sensors_force_publish_seconds = 600
 

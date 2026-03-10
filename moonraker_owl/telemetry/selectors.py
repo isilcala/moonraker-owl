@@ -178,11 +178,17 @@ class _SensorState:
 class SensorFilter:
     """Decides which Moonraker sensor objects should be reported.
 
-    Resolution order:
+    Resolution order (per-sensor):
     1. Denylist always wins — if a sensor is denied, it is excluded.
     2. Core sensors (extruder*, heater_bed, fan) are included by default.
     3. If allowlist is non-empty, only core + allowed sensors pass.
     4. If allowlist is empty, all sensors pass (minus denied ones).
+
+    Hard caps (applied to the final list):
+    - ``max_custom_sensors`` limits how many non-core sensors are reported.
+    - ``max_sensor_count`` limits the total number of sensors (core + custom).
+    Core sensors are never dropped by hard caps; only custom sensors are
+    truncated when limits are exceeded.
     """
 
     def __init__(
@@ -190,10 +196,14 @@ class SensorFilter:
         *,
         allowlist: Sequence[str] = (),
         denylist: Sequence[str] = (),
+        max_custom_sensors: int = 0,
+        max_sensor_count: int = 6,
     ) -> None:
         self._allowlist: FrozenSet[str] = frozenset(allowlist)
         self._denylist: FrozenSet[str] = frozenset(denylist)
         self._use_allowlist = len(self._allowlist) > 0
+        self._max_custom_sensors = max_custom_sensors
+        self._max_sensor_count = max_sensor_count
 
     def is_allowed(self, sensor_name: str) -> bool:
         """Return True if the sensor should be reported."""
@@ -204,6 +214,46 @@ class SensorFilter:
         if self._use_allowlist:
             return sensor_name in self._allowlist
         return True
+
+    def apply_hard_cap(
+        self, sensors: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Enforce tier-based hard caps on the collected sensor list.
+
+        Separates sensors into core (always kept) and custom, then truncates
+        custom sensors to ``max_custom_sensors``.  If the total still exceeds
+        ``max_sensor_count``, further custom sensors are dropped.
+
+        Custom sensors are kept in their original (alphabetical) order so the
+        result is deterministic.
+        """
+
+        core: List[Dict[str, Any]] = []
+        custom: List[Dict[str, Any]] = []
+        for sensor in sensors:
+            source_object = sensor.get("sourceObject", "")
+            if source_object in CORE_SENSORS:
+                core.append(sensor)
+            else:
+                custom.append(sensor)
+
+        # Cap 1: limit custom sensors
+        custom = custom[: self._max_custom_sensors]
+
+        # Cap 2: limit total count (drop excess custom sensors)
+        total_budget = max(self._max_sensor_count - len(core), 0)
+        custom = custom[:total_budget]
+
+        result = core + custom
+        dropped = len(sensors) - len(result)
+        if dropped > 0:
+            LOGGER.debug(
+                "Hard cap dropped %d sensors (max_custom=%d, max_total=%d)",
+                dropped,
+                self._max_custom_sensors,
+                self._max_sensor_count,
+            )
+        return result
 
 
 class SensorsSelector:
@@ -273,6 +323,7 @@ class SensorsSelector:
                 self._sensor_state.pop(channel)
 
         sensors.sort(key=lambda entry: entry["channel"])
+        sensors = self._sensor_filter.apply_hard_cap(sensors)
         return sensors
 
     def _build_sensor_payload(
