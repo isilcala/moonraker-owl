@@ -27,7 +27,7 @@ def build_config(
     tenant_id: str = "tenant-99",
     printer_id: str = "printer-17",
     include_fields: Optional[list[str]] = None,
-    rate_hz: float = 5.0,
+    sensors_interval_seconds: float = 0.2,
     include_raw_payload: bool = False,
     breaker_threshold: int = 2,
 ) -> OwlConfig:
@@ -58,7 +58,7 @@ def build_config(
         ),
         moonraker=MoonrakerConfig(url="http://localhost:7125"),
         telemetry=TelemetryConfig(
-            rate_hz=rate_hz,
+            sensors_interval_seconds=sensors_interval_seconds,
             include_raw_payload=include_raw_payload,
             include_fields=include_fields or list(DEFAULT_TELEMETRY_FIELDS),
         ),

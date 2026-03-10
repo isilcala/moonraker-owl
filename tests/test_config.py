@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from moonraker_owl.config import load_config, DEFAULT_TELEMETRY_RATE_HZ, CORE_SENSORS
+from moonraker_owl.config import load_config, DEFAULT_SENSORS_INTERVAL_SECONDS, CORE_SENSORS
 
 
 def test_load_config_defaults(tmp_path: Path) -> None:
@@ -9,7 +9,7 @@ def test_load_config_defaults(tmp_path: Path) -> None:
 
     assert config.cloud.broker_host
     assert config.moonraker.url.startswith("http")
-    assert config.telemetry.rate_hz == DEFAULT_TELEMETRY_RATE_HZ
+    assert config.telemetry.sensors_interval_seconds == DEFAULT_SENSORS_INTERVAL_SECONDS
     assert config.telemetry_cadence.status_heartbeat_seconds == 60
     assert config.telemetry_cadence.status_idle_interval_seconds == 60.0
     assert config.telemetry_cadence.status_active_interval_seconds == 15.0
@@ -67,7 +67,7 @@ url = "http://localhost:7125"
 [telemetry]
 device_id = "device-123"
 tenant_id = "tenant-456"
-rate_hz = 10
+sensors_interval_seconds = 5.0
 
 [telemetry_cadence]
 status_heartbeat_seconds = 45
@@ -77,7 +77,7 @@ status_heartbeat_seconds = 45
     config = load_config(config_file)
 
     assert config.cloud.base_url == "https://example.com"
-    assert config.telemetry.rate_hz == 10.0
+    assert config.telemetry.sensors_interval_seconds == 5.0
     assert config.telemetry_cadence.status_heartbeat_seconds == 45
 
 
