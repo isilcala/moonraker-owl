@@ -62,7 +62,7 @@ def build_config(
             include_raw_payload=include_raw_payload,
             include_fields=include_fields or list(DEFAULT_TELEMETRY_FIELDS),
         ),
-        telemetry_cadence=TelemetryCadenceConfig(),
+        telemetry_cadence=TelemetryCadenceConfig(status_min_interval_seconds=0),
         commands=CommandConfig(),
         logging=LoggingConfig(),
         resilience=ResilienceConfig(moonraker_breaker_threshold=breaker_threshold),
