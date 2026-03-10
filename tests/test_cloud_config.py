@@ -28,7 +28,6 @@ SAMPLE_CLOUD_RESPONSE: Dict[str, Any] = {
     "telemetry": {
         "statusIntervalSeconds": 10,
         "sensorsIntervalSeconds": 5,
-        "sensorsWatchIntervalSeconds": 1,
         "includeFields": ["print_stats", "extruder"],
         "excludeFields": ["fan"],
         "includeRawPayload": True,
