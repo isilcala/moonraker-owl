@@ -26,7 +26,6 @@ from moonraker_owl.config import OwlConfig, load_config
 
 SAMPLE_CLOUD_RESPONSE: Dict[str, Any] = {
     "telemetry": {
-        "statusIntervalSeconds": 10,
         "sensorsIntervalSeconds": 5,
         "includeFields": ["print_stats", "extruder"],
         "excludeFields": ["fan"],
@@ -40,6 +39,7 @@ SAMPLE_CLOUD_RESPONSE: Dict[str, Any] = {
         "statusHeartbeatSeconds": 30,
         "statusIdleIntervalSeconds": 120,
         "statusActiveIntervalSeconds": 5,
+        "statusMinIntervalSeconds": 3,
         "sensorsForcePublishSeconds": 600,
         "eventsMaxPerSecond": 2,
         "eventsMaxPerMinute": 40,
@@ -121,6 +121,7 @@ def test_apply_cloud_config_updates_all_sections(tmp_path: Path):
     assert config.telemetry_cadence.status_heartbeat_seconds == 30
     assert config.telemetry_cadence.status_idle_interval_seconds == 120
     assert config.telemetry_cadence.status_active_interval_seconds == 5
+    assert config.telemetry_cadence.status_min_interval_seconds == 3
     assert config.telemetry_cadence.sensors_force_publish_seconds == 600
     assert config.telemetry_cadence.events_max_per_second == 2
     assert config.telemetry_cadence.events_max_per_minute == 40
@@ -163,27 +164,20 @@ def test_apply_cloud_config_sensors_interval_drives_idle_rate(tmp_path: Path):
     apply_cloud_config(config, {
         "telemetry": {
             "sensors_interval_seconds": 5,
-            "status_interval_seconds": 30,
         }
     })
     assert config.telemetry.sensors_interval_seconds == 5.0
-    # status_interval_seconds=30 updates the status cadence
-    assert config.telemetry_cadence.status_idle_interval_seconds == pytest.approx(30.0)
 
 
-def test_apply_cloud_config_status_interval_does_not_affect_sensors(tmp_path: Path):
-    """When only status_interval_seconds is present, sensors interval stays at default."""
+def test_apply_cloud_config_cadence_status_idle_takes_effect(tmp_path: Path):
+    """statusIdleIntervalSeconds in cadence section is the real control."""
     config = _make_config(tmp_path)
-    original_sensors = config.telemetry.sensors_interval_seconds
     apply_cloud_config(config, {
-        "telemetry": {
-            "status_interval_seconds": 10,
+        "cadence": {
+            "status_idle_interval_seconds": 30,
         }
     })
-    # sensors_interval_seconds unchanged (no sensors_interval_seconds in payload)
-    assert config.telemetry.sensors_interval_seconds == original_sensors
-    # status cadence updated
-    assert config.telemetry_cadence.status_idle_interval_seconds == pytest.approx(10.0)
+    assert config.telemetry_cadence.status_idle_interval_seconds == pytest.approx(30.0)
 
 
 

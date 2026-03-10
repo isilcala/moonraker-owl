@@ -85,9 +85,6 @@ def apply_cloud_config(config: OwlConfig, cloud_data: Dict[str, Any]) -> None:
         tc = config.telemetry
         if "sensors_interval_seconds" in tel:
             tc.sensors_interval_seconds = max(float(tel["sensors_interval_seconds"]), 0.1)
-        if "status_interval_seconds" in tel:
-            # statusIntervalSeconds also updates the status channel cadence directly
-            config.telemetry_cadence.status_idle_interval_seconds = float(tel["status_interval_seconds"])
         if "include_fields" in tel:
             tc.include_fields = list(tel["include_fields"])
         if "exclude_fields" in tel:
@@ -110,6 +107,7 @@ def apply_cloud_config(config: OwlConfig, cloud_data: Dict[str, Any]) -> None:
             "status_heartbeat_seconds",
             "status_idle_interval_seconds",
             "status_active_interval_seconds",
+            "status_min_interval_seconds",
             "sensors_force_publish_seconds",
             "events_max_per_second",
             "events_max_per_minute",

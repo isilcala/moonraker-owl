@@ -60,6 +60,7 @@ class TelemetryCadenceConfig:
     status_heartbeat_seconds: int = 60
     status_idle_interval_seconds: float = 60.0
     status_active_interval_seconds: float = 15.0
+    status_min_interval_seconds: float = 2.0  # Defensive rate cap for status channel
     sensors_force_publish_seconds: float = 300.0  # Maximum seconds without sensor publish before forcing one
     events_max_per_second: int = 1
     events_max_per_minute: int = 20

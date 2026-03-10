@@ -231,6 +231,7 @@ class TelemetryPublisher:
         self._status_active_interval = (
             self._cadence.status_active_interval_seconds
         )
+        self._status_min_interval = self._cadence.status_min_interval_seconds
         self._sensors_force_publish_seconds = self._cadence.sensors_force_publish_seconds
         self._watch_window_expires: Optional[datetime] = None
         self._current_mode = "idle"
@@ -1284,6 +1285,7 @@ class TelemetryPublisher:
         self._idle_interval = new_idle_interval
         self._status_idle_interval = cfg.telemetry_cadence.status_idle_interval_seconds
         self._status_active_interval = cfg.telemetry_cadence.status_active_interval_seconds
+        self._status_min_interval = cfg.telemetry_cadence.status_min_interval_seconds
         self._sensors_force_publish_seconds = cfg.telemetry_cadence.sensors_force_publish_seconds
 
         # If in idle mode, propagate the new idle interval to sensors
@@ -1465,7 +1467,7 @@ class TelemetryPublisher:
             )
             self._cadence_controller.configure(
                 "status",
-                interval=None,  # No minimum interval for status
+                interval=self._status_min_interval,  # Defensive rate cap
                 max_interval=status_max_interval,
                 forced_interval=None,
                 force_publish_seconds=None,
