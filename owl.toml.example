@@ -36,43 +36,35 @@ transport = "websocket"
 # api_key = ""
 
 # -----------------------------------------------------------------------------
-# [telemetry] - Telemetry Field Subscriptions (Tier A: local configuration)
+# [telemetry] - Telemetry Field Subscriptions (Tier C: cloud-managed)
 # -----------------------------------------------------------------------------
-# NOTE: Telemetry rates (sensors interval, status interval, watch mode) are
-# cloud-managed Tier C parameters delivered via the device config API.
-# They are NOT configurable in this file.
+# Telemetry field subscriptions (include/exclude) and sensor filters are
+# cloud-managed parameters delivered via the device config API (ADR-0040).
+# Compiled defaults in config.py serve as Cold Start Layer 1 (safe mode).
+#
+# To override locally for debugging, uncomment and customize:
 [telemetry]
-# Moonraker objects to subscribe for telemetry (TOML array of strings)
-include_fields = [
-    "print_stats",
-    "webhooks.state",
-    "webhooks.state_message",
-    "gcode_move.speed_factor",
-    "gcode_move.extrude_factor",
-    "history",
-    "gcode_macro _OBICO_LAYER_CHANGE",
-    "fan.speed",
-    "toolhead",
-    "virtual_sdcard",
-    "display_status",
-    "idle_timeout",
-    "gcode_macro TIMELAPSE_TAKE_FRAME",
-    "extruder",
-    "heater_bed",
-    "exclude_object",
-]
-
-# Objects to exclude from telemetry (overrides include_fields)
-exclude_fields = []
-
-# Include raw Moonraker payload in telemetry (adds ~450 bytes per message)
-# Only enable for debugging
-include_raw_payload = false
-
-# Sensor filtering (optional)
-# Explicit list of sensor names to report (in addition to core sensors)
+# include_fields = [
+#     "print_stats",
+#     "webhooks.state",
+#     "webhooks.state_message",
+#     "gcode_move.speed_factor",
+#     "gcode_move.extrude_factor",
+#     "history",
+#     "gcode_macro _OBICO_LAYER_CHANGE",
+#     "fan.speed",
+#     "toolhead",
+#     "virtual_sdcard",
+#     "display_status",
+#     "idle_timeout",
+#     "gcode_macro TIMELAPSE_TAKE_FRAME",
+#     "extruder",
+#     "heater_bed",
+#     "exclude_object",
+# ]
+# exclude_fields = []
+# include_raw_payload = false
 # sensor_allowlist = ["temperature_sensor chamber", "heater_generic chamber_heater"]
-# Sensors to exclude from reporting
 # sensor_denylist = ["temperature_sensor mcu_temp"]
 
 # -----------------------------------------------------------------------------

@@ -204,6 +204,7 @@ class SensorFilter:
         self._use_allowlist = len(self._allowlist) > 0
         self._max_custom_sensors = max_custom_sensors
         self._max_sensor_count = max_sensor_count
+        self._last_dropped_count: int = 0
 
     def is_allowed(self, sensor_name: str) -> bool:
         """Return True if the sensor should be reported."""
@@ -246,13 +247,17 @@ class SensorFilter:
 
         result = core + custom
         dropped = len(sensors) - len(result)
-        if dropped > 0:
-            LOGGER.debug(
-                "Hard cap dropped %d sensors (max_custom=%d, max_total=%d)",
-                dropped,
-                self._max_custom_sensors,
-                self._max_sensor_count,
-            )
+        if dropped != self._last_dropped_count:
+            if dropped > 0:
+                LOGGER.debug(
+                    "Hard cap dropped %d sensors (max_custom=%d, max_total=%d)",
+                    dropped,
+                    self._max_custom_sensors,
+                    self._max_sensor_count,
+                )
+            elif self._last_dropped_count > 0:
+                LOGGER.debug("Hard cap no longer dropping sensors")
+            self._last_dropped_count = dropped
         return result
 
 
