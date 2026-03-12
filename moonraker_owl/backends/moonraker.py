@@ -182,36 +182,34 @@ class MoonrakerBackend(PrinterBackend):
         s3_upload = S3UploadClient()
 
         # Create camera client for task:capture-image command (ADR-0021)
+        # Camera is always initialised when a snapshot URL is available;
+        # cloud-side CaptureConfig controls whether captures are scheduled.
         camera: CameraClient | None = None
         image_preprocessor: ImagePreprocessor | None = None
-        if config.camera.enabled:
-            # Resolve snapshot URL - use auto-discovery if configured as "auto"
-            snapshot_url = await self._resolve_snapshot_url(config)
+        snapshot_url = await self._resolve_snapshot_url(config)
 
-            if snapshot_url:
-                camera = CameraClient(
-                    snapshot_url=snapshot_url,
-                    timeout=config.camera.capture_timeout_seconds,
-                    max_retries=config.camera.max_retries,
-                )
-                LOGGER.info("Camera capture enabled: %s", snapshot_url)
+        if snapshot_url:
+            camera = CameraClient(
+                snapshot_url=snapshot_url,
+                timeout=config.camera.capture_timeout_seconds,
+                max_retries=config.camera.max_retries,
+            )
+            LOGGER.info("Camera client ready: %s", snapshot_url)
 
-                # Create image preprocessor for resizing/compressing captures (ADR-0024)
-                if config.camera.preprocess_enabled:
-                    image_preprocessor = ImagePreprocessor(
-                        target_width=config.camera.preprocess_target_width,
-                        jpeg_quality=config.camera.preprocess_jpeg_quality,
-                        enabled=True,
-                    )
-                    LOGGER.info(
-                        "Image preprocessing enabled: target_width=%d, jpeg_quality=%d",
-                        config.camera.preprocess_target_width,
-                        config.camera.preprocess_jpeg_quality,
-                    )
-            else:
-                LOGGER.warning(
-                    "Camera enabled but no snapshot URL available - camera capture disabled"
+            # Create image preprocessor for resizing/compressing captures (ADR-0024)
+            if config.camera.preprocess_enabled:
+                image_preprocessor = ImagePreprocessor(
+                    target_width=config.camera.preprocess_target_width,
+                    jpeg_quality=config.camera.preprocess_jpeg_quality,
+                    enabled=True,
                 )
+                LOGGER.info(
+                    "Image preprocessing enabled: target_width=%d, jpeg_quality=%d",
+                    config.camera.preprocess_target_width,
+                    config.camera.preprocess_jpeg_quality,
+                )
+        else:
+            LOGGER.info("No snapshot URL available - camera capture unavailable")
 
         return CommandProcessor(
             config,

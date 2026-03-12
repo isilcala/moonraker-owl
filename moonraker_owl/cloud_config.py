@@ -121,7 +121,6 @@ def apply_cloud_config(config: OwlConfig, cloud_data: Dict[str, Any]) -> None:
     if isinstance(cam, dict):
         cc = config.camera
         for fname in (
-            "enabled",
             "snapshot_url",
             "camera_name",
             "capture_timeout_seconds",

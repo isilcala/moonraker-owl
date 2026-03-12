@@ -1664,3 +1664,47 @@ def test_hot_cold_path_classifiers() -> None:
     assert not PrinterCommandNames.is_cold_path("print:pause")
 
 
+# ── Camera Unavailable Guard Tests ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_capture_image_returns_camera_unavailable_when_no_camera(config):
+    """task:capture-image should fail with camera_unavailable when camera=None."""
+    from unittest.mock import MagicMock
+
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    fake_s3 = MagicMock()
+    processor = CommandProcessor(config, moonraker, mqtt, s3_upload=fake_s3, camera=None)
+
+    await processor.start()
+
+    message = {
+        "$id": "cmd-capture-no-cam",
+        "payload": {
+            "command": "task:capture-image",
+            "parameters": {
+                "frameId": "frame-001",
+                "uploadUrl": "https://s3.example.com/upload",
+                "blobKey": "tenant/captures/frame/image.jpg",
+            },
+        },
+    }
+
+    await mqtt.emit(
+        "owl/printers/device-123/commands/task:capture-image", message
+    )
+
+    # Should publish accepted + completed acks; the result carries the error details
+    assert len(mqtt.published) >= 2
+    # The last ack is the completed one with the result
+    topic, payload_bytes, qos, retain = mqtt.published[-1]
+    ack = json.loads(payload_bytes.decode("utf-8"))
+    assert ack["payload"]["status"] == "completed"
+    result = ack["payload"]["result"]
+    assert result["success"] is False
+    assert result["errorCode"] == "camera_unavailable"
+
+    await processor.stop()
+
+

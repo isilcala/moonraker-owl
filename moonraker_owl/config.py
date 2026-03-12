@@ -198,10 +198,13 @@ class MetadataConfig:
 
 @dataclass(slots=True)
 class CameraConfig:
-    """Configuration for camera capture functionality."""
+    """Configuration for camera capture functionality.
 
-    enabled: bool = False
-    """Whether camera capture is enabled."""
+    Note: The ``enabled`` field has been removed — camera capture enablement
+    is now controlled by the cloud-side CaptureConfig entity, not the agent
+    config pipeline.  The agent always initialises the camera client when a
+    snapshot URL is available; the cloud decides whether to schedule captures.
+    """
 
     snapshot_url: str = "auto"
     """URL for webcam snapshot capture. Use 'auto' for automatic discovery via Moonraker API."""
@@ -379,7 +382,6 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
     cam_raw = raw.get("camera", {})
     cam_defaults = CameraConfig()
     camera = CameraConfig(
-        enabled=bool(cam_raw.get("enabled", cam_defaults.enabled)),
         snapshot_url=str(cam_raw.get("snapshot_url", cam_defaults.snapshot_url)),
         camera_name=str(cam_raw.get("camera_name", cam_defaults.camera_name)),
         capture_timeout_seconds=float(_get(cam_raw, "capture_timeout_seconds", cam_defaults.capture_timeout_seconds)),

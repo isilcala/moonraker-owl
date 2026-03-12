@@ -72,6 +72,9 @@ _ALLOWED_TRANSITIONS: dict[AgentState, set[AgentState]] = {
         AgentState.STOPPING,
     },
     AgentState.DEGRADED: {
+        AgentState.COLD_START,
+        AgentState.AWAITING_MQTT,
+        AgentState.AWAITING_MOONRAKER,
         AgentState.ACTIVE,
         AgentState.DEGRADED,
         AgentState.RECOVERING,
@@ -337,7 +340,68 @@ class MoonrakerOwlApp:
         except KeyboardInterrupt:
             LOGGER.info("moonraker-owl received shutdown signal")
 
+    async def _teardown_partially_started_services(self) -> None:
+        """Clean up partially-started services before retrying startup.
+
+        Prevents resource leaks and duplicate MQTT connections when
+        ``_start_services()`` is called again after a partial failure.
+        The old MQTTClient connecting with the same ``client_id`` causes
+        EMQX session-takeover, which triggers a disconnect → reconnect
+        storm between the orphaned and new coordinators.
+        """
+        # 1. Stop coordinator supervisor first so its reconnect loop won't
+        #    react to the disconnect we're about to trigger.
+        if self._connection_coordinator is not None:
+            try:
+                await self._connection_coordinator.stop_supervisor()
+            except Exception:
+                pass
+            # Null out BEFORE disconnecting the client so the paho
+            # on_disconnect callback (which reads self._connection_coordinator)
+            # short-circuits instead of feeding events into the dead coordinator.
+            self._connection_coordinator = None
+
+        # 2. Disconnect MQTT client (fires on_disconnect callback, but
+        #    coordinator is None so _on_mqtt_disconnect is a no-op).
+        if self._mqtt_client is not None:
+            try:
+                await self._mqtt_client.disconnect()
+            except Exception:
+                pass
+            self._mqtt_client = None
+
+        # 3. Stop token-manager renewal loop.
+        if self._token_manager is not None:
+            try:
+                await self._token_manager.stop()
+            except Exception:
+                pass
+            self._token_manager = None
+
+        # 4. Stop remaining optional services that hold sockets / aiohttp
+        #    sessions (avoids "Unclosed client session" warnings).
+        if self._metadata_reporter is not None:
+            try:
+                await self._metadata_reporter.stop()
+            except Exception:
+                pass
+            self._metadata_reporter = None
+
+        if self._cloud_config_manager is not None:
+            try:
+                await self._cloud_config_manager.stop()
+            except Exception:
+                pass
+            self._cloud_config_manager = None
+
+        # 5. Release the health-server port so the new attempt can bind it.
+        await self._stop_health_server()
+
     async def _start_services(self) -> bool:
+        # Tear down any resources left over from a previous failed attempt
+        # to prevent session-takeover storms and port conflicts.
+        await self._teardown_partially_started_services()
+
         await self._transition_state(AgentState.COLD_START, detail="initialising")
 
         device_id = _resolve_device_id(self._config)

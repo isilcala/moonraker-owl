@@ -47,7 +47,6 @@ SAMPLE_CLOUD_RESPONSE: Dict[str, Any] = {
         "timelapsePollIntervalSeconds": 10,
     },
     "camera": {
-        "enabled": True,
         "snapshotUrl": "http://cam:8080/snap",
         "cameraName": "nozzle_cam",
         "captureTimeoutSeconds": 15,
@@ -129,7 +128,6 @@ def test_apply_cloud_config_updates_all_sections(tmp_path: Path):
     assert config.telemetry_cadence.timelapse_poll_interval_seconds == 10
 
     # Camera
-    assert config.camera.enabled is True
     assert config.camera.snapshot_url == "http://cam:8080/snap"
     assert config.camera.camera_name == "nozzle_cam"
     assert config.camera.capture_timeout_seconds == 15
@@ -151,10 +149,10 @@ def test_apply_cloud_config_partial_update(tmp_path: Path):
     config = _make_config(tmp_path)
     original_interval = config.telemetry.sensors_interval_seconds
 
-    apply_cloud_config(config, {"camera": {"enabled": True}})
+    apply_cloud_config(config, {"camera": {"snapshot_url": "http://new:8080/snap"}})
 
     # Only camera should change
-    assert config.camera.enabled is True
+    assert config.camera.snapshot_url == "http://new:8080/snap"
     assert config.telemetry.sensors_interval_seconds == original_interval
 
 
@@ -203,7 +201,7 @@ def test_load_lkg_populates_config(tmp_path: Path):
 
     assert mgr.load_lkg() is True
     assert mgr._state.etag == "sha256-abc"
-    assert config.camera.enabled is True
+    assert config.camera.snapshot_url == "http://cam:8080/snap"
     assert config.commands.ack_timeout_seconds == 60
 
 
@@ -283,7 +281,7 @@ async def test_fetch_200_updates_config_and_writes_lkg(tmp_path: Path):
 
     result = await mgr.fetch(force=True)
     assert result is True
-    assert config.camera.enabled is True
+    assert config.camera.snapshot_url == "http://cam:8080/snap"
     assert mgr._state.etag == "sha256-new"
 
     # LKG should be written

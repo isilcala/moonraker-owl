@@ -326,10 +326,8 @@ class TestFactoryMethods:
 
     @pytest.mark.asyncio
     async def test_create_command_processor(self, backend: MoonrakerBackend) -> None:
-        """create_command_processor should return a CommandProcessor."""
+        """create_command_processor should return a CommandProcessor (no camera available)."""
         mock_owl_config = MagicMock()
-        # Configure camera as disabled to avoid auto-discovery path
-        mock_owl_config.camera.enabled = False
         mock_mqtt = MagicMock()
         mock_telemetry = MagicMock()
 
@@ -337,7 +335,9 @@ class TestFactoryMethods:
             "moonraker_owl.backends.moonraker.CommandProcessor"
         ) as MockProcessor, patch(
             "moonraker_owl.backends.moonraker.S3UploadClient"
-        ) as MockS3Client:
+        ) as MockS3Client, patch.object(
+            backend, "_resolve_snapshot_url", new_callable=AsyncMock, return_value=None
+        ):
             result = await backend.create_command_processor(
                 mock_owl_config, mock_mqtt, mock_telemetry
             )
@@ -359,7 +359,6 @@ class TestFactoryMethods:
     ) -> None:
         """create_command_processor should use CameraDiscovery when snapshot_url is 'auto'."""
         mock_owl_config = MagicMock()
-        mock_owl_config.camera.enabled = True
         mock_owl_config.camera.snapshot_url = "auto"
         mock_owl_config.camera.camera_name = "auto"
         mock_owl_config.camera.capture_timeout_seconds = 5
@@ -407,7 +406,6 @@ class TestFactoryMethods:
     ) -> None:
         """create_command_processor should use explicit snapshot_url without auto-discovery."""
         mock_owl_config = MagicMock()
-        mock_owl_config.camera.enabled = True
         mock_owl_config.camera.snapshot_url = "http://custom:8080/snap"
         mock_owl_config.camera.capture_timeout_seconds = 5
         mock_owl_config.camera.max_retries = 3
