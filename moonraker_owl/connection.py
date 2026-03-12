@@ -116,9 +116,28 @@ class ConnectionCoordinator:
         if self._stop_event.is_set():
             return
 
-        # Ignore CONNECTION_LOST during reconnection - this is expected when we
-        # disconnect as part of the reconnection process
-        if reason == ReconnectReason.CONNECTION_LOST and self._state == ConnectionState.RECONNECTING:
+        # Suppress ALL reconnect requests while a reconnection is in progress.
+        #
+        # Why this is safe for every reason:
+        #
+        #  CONNECTION_LOST / AUTH_FAILURE — paho fires on_disconnect from its
+        #  network thread for *each failed* connect attempt inside
+        #  _connect_with_backoff().  Those callbacks are dispatched via
+        #  call_soon_threadsafe and arrive on the asyncio event loop during the
+        #  backoff sleep.  If we queue them, the supervisor will trigger a
+        #  redundant _execute_reconnect immediately after the current one
+        #  finishes, disconnecting the just-established session.  This is the
+        #  root cause of the intermittent reconnection storm.
+        #
+        #  TOKEN_RENEWED — the renewed token updates _current_token in
+        #  TokenManager.  Each retry inside _connect_with_backoff() calls
+        #  get_mqtt_credentials(), which reads the latest _current_token.
+        #  A separate reconnection cycle is unnecessary and wasteful.
+        if self._state == ConnectionState.RECONNECTING:
+            LOGGER.debug(
+                "Ignoring reconnect request (%s) — already reconnecting",
+                reason.value,
+            )
             return
 
         # Priority: TOKEN_RENEWED > AUTH_FAILURE > others

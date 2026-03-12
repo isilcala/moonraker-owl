@@ -375,11 +375,14 @@ async def test_connection_lost_ignored_during_reconnecting(coordinator_setup):
 
 
 @pytest.mark.asyncio
-async def test_token_renewed_not_ignored_during_reconnecting(coordinator_setup):
-    """Test that TOKEN_RENEWED is still processed during RECONNECTING.
+async def test_token_renewed_ignored_during_reconnecting(coordinator_setup):
+    """Test that TOKEN_RENEWED is suppressed during RECONNECTING.
 
-    Unlike CONNECTION_LOST, TOKEN_RENEWED should be processed even during
-    reconnection as it indicates we have new credentials that need to be used.
+    All reconnect requests are suppressed while a reconnection is in progress.
+    TOKEN_RENEWED is unnecessary because _connect_with_backoff() calls
+    get_mqtt_credentials() on every retry, which picks up the latest token.
+    Allowing it would cause a redundant disconnect → reconnect cycle after
+    the current one finishes (reconnection storm).
     """
     coordinator, _, _ = coordinator_setup()
 
@@ -393,16 +396,20 @@ async def test_token_renewed_not_ignored_during_reconnecting(coordinator_setup):
     # Request reconnect with TOKEN_RENEWED
     coordinator.request_reconnect(ReconnectReason.TOKEN_RENEWED)
 
-    # Should be accepted
-    assert coordinator._pending_reason == ReconnectReason.TOKEN_RENEWED
-    assert coordinator._reconnect_event.is_set()
+    # Should be suppressed — no pending reason set
+    assert coordinator._pending_reason is None
+    assert not coordinator._reconnect_event.is_set()
 
 
 @pytest.mark.asyncio
-async def test_auth_failure_not_ignored_during_reconnecting(coordinator_setup):
-    """Test that AUTH_FAILURE is still processed during RECONNECTING.
+async def test_auth_failure_ignored_during_reconnecting(coordinator_setup):
+    """Test that AUTH_FAILURE is suppressed during RECONNECTING.
 
-    AUTH_FAILURE indicates a credential issue that needs immediate attention.
+    During _connect_with_backoff(), failed connection attempts fire paho's
+    on_disconnect(rc=134) which schedules AUTH_FAILURE via call_soon_threadsafe.
+    If queued, these stale events trigger a redundant _execute_reconnect after
+    the current one finishes — disconnecting the just-established session and
+    causing a reconnection storm.
     """
     coordinator, _, _ = coordinator_setup()
 
@@ -416,9 +423,9 @@ async def test_auth_failure_not_ignored_during_reconnecting(coordinator_setup):
     # Request reconnect with AUTH_FAILURE
     coordinator.request_reconnect(ReconnectReason.AUTH_FAILURE)
 
-    # Should be accepted
-    assert coordinator._pending_reason == ReconnectReason.AUTH_FAILURE
-    assert coordinator._reconnect_event.is_set()
+    # Should be suppressed — no pending reason set
+    assert coordinator._pending_reason is None
+    assert not coordinator._reconnect_event.is_set()
 
 
 @pytest.mark.asyncio
