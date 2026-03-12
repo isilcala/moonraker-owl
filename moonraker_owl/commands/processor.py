@@ -36,6 +36,7 @@ from .handlers import (
     FanCommandsMixin,
     HeaterCommandsMixin,
     PrintCommandsMixin,
+    QueryCommandsMixin,
     TaskCommandsMixin,
 )
 
@@ -48,6 +49,7 @@ class CommandProcessor(
     FanCommandsMixin,
     TaskCommandsMixin,
     ControlCommandsMixin,
+    QueryCommandsMixin,
 ):
     """Consumes MQTT command messages and forwards them to Moonraker."""
 
@@ -501,7 +503,8 @@ class CommandProcessor(
         - print:pause/resume/cancel: Print control actions
         - print:emergency-stop: Emergency stop
         - print:firmware-restart: Restart Klipper firmware
-        - print:reprint: Reprint the last print job
+        - print:start: Start printing a specified GCode file
+        - query:file-list: Query GCode file list (Cold Path data retrieval)
         - task:upload-thumbnail: Upload thumbnail to presigned URL
         - task:capture-image: Capture and upload camera frame
         - object:exclude: Exclude an object from the current print (ADR-0016)
@@ -548,9 +551,13 @@ class CommandProcessor(
         if message.command == PrinterCommandNames.FIRMWARE_RESTART:
             return await self._execute_firmware_restart(message)
 
-        # Reprint command
-        if message.command == PrinterCommandNames.REPRINT:
-            return await self._execute_reprint(message)
+        # Start print command
+        if message.command == PrinterCommandNames.START:
+            return await self._handle_print_start(message)
+
+        # Query commands (Cold Path — data retrieval via ACK result)
+        if message.command == PrinterCommandNames.QUERY_FILE_LIST:
+            return await self._handle_query_file_list(message)
 
         # Print control commands (pause, resume, cancel)
         # Map command name to Moonraker action (print:pause -> pause)

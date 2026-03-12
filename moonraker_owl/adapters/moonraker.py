@@ -340,6 +340,20 @@ class MoonrakerClient(PrinterAdapter):
             )
             raise
 
+    async def list_gcode_files(self, timeout: float = 15.0) -> list[dict]:
+        """List GCode files from Moonraker file manager.
+
+        Returns a flat recursive list of dicts with 'path', 'modified', 'size' fields.
+        """
+        session = await self._ensure_session()
+        url = f"{self._base_url}/server/files/list?root=gcodes"
+
+        async with asyncio.timeout(timeout):
+            async with session.get(url, headers=self._headers) as response:
+                response.raise_for_status()
+                data = await response.json()
+                return data.get("result", [])
+
     async def fetch_thumbnail(
         self,
         relative_path: str,

@@ -38,8 +38,8 @@ class PrinterCommandNames:
     FIRMWARE_RESTART = "print:firmware-restart"
     """Restart the Klipper firmware."""
 
-    REPRINT = "print:reprint"
-    """Reprint the last print job."""
+    START = "print:start"
+    """Start printing a specified GCode file."""
 
     # -------------------------------------------------------------------------
     # System Control Commands (cloud-triggered, requires ACK)
@@ -79,6 +79,13 @@ class PrinterCommandNames:
     """Upload timelapse video and preview to presigned URLs."""
 
     # -------------------------------------------------------------------------
+    # Query Commands (Cold Path, data retrieval via ACK result)
+    # -------------------------------------------------------------------------
+
+    QUERY_FILE_LIST = "query:file-list"
+    """Query GCode file list from the printer's local storage."""
+
+    # -------------------------------------------------------------------------
     # Job Lifecycle Commands (cloud-triggered, informational)
     # -------------------------------------------------------------------------
 
@@ -114,7 +121,7 @@ class PrinterCommandNames:
     # here for cross-codebase alignment.
 
     HOT_PATH_COMMANDS: frozenset[str] = frozenset({
-        PAUSE, RESUME, CANCEL, EMERGENCY_STOP, FIRMWARE_RESTART, REPRINT,
+        PAUSE, RESUME, CANCEL, EMERGENCY_STOP, FIRMWARE_RESTART, START,
         HEATER_SET_TARGET, HEATER_TURN_OFF, FAN_SET_SPEED,
         OBJECT_EXCLUDE, SET_TELEMETRY_RATE,
     })
@@ -123,6 +130,11 @@ class PrinterCommandNames:
     COLD_PATH_COMMANDS: frozenset[str] = frozenset({
         UPLOAD_THUMBNAIL, CAPTURE_IMAGE, UPLOAD_TIMELAPSE,
     })
+
+    COLD_PATH_QUERY_COMMANDS: frozenset[str] = frozenset({
+        QUERY_FILE_LIST,
+    })
+    """Query commands dispatched via Cold Path for data retrieval (ADR-0039)."""
     """Commands dispatched via Cold Path (ADR-0039): Outbox + result processors."""
 
     @classmethod

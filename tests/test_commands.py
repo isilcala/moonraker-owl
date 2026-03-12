@@ -39,6 +39,8 @@ class FakeMoonraker:
             "available_heaters": ["extruder", "heater_bed"],
             "available_sensors": [],
         }
+        self.gcode_files: list[dict] = []
+        self.printer_state: str = "standby"
 
     async def execute_print_action(self, action: str) -> None:
         if action not in {"pause", "resume", "cancel"}:
@@ -73,6 +75,22 @@ class FakeMoonraker:
     ) -> dict[str, list[str]]:
         """Return configured available heaters for testing."""
         return self.available_heaters
+
+    async def list_gcode_files(self, timeout: float = 15.0) -> list[dict]:
+        """Return configured GCode file list for testing."""
+        return self.gcode_files
+
+    async def fetch_printer_state(
+        self, objects: Optional[dict] = None, timeout: float = 5.0
+    ) -> dict:
+        """Return printer state for testing."""
+        return {
+            "result": {
+                "status": {
+                    "print_stats": {"state": self.printer_state},
+                }
+            }
+        }
 
 
 class FakeMQTT:
