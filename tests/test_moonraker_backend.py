@@ -68,8 +68,8 @@ class TestMoonrakerBackendHealthAnalysis:
         assessment = backend._analyse_snapshot(snapshot)
         assert assessment.healthy is True
 
-    def test_unhealthy_printer_shutdown(self, backend: MoonrakerBackend) -> None:
-        """Printer shutdown should be unhealthy with force_trip."""
+    def test_printer_shutdown_stays_healthy(self, backend: MoonrakerBackend) -> None:
+        """Printer shutdown is a Klipper state, not a Moonraker failure."""
         snapshot = {
             "result": {
                 "status": {
@@ -79,12 +79,10 @@ class TestMoonrakerBackendHealthAnalysis:
             }
         }
         assessment = backend._analyse_snapshot(snapshot)
-        assert assessment.healthy is False
-        assert assessment.force_trip is True
-        assert "MCU shutdown" in (assessment.detail or "")
+        assert assessment.healthy is True
 
-    def test_unhealthy_print_stats_error(self, backend: MoonrakerBackend) -> None:
-        """Print stats error should be unhealthy with force_trip."""
+    def test_print_stats_error_stays_healthy(self, backend: MoonrakerBackend) -> None:
+        """Print stats error is a Klipper state, not a Moonraker failure."""
         snapshot = {
             "result": {
                 "status": {
@@ -93,12 +91,10 @@ class TestMoonrakerBackendHealthAnalysis:
             }
         }
         assessment = backend._analyse_snapshot(snapshot)
-        assert assessment.healthy is False
-        assert assessment.force_trip is True
-        assert "Heater timeout" in (assessment.detail or "")
+        assert assessment.healthy is True
 
-    def test_unhealthy_printer_state_error(self, backend: MoonrakerBackend) -> None:
-        """Printer state error should be unhealthy."""
+    def test_printer_state_error_stays_healthy(self, backend: MoonrakerBackend) -> None:
+        """Printer state error is a Klipper state, not a Moonraker failure."""
         snapshot = {
             "result": {
                 "status": {
@@ -108,8 +104,7 @@ class TestMoonrakerBackendHealthAnalysis:
             }
         }
         assessment = backend._analyse_snapshot(snapshot)
-        assert assessment.healthy is False
-        assert assessment.force_trip is True
+        assert assessment.healthy is True
 
     def test_webhooks_error_with_healthy_print_state(
         self, backend: MoonrakerBackend
@@ -130,7 +125,7 @@ class TestMoonrakerBackendHealthAnalysis:
     def test_webhooks_error_with_unhealthy_print_state(
         self, backend: MoonrakerBackend
     ) -> None:
-        """Webhooks error with non-healthy print_stats should be unhealthy."""
+        """Webhooks shutdown is a Klipper state, stays healthy."""
         snapshot = {
             "result": {
                 "status": {
@@ -140,8 +135,7 @@ class TestMoonrakerBackendHealthAnalysis:
             }
         }
         assessment = backend._analyse_snapshot(snapshot)
-        assert assessment.healthy is False
-        assert assessment.force_trip is True
+        assert assessment.healthy is True
 
     def test_invalid_snapshot_not_dict(self, backend: MoonrakerBackend) -> None:
         """Non-dict snapshot should be unhealthy."""

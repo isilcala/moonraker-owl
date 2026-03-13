@@ -148,7 +148,8 @@ def _build_snapshot(
     return {"result": {"status": status}}
 
 
-def test_moonraker_assessment_detects_shutdown_state() -> None:
+def test_moonraker_assessment_reports_healthy_on_klipper_shutdown() -> None:
+    """Klipper shutdown is not a Moonraker connectivity failure."""
     app = MoonrakerOwlApp(build_config())
     snapshot = _build_snapshot(
         webhooks_state="shutdown",
@@ -157,13 +158,12 @@ def test_moonraker_assessment_detects_shutdown_state() -> None:
 
     assessment = app._analyse_moonraker_snapshot(snapshot)
 
-    assert assessment.healthy is False
-    assert assessment.force_trip is True
-    assert assessment.detail == "Emergency stop"
+    assert assessment.healthy is True
 
 
 @pytest.mark.asyncio
-async def test_push_status_listener_trips_breaker_on_shutdown() -> None:
+async def test_push_status_listener_keeps_commands_on_klipper_shutdown() -> None:
+    """Klipper shutdown must NOT trip breaker — commands stay active for recovery."""
     config = build_config(breaker_threshold=1)
     app = MoonrakerOwlApp(config)
 
@@ -184,13 +184,10 @@ async def test_push_status_listener_trips_breaker_on_shutdown() -> None:
 
     await app._handle_telemetry_status_update(snapshot)
 
-    assert app._moonraker_breaker_tripped is True
-    assert telemetry.system_status_calls == [("error", "Emergency stop")]
-    assert commands.stop_calls == 1
-    assert commands.abandon_reasons == ["moonraker unavailable"]
-    assert telemetry.stop_calls == 0
-    assert app._telemetry_ready is True
-    assert app._commands_ready is False
+    assert app._moonraker_breaker_tripped is False
+    assert commands.stop_calls == 0
+    assert commands.abandon_reasons == []
+    assert app._commands_ready is True
 
 
 def test_moonraker_assessment_reports_healthy_state() -> None:
@@ -222,7 +219,8 @@ def test_moonraker_assessment_ignores_stale_webhooks_error() -> None:
     assert assessment.detail is None
 
 
-def test_moonraker_assessment_detects_print_stats_error() -> None:
+def test_moonraker_assessment_reports_healthy_on_print_stats_error() -> None:
+    """print_stats error is a Klipper state, not a Moonraker failure."""
     app = MoonrakerOwlApp(build_config())
     snapshot = _build_snapshot(
         print_state="error",
@@ -231,9 +229,7 @@ def test_moonraker_assessment_detects_print_stats_error() -> None:
 
     assessment = app._analyse_moonraker_snapshot(snapshot)
 
-    assert assessment.healthy is False
-    assert assessment.force_trip is True
-    assert assessment.detail == "Emergency stop"
+    assert assessment.healthy is True
 
 
 @pytest.mark.asyncio

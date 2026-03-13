@@ -283,82 +283,30 @@ class MoonrakerBackend(PrinterBackend):
     # -------------------------------------------------------------------------
 
     def _analyse_snapshot(self, snapshot: dict[str, Any]) -> PrinterHealthAssessment:
-        """Analyse a Moonraker status snapshot for health indicators.
+        """Analyse a Moonraker status snapshot for connectivity issues.
 
-        This implements the Moonraker-specific logic for determining whether
-        the printer is in a healthy state, based on webhooks, printer, and
-        print_stats states.
+        Only protocol-level issues (malformed responses) indicate Moonraker
+        connectivity problems.  Klipper firmware states (shutdown, error) are
+        normal operational states — Moonraker remains fully functional and
+        must stay reachable for recovery commands (e.g. firmware-restart).
+
+        Tripping the Moonraker breaker on Klipper errors causes a deadlock:
+        commands get unsubscribed, preventing firmware-restart from reaching
+        the agent to recover the printer.  Actual Moonraker connectivity
+        failures are caught separately by assess_health()'s HTTP exception
+        handler.
 
         Args:
             snapshot: Raw Moonraker status response.
 
         Returns:
-            PrinterHealthAssessment with health determination.
+            PrinterHealthAssessment — unhealthy only for malformed responses.
         """
         if not isinstance(snapshot, dict):
             return PrinterHealthAssessment(
                 healthy=False,
                 detail="moonraker response not a mapping",
                 force_trip=True,
-            )
-
-        status = snapshot.get("result", {}).get("status", {})
-        if not isinstance(status, dict):
-            status = {}
-
-        webhooks_state = _normalise_state(status.get("webhooks"), "state")
-        printer_state = _normalise_state(status.get("printer"), "state")
-        printer_shutdown = _extract_bool(status.get("printer"), "is_shutdown")
-        print_stats_state = _normalise_state(status.get("print_stats"), "state")
-        print_stats_message = _extract_str(status.get("print_stats"), "message")
-
-        healthy_print_states = {
-            "standby",
-            "ready",
-            "idle",
-            "printing",
-            "paused",
-            "complete",
-            "completed",
-            "cancelled",
-            "canceled",
-        }
-        failure_print_states = {
-            "error",
-            "failed",
-            "aborted",
-            "shutdown",
-        }
-
-        failure_detail: Optional[str] = None
-        force_trip = False
-
-        if printer_shutdown:
-            failure_detail = print_stats_message or "moonraker reports printer shutdown"
-            force_trip = True
-        elif print_stats_state in failure_print_states:
-            failure_detail = (
-                print_stats_message or f"print_stats state {print_stats_state}"
-            )
-            force_trip = True
-        elif printer_state in {"shutdown", "error"}:
-            failure_detail = print_stats_message or f"printer state {printer_state}"
-            force_trip = True
-        elif webhooks_state in {"shutdown", "error"}:
-            if print_stats_state in healthy_print_states:
-                failure_detail = None
-                force_trip = False
-            else:
-                failure_detail = (
-                    print_stats_message or f"webhooks state {webhooks_state}"
-                )
-                force_trip = True
-
-        if failure_detail is not None:
-            return PrinterHealthAssessment(
-                healthy=False,
-                detail=failure_detail,
-                force_trip=force_trip,
             )
 
         return PrinterHealthAssessment(healthy=True)
