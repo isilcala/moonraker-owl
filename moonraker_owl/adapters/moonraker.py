@@ -621,6 +621,67 @@ class MoonrakerClient(PrinterAdapter):
             )
             raise
 
+    async def upload_gcode_file(
+        self,
+        filename: str,
+        file_path: str,
+        timeout: float = 120.0,
+    ) -> str:
+        """Upload a GCode file to Moonraker via POST /server/files/upload.
+
+        Uses multipart/form-data upload. Moonraker stores the file in the
+        gcodes/ virtual SD card directory.
+
+        Args:
+            filename: The target filename (e.g., "benchy.gcode").
+            file_path: Local filesystem path to the file to upload.
+            timeout: Upload timeout in seconds.
+
+        Returns:
+            The stored filename as reported by Moonraker.
+
+        Raises:
+            ValueError: If filename is empty.
+            RuntimeError: If the upload fails.
+        """
+        if not filename or not filename.strip():
+            raise ValueError("Filename cannot be empty")
+
+        session = await self._ensure_session()
+        url = f"{self._base_url}/server/files/upload"
+
+        import aiohttp as _aiohttp
+
+        data = _aiohttp.FormData()
+        data.add_field(
+            "file",
+            open(file_path, "rb"),  # noqa: SIM115
+            filename=filename.strip(),
+            content_type="application/octet-stream",
+        )
+        data.add_field("root", "gcodes")
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.post(
+                    url, data=data, headers=self._headers
+                ) as response:
+                    if response.status >= 400:
+                        detail = await response.text()
+                        raise RuntimeError(
+                            f"GCode upload failed with status {response.status}: {detail.strip()}"
+                        )
+                    result = await response.json()
+                    item = result.get("result", {}).get("item", {})
+                    return item.get("path", filename.strip())
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "GCode upload timed out after %.1fs (filename=%s)",
+                timeout,
+                filename,
+            )
+            raise
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

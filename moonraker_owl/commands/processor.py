@@ -539,6 +539,9 @@ class CommandProcessor(
         if message.command == PrinterCommandNames.UPLOAD_TIMELAPSE:
             return await self._execute_upload_timelapse(message)
 
+        if message.command == PrinterCommandNames.DOWNLOAD_GCODE:
+            return await self._execute_download_gcode(message)
+
         # Job lifecycle commands
         if message.command == PrinterCommandNames.JOB_REGISTERED:
             return self._execute_job_registered(message)

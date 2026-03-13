@@ -78,6 +78,9 @@ class PrinterCommandNames:
     UPLOAD_TIMELAPSE = "task:upload-timelapse"
     """Upload timelapse video and preview to presigned URLs."""
 
+    DOWNLOAD_GCODE = "task:download-gcode"
+    """Download GCode file from cloud storage and upload to Moonraker."""
+
     # -------------------------------------------------------------------------
     # Query Commands (Cold Path, data retrieval via ACK result)
     # -------------------------------------------------------------------------
@@ -129,6 +132,7 @@ class PrinterCommandNames:
 
     COLD_PATH_COMMANDS: frozenset[str] = frozenset({
         UPLOAD_THUMBNAIL, CAPTURE_IMAGE, UPLOAD_TIMELAPSE,
+        DOWNLOAD_GCODE,
     })
 
     COLD_PATH_QUERY_COMMANDS: frozenset[str] = frozenset({

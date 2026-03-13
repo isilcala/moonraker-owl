@@ -1,9 +1,12 @@
-"""System task command handlers (thumbnail upload, image capture, timelapse upload)."""
+"""System task command handlers (thumbnail upload, image capture, timelapse upload, gcode download)."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
+import tempfile
 import time as _time
 from datetime import datetime as dt
 from datetime import timezone
@@ -554,3 +557,174 @@ class TaskCommandsMixin:
         result_data["success"] = video_uploaded
         result_data["previewUploaded"] = preview_uploaded
         return result_data
+
+    async def _execute_download_gcode(
+        self, message: CommandMessage
+    ) -> Dict[str, Any]:
+        """Handle task:download-gcode command.
+
+        Downloads a GCode file from a CDN/presigned URL, verifies its
+        checksum, and uploads it to Moonraker's local file system.
+
+        Parameters:
+            transferId (str): Transfer ID for correlation
+            downloadUrl (str): CDN or presigned URL for downloading
+            fileName (str): Target filename on Moonraker
+            fileSizeBytes (int): Expected file size for timeout calculation
+            autoStart (bool): Whether to auto-start printing
+            checksumSha256 (str, optional): Expected SHA-256 hex digest
+        """
+        import aiohttp as _aiohttp
+
+        params = message.parameters or {}
+
+        transfer_id = params.get("transferId")
+        download_url = params.get("downloadUrl")
+        file_name = params.get("fileName")
+        file_size = params.get("fileSizeBytes", 0)
+        auto_start = params.get("autoStart", True)
+        checksum = params.get("checksumSha256")
+
+        if not download_url or not isinstance(download_url, str):
+            raise CommandProcessingError(
+                "downloadUrl parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        if not file_name or not isinstance(file_name, str):
+            raise CommandProcessingError(
+                "fileName parameter is required",
+                code="invalid_parameters",
+                command_id=message.command_id,
+            )
+
+        # Dynamic timeout: base 30s + file_size / 100KB/s (conservative)
+        min_bandwidth_bps = 100 * 1024  # 100 KB/s minimum
+        download_timeout = 30.0 + (file_size / min_bandwidth_bps if file_size > 0 else 60.0)
+
+        LOGGER.info(
+            "Downloading GCode file for transfer %s: %s (%d bytes, timeout=%.0fs)",
+            transfer_id,
+            file_name,
+            file_size,
+            download_timeout,
+        )
+
+        start_time = _time.monotonic()
+        tmp_path: str | None = None
+
+        try:
+            # Stream download to temp file to avoid buffering large files in memory
+            async with _aiohttp.ClientSession() as session:
+                async with asyncio.timeout(download_timeout):
+                    async with session.get(download_url) as response:
+                        if response.status >= 400:
+                            detail = await response.text()
+                            return {
+                                "success": False,
+                                "transferId": transfer_id,
+                                "error": "download_failed",
+                                "errorMessage": f"HTTP {response.status}: {detail[:200]}",
+                            }
+
+                        # Write to temp file
+                        tmp_fd = tempfile.NamedTemporaryFile(
+                            suffix=".gcode", delete=False
+                        )
+                        tmp_path = tmp_fd.name
+                        try:
+                            sha256 = hashlib.sha256()
+                            total_bytes = 0
+                            with tmp_fd:
+                                async for chunk in response.content.iter_chunked(64 * 1024):
+                                    tmp_fd.write(chunk)
+                                    sha256.update(chunk)
+                                    total_bytes += len(chunk)
+                        except Exception:
+                            raise
+
+            download_ms = int((_time.monotonic() - start_time) * 1000)
+
+            LOGGER.info(
+                "Downloaded %d bytes in %dms for transfer %s",
+                total_bytes,
+                download_ms,
+                transfer_id,
+            )
+
+            # Verify checksum
+            checksum_verified = False
+            if checksum:
+                computed = sha256.hexdigest()
+                if computed.lower() != checksum.lower():
+                    LOGGER.error(
+                        "Checksum mismatch for transfer %s: expected %s, got %s",
+                        transfer_id,
+                        checksum[:16],
+                        computed[:16],
+                    )
+                    return {
+                        "success": False,
+                        "transferId": transfer_id,
+                        "error": "checksum_mismatch",
+                        "errorMessage": f"SHA-256 mismatch: expected {checksum[:16]}..., got {computed[:16]}...",
+                    }
+                checksum_verified = True
+
+            # Upload to Moonraker
+            upload_timeout = 30.0 + (total_bytes / min_bandwidth_bps)
+            local_path = await self._moonraker.upload_gcode_file(
+                filename=file_name,
+                file_path=tmp_path,
+                timeout=upload_timeout,
+            )
+
+            LOGGER.info(
+                "GCode transfer %s complete: %s uploaded to Moonraker as %s",
+                transfer_id,
+                file_name,
+                local_path,
+            )
+
+            return {
+                "success": True,
+                "transferId": transfer_id,
+                "localPath": local_path,
+                "autoStart": auto_start,
+                "downloadDurationMs": download_ms,
+                "fileSizeBytes": total_bytes,
+                "checksumVerified": checksum_verified,
+            }
+
+        except asyncio.TimeoutError:
+            LOGGER.error(
+                "GCode download timed out for transfer %s after %.0fs",
+                transfer_id,
+                download_timeout,
+            )
+            return {
+                "success": False,
+                "transferId": transfer_id,
+                "error": "download_timeout",
+                "errorMessage": f"Download timed out after {download_timeout:.0f}s",
+            }
+        except Exception as exc:
+            LOGGER.error(
+                "GCode download failed for transfer %s: %s",
+                transfer_id,
+                exc,
+            )
+            return {
+                "success": False,
+                "transferId": transfer_id,
+                "error": "download_failed",
+                "errorMessage": str(exc),
+            }
+        finally:
+            # Clean up temp file
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    LOGGER.warning("Failed to clean up temp file: %s", tmp_path)
