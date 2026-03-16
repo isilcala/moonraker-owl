@@ -652,7 +652,10 @@ class MoonrakerClient(PrinterAdapter):
 
         import aiohttp as _aiohttp
 
-        data = _aiohttp.FormData()
+        # quote_fields=False prevents aiohttp from percent-encoding non-ASCII
+        # characters in the Content-Disposition filename. Moonraker (Tornado)
+        # expects raw UTF-8 filenames, not RFC 5987 encoded ones.
+        data = _aiohttp.FormData(quote_fields=False)
         data.add_field(
             "file",
             open(file_path, "rb"),  # noqa: SIM115
