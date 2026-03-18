@@ -25,6 +25,7 @@ from .providers import (
     CapabilityProvider,
     KlipperProvider,
     MoonrakerProvider,
+    SensorInventoryProvider,
     SystemInfoProvider,
 )
 from .reporter import MetadataReporter, MetadataReporterConfig
@@ -38,4 +39,5 @@ __all__ = [
     "MoonrakerProvider",
     "KlipperProvider",
     "CameraProvider",
+    "SensorInventoryProvider",
 ]

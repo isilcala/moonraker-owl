@@ -13,6 +13,7 @@ from moonraker_owl.metadata import (
     MetadataReporter,
     MetadataReporterConfig,
     MoonrakerProvider,
+    SensorInventoryProvider,
     SystemInfoProvider,
 )
 
@@ -515,3 +516,368 @@ class TestMetadataReporter:
 
         # Should have retried max_retry_attempts times
         assert call_count == 3
+
+
+class TestSensorInventoryProvider:
+    """Tests for SensorInventoryProvider."""
+
+    @pytest.fixture
+    def provider(self):
+        return SensorInventoryProvider("http://127.0.0.1:7125")
+
+    def test_provider_name(self, provider):
+        assert provider.name == "sensors"
+
+    @pytest.mark.asyncio
+    async def test_detect_typical_printer(self, provider):
+        """Should classify heaters, temp sensors, and fans correctly."""
+        heaters_response = {
+            "result": {
+                "status": {
+                    "heaters": {
+                        "available_heaters": ["extruder", "heater_bed"],
+                        "available_sensors": [
+                            "extruder",
+                            "heater_bed",
+                            "temperature_sensor chamber",
+                            "temperature_fan exhaust",
+                        ],
+                    }
+                }
+            }
+        }
+        objects_response = {
+            "result": {
+                "objects": [
+                    "extruder",
+                    "heater_bed",
+                    "fan",
+                    "gcode_move",
+                    "toolhead",
+                ]
+            }
+        }
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            resp.json = AsyncMock(
+                return_value=heaters_response if call_count == 0 else objects_response
+            )
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        assert "sensors" in result
+        sensors = result["sensors"]["available"]
+        names = [s["name"] for s in sensors]
+
+        assert "extruder" in names
+        assert "heater_bed" in names
+        assert "temperature_sensor chamber" in names
+        assert "temperature_fan exhaust" in names
+        assert "fan" in names
+
+        # Verify classification
+        by_name = {s["name"]: s for s in sensors}
+        assert by_name["extruder"]["type"] == "extruder"
+        assert by_name["extruder"]["hasTarget"] is True
+        assert by_name["heater_bed"]["type"] == "heater_bed"
+        assert by_name["heater_bed"]["hasTarget"] is True
+        assert by_name["temperature_sensor chamber"]["type"] == "temperature_sensor"
+        assert by_name["temperature_sensor chamber"]["hasTarget"] is False
+        assert by_name["temperature_fan exhaust"]["type"] == "temperature_fan"
+        assert by_name["temperature_fan exhaust"]["hasTarget"] is True
+        assert by_name["fan"]["type"] == "fan"
+        assert by_name["fan"]["hasTarget"] is False
+
+    @pytest.mark.asyncio
+    async def test_detect_skips_hidden_sensors(self, provider):
+        """Sensors prefixed with _ should be excluded."""
+        heaters_response = {
+            "result": {
+                "status": {
+                    "heaters": {
+                        "available_heaters": ["extruder"],
+                        "available_sensors": [
+                            "extruder",
+                            "temperature_sensor _mcu_temp",
+                            "temperature_sensor chamber",
+                        ],
+                    }
+                }
+            }
+        }
+        objects_response = {"result": {"objects": ["extruder", "_hidden_fan"]}}
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            resp.json = AsyncMock(
+                return_value=heaters_response if call_count == 0 else objects_response
+            )
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        names = [s["name"] for s in result["sensors"]["available"]]
+        assert "extruder" in names
+        assert "temperature_sensor chamber" in names
+        assert "temperature_sensor _mcu_temp" not in names
+        assert "_hidden_fan" not in names
+
+    @pytest.mark.asyncio
+    async def test_detect_no_duplicates(self, provider):
+        """Sensors that appear in both heaters and objects should appear once."""
+        heaters_response = {
+            "result": {
+                "status": {
+                    "heaters": {
+                        "available_heaters": ["extruder"],
+                        "available_sensors": ["extruder"],
+                    }
+                }
+            }
+        }
+        objects_response = {"result": {"objects": ["extruder", "fan"]}}
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            resp.json = AsyncMock(
+                return_value=heaters_response if call_count == 0 else objects_response
+            )
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        names = [s["name"] for s in result["sensors"]["available"]]
+        assert names.count("extruder") == 1
+
+    @pytest.mark.asyncio
+    async def test_detect_heater_generic(self, provider):
+        """heater_generic objects should be classified as 'heater'."""
+        heaters_response = {
+            "result": {
+                "status": {
+                    "heaters": {
+                        "available_heaters": ["extruder", "heater_generic chamber"],
+                        "available_sensors": ["extruder", "heater_generic chamber"],
+                    }
+                }
+            }
+        }
+        objects_response = {"result": {"objects": []}}
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            resp.json = AsyncMock(
+                return_value=heaters_response if call_count == 0 else objects_response
+            )
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        by_name = {s["name"]: s for s in result["sensors"]["available"]}
+        assert by_name["heater_generic chamber"]["type"] == "heater"
+        assert by_name["heater_generic chamber"]["hasTarget"] is True
+
+    @pytest.mark.asyncio
+    async def test_detect_fan_types(self, provider):
+        """Various fan types from objects list should be classified as 'fan'."""
+        heaters_response = {
+            "result": {"status": {"heaters": {"available_heaters": [], "available_sensors": []}}}
+        }
+        objects_response = {
+            "result": {
+                "objects": [
+                    "fan",
+                    "heater_fan hotend_fan",
+                    "controller_fan mcu_fan",
+                    "fan_generic aux_fan",
+                ]
+            }
+        }
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            resp.json = AsyncMock(
+                return_value=heaters_response if call_count == 0 else objects_response
+            )
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        by_name = {s["name"]: s for s in result["sensors"]["available"]}
+        for fan_name in ["fan", "heater_fan hotend_fan", "controller_fan mcu_fan", "fan_generic aux_fan"]:
+            assert fan_name in by_name, f"{fan_name} not found"
+            assert by_name[fan_name]["type"] == "fan"
+            assert by_name[fan_name]["hasTarget"] is False
+
+    @pytest.mark.asyncio
+    async def test_detect_empty_printer(self, provider):
+        """Should return empty list when no sensors at all."""
+        heaters_response = {
+            "result": {"status": {"heaters": {"available_heaters": [], "available_sensors": []}}}
+        }
+        objects_response = {"result": {"objects": []}}
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            resp.json = AsyncMock(
+                return_value=heaters_response if call_count == 0 else objects_response
+            )
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        assert result == {"sensors": {"available": []}}
+
+    @pytest.mark.asyncio
+    async def test_detect_heater_api_failure_returns_empty(self, provider):
+        """Should tolerate a failed heaters query and still discover fans from objects."""
+        objects_response = {"result": {"objects": ["fan"]}}
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            if call_count == 0:
+                resp.status = 500  # heaters endpoint fails
+                resp.json = AsyncMock(return_value={})
+            else:
+                resp.status = 200
+                resp.json = AsyncMock(return_value=objects_response)
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        names = [s["name"] for s in result["sensors"]["available"]]
+        assert "fan" in names
+
+
+class TestForceReportNow:
+    """Tests for MetadataReporter.force_report_now()."""
+
+    @pytest.mark.asyncio
+    async def test_force_triggers_immediate_report(self, reporter_config):
+        """force_report_now should break the periodic wait and trigger a report."""
+        reporter_config.refresh_interval_seconds = 3600  # Long interval
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+
+        report_count = 0
+
+        async def counting_report():
+            nonlocal report_count
+            report_count += 1
+
+        reporter._report_once = counting_report
+        await reporter.start()
+
+        # Wait for initial report
+        await asyncio.sleep(0.1)
+        assert report_count == 1
+
+        # Force a second report
+        reporter.force_report_now()
+        await asyncio.sleep(0.2)
+        assert report_count == 2
+
+        await reporter.stop()
+
+    def test_force_ignored_when_not_running(self, reporter_config):
+        """force_report_now should be a no-op when reporter is not started."""
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+        # Should not raise
+        reporter.force_report_now()

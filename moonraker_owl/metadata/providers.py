@@ -464,3 +464,156 @@ class CameraProvider(BaseProvider):
             features.append("stream")
 
         return features
+
+
+class SensorInventoryProvider(BaseProvider):
+    """Provides a type-classified inventory of all available printer sensors.
+
+    Discovers sensors from Moonraker's heaters endpoint and printer objects
+    list, classifying each by type (heater, sensor, fan) and whether it
+    supports target temperature control.
+
+    This data is consumed by the cloud to populate the sensor configuration
+    UI, allowing users to select which sensors to monitor.
+    """
+
+    # Sensor name prefixes that indicate temperature-related objects
+    _HEATER_PREFIXES = ("extruder", "heater_generic", "heater_bed")
+    _SENSOR_PREFIXES = ("temperature_sensor", "temperature_fan")
+    _FAN_PREFIXES = ("fan", "heater_fan", "controller_fan", "fan_generic")
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        session: Optional[aiohttp.ClientSession] = None,
+        timeout: float = 5.0,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._session = session
+        self._owns_session = session is None
+        self._timeout = timeout
+
+    @property
+    def name(self) -> str:
+        return "sensors"
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is None:
+            timeout = aiohttp.ClientTimeout(total=self._timeout)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._owns_session = True
+        return self._session
+
+    async def close(self) -> None:
+        if self._owns_session and self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def detect(self) -> Dict[str, Any]:
+        """Detect all available sensors and return a classified inventory.
+
+        Returns:
+            Dictionary with 'sensors' key containing:
+            - available: list of sensor descriptors with name, type, hasTarget
+        """
+        session = await self._ensure_session()
+
+        heater_info, objects = await asyncio.gather(
+            self._fetch_heaters(session),
+            self._fetch_objects(session),
+        )
+
+        sensors: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+
+        # Process heaters (have target temperature)
+        for heater in heater_info.get("available_heaters", []):
+            if not heater or heater.startswith("_"):
+                continue
+            if heater not in seen:
+                sensors.append(self._classify_sensor(heater, has_target=True))
+                seen.add(heater)
+
+        # Process temperature sensors (no target)
+        for sensor in heater_info.get("available_sensors", []):
+            if not sensor or sensor.startswith("_"):
+                continue
+            # Skip hidden sensors (prefixed with _ after the type prefix)
+            if " " in sensor and sensor.split(" ", 1)[1].startswith("_"):
+                continue
+            if sensor in seen or sensor in heater_info.get("available_heaters", []):
+                continue
+            has_target = sensor.startswith("temperature_fan")
+            sensors.append(self._classify_sensor(sensor, has_target=has_target))
+            seen.add(sensor)
+
+        # Discover fans from printer objects list
+        for obj_name in objects:
+            if not obj_name or obj_name.startswith("_"):
+                continue
+            if obj_name in seen:
+                continue
+            if self._is_fan_object(obj_name):
+                sensors.append(self._classify_sensor(obj_name, has_target=False))
+                seen.add(obj_name)
+
+        return {"sensors": {"available": sensors}}
+
+    def _classify_sensor(self, name: str, *, has_target: bool) -> Dict[str, str | bool]:
+        """Classify a sensor by its Klipper object name."""
+        return {
+            "name": name,
+            "type": self._infer_type(name),
+            "hasTarget": has_target,
+        }
+
+    def _infer_type(self, name: str) -> str:
+        """Infer sensor type from Klipper object name."""
+        if name in ("extruder",) or name.startswith("extruder"):
+            return "extruder"
+        if name == "heater_bed":
+            return "heater_bed"
+        if name.startswith("heater_generic"):
+            return "heater"
+        if name.startswith("temperature_fan"):
+            return "temperature_fan"
+        if name.startswith("temperature_sensor"):
+            return "temperature_sensor"
+        if self._is_fan_object(name):
+            return "fan"
+        return "unknown"
+
+    def _is_fan_object(self, name: str) -> bool:
+        """Check if a Klipper object name represents a fan."""
+        return name == "fan" or any(
+            name.startswith(prefix) for prefix in self._FAN_PREFIXES
+        )
+
+    async def _fetch_heaters(self, session: aiohttp.ClientSession) -> Dict[str, Any]:
+        """Query the Moonraker heaters endpoint."""
+        url = f"{self._base_url}/printer/objects/query?heaters"
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        return {}
+                    data = await response.json()
+                    return data.get("result", {}).get("status", {}).get("heaters", {})
+        except Exception as exc:
+            LOGGER.warning("Failed to query heaters for sensor inventory: %s", exc)
+            return {}
+
+    async def _fetch_objects(self, session: aiohttp.ClientSession) -> List[str]:
+        """Query the Moonraker printer objects list."""
+        url = f"{self._base_url}/printer/objects/list"
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        return []
+                    data = await response.json()
+                    return data.get("result", {}).get("objects", [])
+        except Exception as exc:
+            LOGGER.warning("Failed to query objects for sensor inventory: %s", exc)
+            return []

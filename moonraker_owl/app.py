@@ -908,6 +908,7 @@ class MoonrakerOwlApp:
                 self._mqtt_client,
                 self._telemetry_publisher,
                 job_registry=self._job_registry,
+                metadata_reporter=self._metadata_reporter,
             )
             self._command_processor = processor
 

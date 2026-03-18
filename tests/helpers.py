@@ -30,6 +30,8 @@ def build_config(
     sensors_interval_seconds: float = 0.2,
     include_raw_payload: bool = False,
     breaker_threshold: int = 2,
+    sensor_allowlist: Optional[list[str]] = None,
+    max_custom_sensors: int = 0,
 ) -> OwlConfig:
     """Build a minimal OwlConfig for tests.
 
@@ -61,6 +63,8 @@ def build_config(
             sensors_interval_seconds=sensors_interval_seconds,
             include_raw_payload=include_raw_payload,
             include_fields=include_fields or list(DEFAULT_TELEMETRY_FIELDS),
+            sensor_allowlist=sensor_allowlist or [],
+            max_custom_sensors=max_custom_sensors,
         ),
         telemetry_cadence=TelemetryCadenceConfig(status_min_interval_seconds=0),
         commands=CommandConfig(),

@@ -2224,7 +2224,11 @@ async def test_resubscribe_rediscovers_sensors_after_klippy_ready() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(sensors_interval_seconds=30.0)
+    config = build_config(
+        sensors_interval_seconds=30.0,
+        sensor_allowlist=["temperature_sensor chamber"],
+        max_custom_sensors=1,
+    )
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
@@ -2259,7 +2263,11 @@ async def test_resubscribe_removes_stale_sensors_after_klippy_ready() -> None:
 
     moonraker = FakeMoonrakerClient(initial_state)
     mqtt = FakeMQTTClient()
-    config = build_config(sensors_interval_seconds=30.0)
+    config = build_config(
+        sensors_interval_seconds=30.0,
+        sensor_allowlist=["temperature_sensor chamber"],
+        max_custom_sensors=1,
+    )
 
     publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 

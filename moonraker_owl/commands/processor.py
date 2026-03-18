@@ -35,6 +35,7 @@ from .handlers import (
     ControlCommandsMixin,
     FanCommandsMixin,
     HeaterCommandsMixin,
+    MetadataCommandsMixin,
     PrintCommandsMixin,
     QueryCommandsMixin,
     TaskCommandsMixin,
@@ -50,6 +51,7 @@ class CommandProcessor(
     TaskCommandsMixin,
     ControlCommandsMixin,
     QueryCommandsMixin,
+    MetadataCommandsMixin,
 ):
     """Consumes MQTT command messages and forwards them to Moonraker."""
 
@@ -63,6 +65,7 @@ class CommandProcessor(
         camera: Optional[CameraClient] = None,
         image_preprocessor: Optional[ImagePreprocessor] = None,
         job_registry: Optional[PrintJobRegistry] = None,
+        metadata_reporter: Optional[Any] = None,
     ) -> None:
         self._config = config
         self._moonraker = moonraker
@@ -72,6 +75,7 @@ class CommandProcessor(
         self._camera = camera
         self._image_preprocessor = image_preprocessor
         self._job_registry = job_registry
+        self._metadata_reporter = metadata_reporter
 
         (
             self._tenant_id,
@@ -514,6 +518,10 @@ class CommandProcessor(
         # System control commands
         if message.command == PrinterCommandNames.SET_TELEMETRY_RATE:
             return self._execute_set_telemetry_rate(message)
+
+        # Metadata commands
+        if message.command == PrinterCommandNames.METADATA_SYSTEM_REFRESH:
+            return self._execute_metadata_system_refresh(message)
 
         # Heater control commands
         if message.command == PrinterCommandNames.HEATER_SET_TARGET:

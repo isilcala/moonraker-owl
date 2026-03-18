@@ -20,6 +20,7 @@ from .providers import (
     CameraProvider,
     KlipperProvider,
     MoonrakerProvider,
+    SensorInventoryProvider,
     SystemInfoProvider,
 )
 
@@ -95,6 +96,7 @@ class MetadataReporter:
         self._providers: List[BaseProvider] = []
         self._report_task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
+        self._force_event = asyncio.Event()
         self._last_report_success = False
         self._retry_delay = config.initial_retry_delay
 
@@ -154,6 +156,7 @@ class MetadataReporter:
             MoonrakerProvider(moonraker_url),
             KlipperProvider(moonraker_url),
             CameraProvider(moonraker_url),
+            SensorInventoryProvider(moonraker_url),
         ]
 
     async def _cleanup_providers(self) -> None:
@@ -179,16 +182,22 @@ class MetadataReporter:
 
             # Periodic refresh
             while not self._stop_event.is_set():
+                # Wait for either: stop, force-refresh, or periodic timeout
+                self._force_event.clear()
+                stop_task = asyncio.create_task(self._stop_event.wait())
+                force_task = asyncio.create_task(self._force_event.wait())
                 try:
-                    await asyncio.wait_for(
-                        self._stop_event.wait(),
+                    done, _ = await asyncio.wait(
+                        {stop_task, force_task},
                         timeout=self._config.refresh_interval_seconds,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-                    # If we get here, stop was requested
+                finally:
+                    stop_task.cancel()
+                    force_task.cancel()
+
+                if self._stop_event.is_set():
                     break
-                except asyncio.TimeoutError:
-                    # Timeout expired, time for refresh
-                    pass
 
                 await self._report_with_retry()
         except asyncio.CancelledError:
@@ -196,6 +205,18 @@ class MetadataReporter:
             raise
         except Exception as exc:
             LOGGER.error("Unexpected error in report loop: %s", exc, exc_info=True)
+
+    def force_report_now(self) -> None:
+        """Trigger an immediate metadata report, breaking the periodic wait.
+
+        This is invoked by the metadata:system-refresh command handler to
+        support on-demand sensor discovery (e.g. mid-session hardware changes).
+        """
+        if self._report_task is None or self._report_task.done():
+            LOGGER.warning("MetadataReporter not running, ignoring force_report_now")
+            return
+        LOGGER.info("Forcing immediate metadata report")
+        self._force_event.set()
 
     async def _report_with_retry(self) -> None:
         """Report metadata with exponential backoff retry."""
@@ -308,6 +329,10 @@ class MetadataReporter:
             # Merge components
             if "components" in result:
                 metadata["components"].update(result["components"])
+
+            # Merge sensors inventory
+            if "sensors" in result:
+                metadata["sensors"] = result["sensors"]
 
         return metadata
 

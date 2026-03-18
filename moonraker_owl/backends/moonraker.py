@@ -166,6 +166,7 @@ class MoonrakerBackend(PrinterBackend):
         telemetry: TelemetryPublisher,
         *,
         job_registry: Optional["PrintJobRegistry"] = None,
+        metadata_reporter: Optional[Any] = None,
     ) -> CommandProcessor:
         """Create a CommandProcessor configured for Moonraker.
 
@@ -220,6 +221,7 @@ class MoonrakerBackend(PrinterBackend):
             camera=camera,
             image_preprocessor=image_preprocessor,
             job_registry=job_registry,
+            metadata_reporter=metadata_reporter,
         )
 
     # -------------------------------------------------------------------------

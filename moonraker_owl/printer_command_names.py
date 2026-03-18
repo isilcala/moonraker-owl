@@ -48,6 +48,9 @@ class PrinterCommandNames:
     SET_TELEMETRY_RATE = "control:set-telemetry-rate"
     """Set telemetry sensors reporting rate (watch window)."""
 
+    METADATA_SYSTEM_REFRESH = "metadata:system-refresh"
+    """Trigger immediate metadata report for on-demand sensor discovery."""
+
     # -------------------------------------------------------------------------
     # Heater Control Commands (user-triggered)
     # -------------------------------------------------------------------------
@@ -126,7 +129,7 @@ class PrinterCommandNames:
     HOT_PATH_COMMANDS: frozenset[str] = frozenset({
         PAUSE, RESUME, CANCEL, EMERGENCY_STOP, FIRMWARE_RESTART, START,
         HEATER_SET_TARGET, HEATER_TURN_OFF, FAN_SET_SPEED,
-        OBJECT_EXCLUDE, SET_TELEMETRY_RATE,
+        OBJECT_EXCLUDE, SET_TELEMETRY_RATE, METADATA_SYSTEM_REFRESH,
     })
     """Commands dispatched via Hot Path (ADR-0039): fire-and-forget MQTT."""
 

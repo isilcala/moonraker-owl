@@ -1299,6 +1299,11 @@ class TelemetryPublisher:
             max_custom_sensors=cfg.telemetry.max_custom_sensors,
             max_sensor_count=cfg.telemetry.max_sensor_count,
         )
+        # Propagate new filter to the SensorsSelector so collected telemetry
+        # reflects the updated allowlist immediately (not just on restart).
+        self._orchestrator.sensors_selector.update_sensor_filter(
+            self._sensor_filter
+        )
 
         self._refresh_channel_schedules()
         LOGGER.info(

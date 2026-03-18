@@ -543,3 +543,38 @@ def test_refresh_base_config_updates_idle_rate():
     assert publisher._sensors_force_publish_seconds == 600
     # In idle mode, sensors_interval should track the new idle interval
     assert publisher._sensors_interval == pytest.approx(2.0)
+
+
+def test_refresh_base_config_propagates_sensor_filter():
+    """refresh_base_config propagates new SensorFilter to SensorsSelector."""
+    from helpers import build_config
+    from test_telemetry import FakeMoonrakerClient, FakeMQTTClient
+    from moonraker_owl.telemetry import TelemetryPublisher
+    from moonraker_owl.telemetry.selectors import SensorFilter
+
+    config = build_config()
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    old_filter = publisher._orchestrator.sensors_selector._sensor_filter
+    assert old_filter._allowlist == frozenset()
+
+    # Simulate cloud config adding a sensor allowlist
+    config.telemetry.sensor_allowlist = ["temperature_host"]
+    config.telemetry.max_custom_sensors = 3
+    config.telemetry.max_sensor_count = 9
+
+    publisher.refresh_base_config()
+
+    new_filter = publisher._orchestrator.sensors_selector._sensor_filter
+    # The filter object must have been replaced, not the same stale instance
+    assert new_filter is not old_filter
+    # The new filter must reflect the updated allowlist
+    assert new_filter._allowlist == frozenset({"temperature_host"})
+    assert new_filter._max_custom_sensors == 3
+    assert new_filter._max_sensor_count == 9
+    # The publisher's own filter must be the same object as the selector's
+    assert publisher._sensor_filter is new_filter
+    # Contract hash must be reset so the next build forces emission
+    assert publisher._orchestrator.sensors_selector._last_contract_hash is None

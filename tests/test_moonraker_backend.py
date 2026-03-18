@@ -345,6 +345,7 @@ class TestFactoryMethods:
                 camera=None,
                 image_preprocessor=None,
                 job_registry=None,
+                metadata_reporter=None,
             )
 
     @pytest.mark.asyncio

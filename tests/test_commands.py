@@ -1726,3 +1726,79 @@ async def test_capture_image_returns_camera_unavailable_when_no_camera(config):
     await processor.stop()
 
 
+# =============================================================================
+# Metadata Commands (metadata:system-refresh)
+# =============================================================================
+
+
+class FakeMetadataReporter:
+    """Minimal stub for MetadataReporter."""
+
+    def __init__(self) -> None:
+        self.force_count = 0
+
+    def force_report_now(self) -> None:
+        self.force_count += 1
+
+
+@pytest.mark.asyncio
+async def test_metadata_system_refresh_triggers_report(config):
+    """metadata:system-refresh should call force_report_now and send completed ack."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    reporter = FakeMetadataReporter()
+    processor = CommandProcessor(config, moonraker, mqtt, metadata_reporter=reporter)
+
+    await processor.start()
+
+    message = {
+        "$id": "cmd-meta-1",
+        "payload": {
+            "command": "metadata:system-refresh",
+        },
+    }
+
+    await mqtt.emit(
+        "owl/printers/device-123/commands/metadata:system-refresh", message
+    )
+
+    assert reporter.force_count == 1
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    result = completed["payload"]["result"]
+    assert result["success"] is True
+    assert result["action"] == "metadata_refresh_triggered"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_metadata_system_refresh_fails_without_reporter(config):
+    """metadata:system-refresh without reporter should send failed ack."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)  # no metadata_reporter
+
+    await processor.start()
+
+    message = {
+        "$id": "cmd-meta-2",
+        "payload": {
+            "command": "metadata:system-refresh",
+        },
+    }
+
+    await mqtt.emit(
+        "owl/printers/device-123/commands/metadata:system-refresh", message
+    )
+
+    # Should get accepted + failed (or just failed) due to CommandProcessingError
+    last_ack = json.loads(mqtt.published[-1][1].decode("utf-8"))
+    assert last_ack["payload"]["status"] == "failed"
+    assert last_ack["payload"]["reason"]["code"] == "metadata_unavailable"
+
+    await processor.stop()
+
+

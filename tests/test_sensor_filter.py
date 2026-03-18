@@ -12,18 +12,19 @@ from moonraker_owl.telemetry.selectors import SensorFilter
 
 
 class TestSensorFilterDefaults:
-    """No allowlist, no denylist — everything passes."""
+    """No allowlist, no denylist — core sensors only."""
 
     def test_core_sensors_allowed(self):
         sf = SensorFilter()
         for name in CORE_SENSORS:
             assert sf.is_allowed(name), f"core sensor {name!r} should be allowed"
 
-    def test_arbitrary_sensor_allowed(self):
+    def test_non_core_sensors_blocked_by_default(self):
+        """Empty allowlist = core only; custom sensors require explicit opt-in."""
         sf = SensorFilter()
-        assert sf.is_allowed("temperature_sensor chamber")
-        assert sf.is_allowed("temperature_fan exhaust")
-        assert sf.is_allowed("heater_generic chamber_heater")
+        assert not sf.is_allowed("temperature_sensor chamber")
+        assert not sf.is_allowed("temperature_fan exhaust")
+        assert not sf.is_allowed("heater_generic chamber_heater")
 
 
 class TestSensorFilterAllowlistOnly:
@@ -44,6 +45,24 @@ class TestSensorFilterAllowlistOnly:
         assert not sf.is_allowed("temperature_fan exhaust")
 
 
+class TestSensorFilterAllowlistEnablesCustom:
+    """Allowlist opt-in makes non-core sensors pass."""
+
+    def test_custom_sensors_pass_when_allowlisted(self):
+        sf = SensorFilter(allowlist=["temperature_sensor chamber", "temperature_fan exhaust"])
+        assert sf.is_allowed("temperature_sensor chamber")
+        assert sf.is_allowed("temperature_fan exhaust")
+
+    def test_unlisted_custom_sensor_still_blocked(self):
+        sf = SensorFilter(allowlist=["temperature_sensor chamber"])
+        assert not sf.is_allowed("temperature_sensor mcu_temp")
+
+    def test_core_always_passes_with_allowlist(self):
+        sf = SensorFilter(allowlist=["temperature_sensor chamber"])
+        for name in CORE_SENSORS:
+            assert sf.is_allowed(name)
+
+
 class TestSensorFilterDenylistOnly:
     """Denylist excludes specific sensors."""
 
@@ -51,10 +70,14 @@ class TestSensorFilterDenylistOnly:
         sf = SensorFilter(denylist=["temperature_sensor mcu_temp"])
         assert not sf.is_allowed("temperature_sensor mcu_temp")
 
-    def test_non_denied_sensor_passes(self):
+    def test_non_denied_core_sensor_passes(self):
         sf = SensorFilter(denylist=["temperature_sensor mcu_temp"])
-        assert sf.is_allowed("temperature_sensor chamber")
         assert sf.is_allowed("extruder")
+
+    def test_non_denied_custom_still_blocked_without_allowlist(self):
+        """Denylist alone doesn't enable non-core sensors."""
+        sf = SensorFilter(denylist=["temperature_sensor mcu_temp"])
+        assert not sf.is_allowed("temperature_sensor chamber")
 
     def test_denylist_can_exclude_core_sensors(self):
         sf = SensorFilter(denylist=["fan"])
@@ -89,7 +112,7 @@ class TestSensorFilterEdgeCases:
     def test_empty_lists_equivalent_to_default(self):
         sf = SensorFilter(allowlist=[], denylist=[])
         assert sf.is_allowed("extruder")
-        assert sf.is_allowed("temperature_sensor random")
+        assert not sf.is_allowed("temperature_sensor random")
 
     def test_unknown_sensor_with_allowlist(self):
         sf = SensorFilter(allowlist=["temperature_sensor chamber"])
@@ -97,7 +120,7 @@ class TestSensorFilterEdgeCases:
 
     def test_unknown_sensor_without_allowlist(self):
         sf = SensorFilter()
-        assert sf.is_allowed("totally_unknown_device")
+        assert not sf.is_allowed("totally_unknown_device")
 
 
 def _make_sensor(channel: str, source_object: str | None = None) -> dict:

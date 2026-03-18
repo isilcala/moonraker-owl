@@ -182,7 +182,8 @@ class SensorFilter:
     1. Denylist always wins — if a sensor is denied, it is excluded.
     2. Core sensors (extruder*, heater_bed, fan) are included by default.
     3. If allowlist is non-empty, only core + allowed sensors pass.
-    4. If allowlist is empty, all sensors pass (minus denied ones).
+    4. If allowlist is empty, only core sensors pass (custom sensors require
+       explicit opt-in via the allowlist).
 
     Hard caps (applied to the final list):
     - ``max_custom_sensors`` limits how many non-core sensors are reported.
@@ -214,7 +215,8 @@ class SensorFilter:
             return True
         if self._use_allowlist:
             return sensor_name in self._allowlist
-        return True
+        # Empty allowlist = core sensors only (explicit opt-in required)
+        return False
 
     def apply_hard_cap(
         self, sensors: List[Dict[str, Any]]
@@ -266,6 +268,17 @@ class SensorsSelector:
         self._sensor_state: Dict[str, _SensorState] = {}
         self._last_contract_hash: Optional[str] = None
         self._sensor_filter = sensor_filter or SensorFilter()
+
+    def update_sensor_filter(self, sensor_filter: SensorFilter) -> None:
+        """Replace the active sensor filter and invalidate cached state.
+
+        Called when cloud config changes the allowlist/denylist so that
+        subsequent :meth:`build` calls use the new filter immediately.
+        """
+        self._sensor_filter = sensor_filter
+        # Force next build() to emit even if sensor values haven't changed,
+        # because the set of reported sensors may have changed.
+        self._last_contract_hash = None
 
     def reset(self) -> None:
         self._sensor_state.clear()
