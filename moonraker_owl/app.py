@@ -563,6 +563,11 @@ class MoonrakerOwlApp:
 
         if runtime_ready:
             await self._transition_state(AgentState.ACTIVE, detail="runtime ready")
+            # Re-report metadata now that Klipper is ready — the initial
+            # report may have fired before Klipper was reachable, leaving
+            # sensor inventory empty.
+            if self._metadata_reporter is not None:
+                self._metadata_reporter.force_report_now()
         else:
             await self._transition_state(
                 AgentState.DEGRADED, detail="runtime initialisation incomplete"

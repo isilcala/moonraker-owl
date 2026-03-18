@@ -578,3 +578,54 @@ def test_refresh_base_config_propagates_sensor_filter():
     assert publisher._sensor_filter is new_filter
     # Contract hash must be reset so the next build forces emission
     assert publisher._orchestrator.sensors_selector._last_contract_hash is None
+
+
+def test_refresh_base_config_resets_cadence_and_queues_republish():
+    """refresh_base_config resets cadence state so the backend gets fresh data.
+
+    When the backend was offline, the agent kept publishing to the broker
+    (QoS 0). Cadence state.last_publish stays recent and state.hash is
+    current, so dedup suppresses all sensor publishes when the backend
+    returns. The fix resets cadence and queues the last known payload for
+    immediate re-publish.
+    """
+    import time
+    from helpers import build_config
+    from test_telemetry import FakeMoonrakerClient, FakeMQTTClient
+    from moonraker_owl.telemetry import TelemetryPublisher
+
+    config = build_config(sensors_interval_seconds=30.0)
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    # Simulate cadence state from prior publishes (as if agent was running)
+    cc = publisher._cadence_controller
+    cc.reset_channel("sensors")
+    cc.reset_channel("status")
+    state_sensors = cc._state["sensors"]
+    state_status = cc._state["status"]
+    state_sensors.last_publish = time.monotonic()
+    state_sensors.hash = "old-hash"
+    state_status.last_publish = time.monotonic()
+    state_status.hash = "old-status-hash"
+
+    # Simulate having a last-known payload snapshot (normal at runtime)
+    publisher._last_payload_snapshot = {"status": {"dummy": True}}
+
+    publisher.refresh_base_config()
+
+    # Cadence state must have been reset (reset_channel replaces the object)
+    new_sensors = cc._state["sensors"]
+    new_status = cc._state["status"]
+    assert new_sensors.last_publish == 0.0
+    assert new_sensors.hash is None
+    assert new_status.last_publish == 0.0
+    assert new_status.hash is None
+
+    # Last payload snapshot must have been queued as pending
+    assert publisher._pending_payload is not None
+    assert "sensors" in publisher._pending_channels
+    assert publisher._pending_channels["sensors"].forced is True
+    assert "status" in publisher._pending_channels
+    assert publisher._pending_channels["status"].forced is True

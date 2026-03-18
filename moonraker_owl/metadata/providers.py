@@ -597,6 +597,11 @@ class SensorInventoryProvider(BaseProvider):
             async with asyncio.timeout(self._timeout):
                 async with session.get(url) as response:
                     if response.status != 200:
+                        LOGGER.warning(
+                            "Moonraker heaters query returned HTTP %d — "
+                            "Klipper may not be ready yet",
+                            response.status,
+                        )
                         return {}
                     data = await response.json()
                     return data.get("result", {}).get("status", {}).get("heaters", {})
@@ -611,6 +616,11 @@ class SensorInventoryProvider(BaseProvider):
             async with asyncio.timeout(self._timeout):
                 async with session.get(url) as response:
                     if response.status != 200:
+                        LOGGER.warning(
+                            "Moonraker objects query returned HTTP %d — "
+                            "Klipper may not be ready yet",
+                            response.status,
+                        )
                         return []
                     data = await response.json()
                     return data.get("result", {}).get("objects", [])

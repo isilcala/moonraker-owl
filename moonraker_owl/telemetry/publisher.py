@@ -1306,6 +1306,35 @@ class TelemetryPublisher:
         )
 
         self._refresh_channel_schedules()
+
+        # Reset cadence state so the next evaluation forces a fresh publish.
+        # This is critical when the backend returns after being offline:
+        # the agent published to the broker (QoS 0) while the backend was
+        # down, keeping state.last_publish recent and state.hash current.
+        # Without a reset, dedup suppresses all sensor publishes until
+        # force_publish_seconds (300 s) elapses — the UI shows "online"
+        # (status uses max_interval heartbeat) but "No telemetry data".
+        for channel in ("sensors", "status"):
+            self._cadence_controller.reset_channel(channel)
+
+        # Re-queue the last known payload so the run-loop publishes
+        # immediately instead of waiting for the next poll cycle (~30 s).
+        if self._last_payload_snapshot is not None:
+            snapshot = copy.deepcopy(self._last_payload_snapshot)
+            if self._pending_payload is None:
+                self._pending_payload = snapshot
+            else:
+                _merge_payload_dicts(self._pending_payload, snapshot)
+            for ch in ("sensors", "status"):
+                entry = self._pending_channels.get(ch)
+                if entry is None:
+                    self._pending_channels[ch] = _PendingChannel(
+                        forced=True, respect_cadence=False,
+                    )
+                else:
+                    entry.merge(forced=True, respect_cadence=False)
+            self._event.set()
+
         LOGGER.info(
             "Base config refreshed: idle_interval=%.1fs",
             new_idle_interval,
