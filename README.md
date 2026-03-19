@@ -81,8 +81,10 @@ Add the following to your `moonraker.conf` for automatic updates:
 [update_manager moonraker-owl]
 type: git_repo
 path: ~/moonraker-owl
-origin: https://gitee.com/project-owl/agent.git
+origin: https://gitee.com/isilcala/moonraker-owl.git
 primary_branch: main
+virtualenv: ~/moonraker-owl/.venv
+requirements: requirements.txt
 install_script: scripts/install.sh
 is_system_service: True
 managed_services: moonraker-owl

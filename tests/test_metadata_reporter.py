@@ -846,7 +846,7 @@ class TestForceReportNow:
 
     @pytest.mark.asyncio
     async def test_force_triggers_immediate_report(self, reporter_config):
-        """force_report_now should break the periodic wait and trigger a report."""
+        """force_report_now should break the initial wait and trigger a report."""
         reporter_config.refresh_interval_seconds = 3600  # Long interval
         reporter = MetadataReporter(
             config=reporter_config,
@@ -862,11 +862,16 @@ class TestForceReportNow:
         reporter._report_once = counting_report
         await reporter.start()
 
-        # Wait for initial report
+        # Reporter now waits for first force signal — no report yet
         await asyncio.sleep(0.1)
+        assert report_count == 0
+
+        # First force triggers the initial report
+        reporter.force_report_now()
+        await asyncio.sleep(0.2)
         assert report_count == 1
 
-        # Force a second report
+        # Second force triggers another report
         reporter.force_report_now()
         await asyncio.sleep(0.2)
         assert report_count == 2

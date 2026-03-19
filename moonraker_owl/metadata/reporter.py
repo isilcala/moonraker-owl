@@ -103,9 +103,10 @@ class MetadataReporter:
     async def start(self) -> None:
         """Start the metadata reporter.
 
-        This method starts a background task that:
-        1. Immediately reports metadata
-        2. Schedules periodic refresh at configured interval
+        This method starts a background task that waits for an explicit
+        ``force_report_now()`` trigger before the first report so that
+        Moonraker is confirmed reachable.  Subsequent reports follow the
+        configured periodic refresh interval.
 
         This method is non-blocking and returns immediately.
         """
@@ -175,9 +176,34 @@ class MetadataReporter:
         self._providers.clear()
 
     async def _report_loop(self) -> None:
-        """Background loop for periodic metadata reporting."""
+        """Background loop for periodic metadata reporting.
+
+        The loop does NOT fire an immediate initial report.  Instead it
+        waits for the first ``force_report_now()`` signal which is
+        emitted by the application once Moonraker connectivity has been
+        verified.  This avoids uploading empty metadata if providers
+        run before the printer backend is ready.
+        """
         try:
-            # Initial report
+            # Wait for first trigger before initial report — ensures
+            # Moonraker is reachable before we collect metadata.
+            LOGGER.info("Waiting for runtime-ready signal before first metadata report")
+            self._force_event.clear()
+            stop_task = asyncio.create_task(self._stop_event.wait())
+            force_task = asyncio.create_task(self._force_event.wait())
+            try:
+                await asyncio.wait(
+                    {stop_task, force_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                stop_task.cancel()
+                force_task.cancel()
+
+            if self._stop_event.is_set():
+                return
+
+            LOGGER.info("Runtime-ready signal received, collecting initial metadata")
             await self._report_with_retry()
 
             # Periodic refresh
@@ -305,8 +331,12 @@ class MetadataReporter:
             "components": {},
         }
 
+        succeeded = 0
+        failed = 0
+
         for provider, result in zip(self._providers, results):
             if isinstance(result, Exception):
+                failed += 1
                 LOGGER.warning(
                     "Provider '%s' failed: %s",
                     provider.name,
@@ -315,12 +345,29 @@ class MetadataReporter:
                 continue
 
             if not isinstance(result, dict):
+                failed += 1
                 LOGGER.warning(
                     "Provider '%s' returned invalid type: %s",
                     provider.name,
                     type(result).__name__,
                 )
                 continue
+
+            succeeded += 1
+
+            # Log per-provider results at INFO so ARM diagnostics are visible
+            comp_keys = list(result.get("components", {}).keys())
+            sensor_count = len(
+                result.get("sensors", {}).get("available", [])
+            )
+            has_system = "system" in result
+            LOGGER.info(
+                "Provider '%s' OK: system=%s, components=%s, sensors=%d",
+                provider.name,
+                has_system,
+                comp_keys or "(none)",
+                sensor_count,
+            )
 
             # Merge system info
             if "system" in result:
@@ -333,6 +380,15 @@ class MetadataReporter:
             # Merge sensors inventory
             if "sensors" in result:
                 metadata["sensors"] = result["sensors"]
+
+        LOGGER.info(
+            "Metadata collection complete: %d/%d providers succeeded, "
+            "components=%s, sensors=%d",
+            succeeded,
+            succeeded + failed,
+            list(metadata["components"].keys()) or "(empty)",
+            len(metadata.get("sensors", {}).get("available", [])),
+        )
 
         return metadata
 

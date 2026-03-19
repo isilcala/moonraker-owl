@@ -563,10 +563,10 @@ class MoonrakerOwlApp:
 
         if runtime_ready:
             await self._transition_state(AgentState.ACTIVE, detail="runtime ready")
-            # Re-report metadata now that Klipper is ready — the initial
-            # report may have fired before Klipper was reachable, leaving
-            # sensor inventory empty.
+            # Signal MetadataReporter that Moonraker is confirmed reachable.
+            # The reporter waits for this trigger before its first report.
             if self._metadata_reporter is not None:
+                LOGGER.info("Triggering metadata report (runtime ready)")
                 self._metadata_reporter.force_report_now()
         else:
             await self._transition_state(
@@ -747,6 +747,10 @@ class MoonrakerOwlApp:
                     AgentState.ACTIVE,
                     detail="moonraker recovered",
                 )
+                # Re-report metadata — providers may have been unreachable.
+                if self._metadata_reporter is not None:
+                    LOGGER.info("Triggering metadata report (moonraker recovered)")
+                    self._metadata_reporter.force_report_now()
             else:
                 await self._transition_state(
                     AgentState.DEGRADED,
@@ -1129,6 +1133,10 @@ class MoonrakerOwlApp:
                 AgentState.ACTIVE,
                 detail="runtime recovered",
             )
+            # Re-report metadata after MQTT reconnection.
+            if self._metadata_reporter is not None:
+                LOGGER.info("Triggering metadata report (connection recovered)")
+                self._metadata_reporter.force_report_now()
         else:
             await self._transition_state(
                 AgentState.DEGRADED,

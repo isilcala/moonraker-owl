@@ -143,8 +143,10 @@ install_package() {
     # Upgrade pip first
     "${VENV_DIR}/bin/pip" install --upgrade pip -i "${PIP_MIRROR}" --quiet
 
-    # Install the package
-    "${VENV_DIR}/bin/pip" install "${PROJECT_DIR}" -i "${PIP_MIRROR}"
+    # Install the package in editable mode so that source changes from
+    # Moonraker's git-based update_manager take effect immediately
+    # without requiring a separate `pip install` step.
+    "${VENV_DIR}/bin/pip" install -e "${PROJECT_DIR}" -i "${PIP_MIRROR}"
 
     print_step "moonraker-owl installed"
 }
