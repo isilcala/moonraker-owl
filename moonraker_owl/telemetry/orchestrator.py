@@ -118,6 +118,23 @@ class TelemetryOrchestrator:
         # Callback for print state changes (used by CommandProcessor)
         self._on_print_state_changed: Optional[Callable[[str], None]] = None
 
+        # Callback for timelapse ready (used by TimelapseUploader)
+        self._on_timelapse_ready: Optional[Callable[[Dict[str, Any]], None]] = None
+
+    def set_timelapse_ready_callback(
+        self, callback: Optional[Callable[[Dict[str, Any]], None]]
+    ) -> None:
+        """Set callback for timelapse ready events.
+
+        This callback is invoked when a timelapse render completes (via
+        notification or polling fallback), passing the event data dict.
+        Used by TelemetryPublisher to trigger Agent-Initiated HTTP upload.
+
+        Args:
+            callback: Function accepting the timelapse event data dict.
+        """
+        self._on_timelapse_ready = callback
+
     def set_print_state_callback(
         self, callback: Optional[Callable[[str], None]]
     ) -> None:
@@ -923,13 +940,12 @@ class TelemetryOrchestrator:
             self._last_completed_print_end_time,
         )
 
-        event = Event(
-            event_name=EventName.TIMELAPSE_READY,
-            message=f"Timelapse ready: {filename or 'unknown'}",
-            session_id=session.session_id,
-            data=data,
-        )
-        self.events.record(event)
+        # Trigger Agent-Initiated upload via callback
+        if self._on_timelapse_ready is not None:
+            try:
+                self._on_timelapse_ready(data)
+            except Exception:
+                LOGGER.exception("Timelapse ready callback failed")
 
     def should_poll_timelapse(self) -> bool:
         """Check if timelapse polling is requested.
@@ -1059,13 +1075,12 @@ class TelemetryOrchestrator:
             self._last_completed_print_end_time,
         )
 
-        event = Event(
-            event_name=EventName.TIMELAPSE_READY,
-            message=f"Timelapse ready: {filename}",
-            session_id=session.session_id,
-            data=data,
-        )
-        self.events.record(event)
+        # Trigger Agent-Initiated upload via callback
+        if self._on_timelapse_ready is not None:
+            try:
+                self._on_timelapse_ready(data)
+            except Exception:
+                LOGGER.exception("Timelapse ready callback failed")
 
     def _build_alert_events_payload(
         self, events: list[Event]

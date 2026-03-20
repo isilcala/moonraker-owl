@@ -544,9 +544,6 @@ class CommandProcessor(
         if message.command == PrinterCommandNames.CAPTURE_IMAGE:
             return await self._execute_capture_image(message)
 
-        if message.command == PrinterCommandNames.UPLOAD_TIMELAPSE:
-            return await self._execute_upload_timelapse(message)
-
         if message.command == PrinterCommandNames.DOWNLOAD_GCODE:
             return await self._execute_download_gcode(message)
 

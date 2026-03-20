@@ -274,6 +274,53 @@ class TelemetryPublisher:
         self._timelapse_poll_task: Optional[asyncio.Task[None]] = None
         self._timelapse_poll_interval: float = self._cadence.timelapse_poll_interval_seconds
 
+        # Agent-Initiated timelapse uploader (replaces cloud-initiated command flow)
+        self._timelapse_uploader: Optional[Any] = None
+
+    def set_timelapse_uploader(self, uploader: Any) -> None:
+        """Set the TimelapseUploader for Agent-Initiated HTTP upload.
+
+        When set, the orchestrator's timelapse-ready callback will invoke
+        the uploader's schedule_upload() method instead of only emitting
+        the TIMELAPSE_READY MQTT event.
+
+        Args:
+            uploader: TimelapseUploader instance (or None to disable).
+        """
+        self._timelapse_uploader = uploader
+        if uploader is not None:
+            self._orchestrator.set_timelapse_ready_callback(self._on_timelapse_ready)
+        else:
+            self._orchestrator.set_timelapse_ready_callback(None)
+
+    def _on_timelapse_ready(self, data: Dict[str, Any]) -> None:
+        """Callback invoked by orchestrator when timelapse is ready.
+
+        Routes the timelapse event data to the TimelapseUploader for
+        Agent-Initiated HTTP upload. The TIMELAPSE_READY MQTT event is
+        still emitted separately for cloud visibility.
+        """
+        uploader = self._timelapse_uploader
+        if uploader is None:
+            return
+
+        filename = data.get("filename")
+        if not filename:
+            LOGGER.warning("Timelapse ready callback missing filename")
+            return
+
+        preview_image = data.get("previewImage")
+        has_preview = bool(preview_image)
+
+        uploader.schedule_upload(
+            file_name=filename,
+            moonraker_job_id=data.get("moonrakerJobId"),
+            print_start_time=data.get("printStartTime"),
+            print_end_time=data.get("printEndTime"),
+            has_preview=has_preview,
+            preview_filename=preview_image,
+        )
+
     async def start(self, *, preserve_print_state: bool = False) -> None:
         """Start the telemetry publisher.
         

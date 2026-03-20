@@ -78,9 +78,6 @@ class PrinterCommandNames:
     CAPTURE_IMAGE = "task:capture-image"
     """Capture and upload camera frame to presigned URL."""
 
-    UPLOAD_TIMELAPSE = "task:upload-timelapse"
-    """Upload timelapse video and preview to presigned URLs."""
-
     DOWNLOAD_GCODE = "task:download-gcode"
     """Download GCode file from cloud storage and upload to Moonraker."""
 
@@ -134,7 +131,7 @@ class PrinterCommandNames:
     """Commands dispatched via Hot Path (ADR-0039): fire-and-forget MQTT."""
 
     COLD_PATH_COMMANDS: frozenset[str] = frozenset({
-        UPLOAD_THUMBNAIL, CAPTURE_IMAGE, UPLOAD_TIMELAPSE,
+        UPLOAD_THUMBNAIL, CAPTURE_IMAGE,
         DOWNLOAD_GCODE,
     })
 
