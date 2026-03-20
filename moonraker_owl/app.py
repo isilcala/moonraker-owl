@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Optional
 from . import constants
 from .adapters import MQTTClient, MQTTConnectionError
 from .adapters.s3_upload import S3UploadClient
+from .adapters.thumbnail_uploader import ThumbnailUploader
 from .adapters.timelapse_uploader import TimelapseUploader
 from .backends import MoonrakerBackend
 from .cloud_config import CloudConfigManager
@@ -163,6 +164,8 @@ class MoonrakerOwlApp:
         self._cloud_config_manager: Optional[CloudConfigManager] = None
         # Agent-Initiated timelapse uploader (replaces task:upload-timelapse)
         self._timelapse_uploader: Optional["TimelapseUploader"] = None
+        # Agent-Initiated thumbnail uploader (replaces task:upload-thumbnail)
+        self._thumbnail_uploader: Optional["ThumbnailUploader"] = None
 
     @property
     def _moonraker_client(self) -> Any:
@@ -404,6 +407,13 @@ class MoonrakerOwlApp:
             except Exception:
                 pass
             self._timelapse_uploader = None
+
+        if self._thumbnail_uploader is not None:
+            try:
+                await self._thumbnail_uploader.stop()
+            except Exception:
+                pass
+            self._thumbnail_uploader = None
 
         # 5. Release the health-server port so the new attempt can bind it.
         await self._stop_health_server()
@@ -911,6 +921,22 @@ class MoonrakerOwlApp:
                 telemetry.set_timelapse_uploader(self._timelapse_uploader)
                 LOGGER.info("TimelapseUploader initialized (Agent-Initiated upload)")
 
+        # Create Agent-Initiated ThumbnailUploader (replaces task:upload-thumbnail)
+        # Must be set BEFORE telemetry.start() so printStarted enrichment can
+        # trigger thumbnail uploads immediately.
+        if self._thumbnail_uploader is None and self._device_id and self._token_manager:
+            moonraker_client = self._moonraker_client
+            if moonraker_client is not None:
+                self._thumbnail_uploader = ThumbnailUploader(
+                    device_id=self._device_id,
+                    base_url=self._config.cloud.base_url,
+                    token_provider=self._token_manager.get_token,
+                    s3_client=S3UploadClient(),
+                    moonraker_fetcher=moonraker_client.fetch_thumbnail,
+                )
+                telemetry.set_thumbnail_uploader(self._thumbnail_uploader)
+                LOGGER.info("ThumbnailUploader initialized (Agent-Initiated upload)")
+
         try:
             await telemetry.start(preserve_print_state=preserve_print_state)
         except TelemetryConfigurationError as exc:
@@ -1039,6 +1065,15 @@ class MoonrakerOwlApp:
                 pass
             if not preserve_instances:
                 self._timelapse_uploader = None
+
+        # Stop thumbnail uploader before telemetry publisher
+        if self._thumbnail_uploader is not None:
+            try:
+                await self._thumbnail_uploader.stop()
+            except Exception:  # pragma: no cover - defensive cleanup
+                pass
+            if not preserve_instances:
+                self._thumbnail_uploader = None
 
         if self._telemetry_publisher is not None:
             if keep_telemetry:

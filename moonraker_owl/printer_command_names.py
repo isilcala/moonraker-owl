@@ -72,9 +72,6 @@ class PrinterCommandNames:
     # System Task Commands (cloud-triggered, requires result)
     # -------------------------------------------------------------------------
 
-    UPLOAD_THUMBNAIL = "task:upload-thumbnail"
-    """Upload print job thumbnail to presigned URL."""
-
     CAPTURE_IMAGE = "task:capture-image"
     """Capture and upload camera frame to presigned URL."""
 
@@ -131,7 +128,7 @@ class PrinterCommandNames:
     """Commands dispatched via Hot Path (ADR-0039): fire-and-forget MQTT."""
 
     COLD_PATH_COMMANDS: frozenset[str] = frozenset({
-        UPLOAD_THUMBNAIL, CAPTURE_IMAGE,
+        CAPTURE_IMAGE,
         DOWNLOAD_GCODE,
     })
 

@@ -1675,9 +1675,8 @@ def test_hot_cold_path_classifiers() -> None:
 
     assert PrinterCommandNames.is_hot_path("print:pause")
     assert PrinterCommandNames.is_hot_path("heater:set-target")
-    assert not PrinterCommandNames.is_hot_path("task:upload-thumbnail")
+    assert not PrinterCommandNames.is_hot_path("task:capture-image")
 
-    assert PrinterCommandNames.is_cold_path("task:upload-thumbnail")
     assert PrinterCommandNames.is_cold_path("task:capture-image")
     assert not PrinterCommandNames.is_cold_path("print:pause")
 

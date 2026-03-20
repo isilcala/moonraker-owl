@@ -179,7 +179,7 @@ class MoonrakerBackend(PrinterBackend):
         Returns:
             CommandProcessor instance.
         """
-        # Create S3 upload client for task:upload-thumbnail command (ADR-0013 Phase 2)
+        # Create S3 upload client for agent-initiated uploads (thumbnail, timelapse, capture)
         s3_upload = S3UploadClient()
 
         # Create camera client for task:capture-image command (ADR-0021)

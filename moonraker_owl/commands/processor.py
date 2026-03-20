@@ -509,7 +509,6 @@ class CommandProcessor(
         - print:firmware-restart: Restart Klipper firmware
         - print:start: Start printing a specified GCode file
         - query:file-list: Query GCode file list (Cold Path data retrieval)
-        - task:upload-thumbnail: Upload thumbnail to presigned URL
         - task:capture-image: Capture and upload camera frame
         - object:exclude: Exclude an object from the current print (ADR-0016)
         """
@@ -538,9 +537,6 @@ class CommandProcessor(
             return await self._execute_object_exclude(message)
 
         # System task commands
-        if message.command == PrinterCommandNames.UPLOAD_THUMBNAIL:
-            return await self._execute_upload_thumbnail(message)
-
         if message.command == PrinterCommandNames.CAPTURE_IMAGE:
             return await self._execute_capture_image(message)
 

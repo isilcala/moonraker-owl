@@ -258,9 +258,8 @@ class TelemetryPublisher:
         # Timeout for fetching GCode metadata when enriching printStarted events
         self._thumbnail_fetch_timeout_ms = self._cadence.thumbnail_fetch_timeout_ms
 
-        # Current print job thumbnail info for task:upload-thumbnail command
-        # Stored when printStarted event is enriched, used by CommandProcessor
-        self._current_thumbnail_info: Optional[Dict[str, Any]] = None
+        # Agent-Initiated thumbnail uploader (replaces cloud-initiated command flow)
+        self._thumbnail_uploader: Optional[Any] = None
 
         # Emit an initial cadence log to capture baseline configuration.
         self.apply_sensors_rate(
@@ -276,6 +275,15 @@ class TelemetryPublisher:
 
         # Agent-Initiated timelapse uploader (replaces cloud-initiated command flow)
         self._timelapse_uploader: Optional[Any] = None
+
+    def set_thumbnail_uploader(self, uploader: Any) -> None:
+        """Set the ThumbnailUploader for Agent-Initiated HTTP upload.
+
+        When set, printStarted thumbnail detection triggers the uploader's
+        schedule_upload() method instead of only storing info for the
+        cloud-initiated command flow.
+        """
+        self._thumbnail_uploader = uploader
 
     def set_timelapse_uploader(self, uploader: Any) -> None:
         """Set the TimelapseUploader for Agent-Initiated HTTP upload.
@@ -1041,16 +1049,12 @@ class TelemetryPublisher:
         1. Fetches moonrakerJobId from History API (critical for job correlation)
         2. Fetches GCode metadata to find the thumbnail path
         3. Sets file metadata (gcode_start_byte, gcode_end_byte) for accurate progress calculation
-        4. Sets hasThumbnail=true if thumbnail is available (ADR-0013 Phase 2)
-        5. Stores thumbnail path info for later upload via task:upload-thumbnail command
+        4. Sets hasThumbnail=true if thumbnail is available
+        5. Triggers Agent-Initiated thumbnail upload if uploader is configured
 
         The moonrakerJobId fetch is critical because WebSocket notifications
         (notify_history_changed) may arrive after print state changes.
         We follow Obico's pattern of querying History API for reliable job correlation.
-
-        Note: Thumbnail is NOT fetched or embedded here. The server will send a 
-        task:upload-thumbnail command with a presigned URL, and the agent will
-        then fetch and upload the thumbnail directly to S3.
 
         Args:
             events_payload: The events channel payload containing an "items" list.
@@ -1075,9 +1079,6 @@ class TelemetryPublisher:
             filename = data.get("filename")
             if not filename:
                 continue
-
-            # Clear any previous thumbnail info
-            self._current_thumbnail_info = None
 
             # === CRITICAL: Fetch moonrakerJobId from History API ===
             # This is more reliable than waiting for notify_history_changed
@@ -1145,16 +1146,18 @@ class TelemetryPublisher:
                     )
                     continue
 
-                # Store thumbnail info for later upload via task:upload-thumbnail
-                self._current_thumbnail_info = {
-                    "relative_path": thumb_path,
-                    "gcode_filename": filename,
-                    "width": best_thumb.get("width"),
-                    "height": best_thumb.get("height"),
-                }
-
-                # Set hasThumbnail flag instead of embedding base64 (ADR-0013)
+                # Set hasThumbnail flag in event payload
                 data["hasThumbnail"] = True
+
+                # Trigger Agent-Initiated thumbnail upload if uploader is configured
+                uploader = self._thumbnail_uploader
+                if uploader is not None:
+                    moonraker_job_id = data.get("moonrakerJobId")
+                    uploader.schedule_upload(
+                        relative_path=thumb_path,
+                        gcode_filename=filename,
+                        moonraker_job_id=moonraker_job_id,
+                    )
 
                 LOGGER.info(
                     "Found thumbnail for printStarted event: filename=%s, size=%dx%d, path=%s",
@@ -1289,15 +1292,6 @@ class TelemetryPublisher:
                 "Error fetching job timing from history: %s",
                 exc,
             )
-
-    def get_current_thumbnail_info(self) -> Optional[Dict[str, Any]]:
-        """Get the current print job's thumbnail info for task:upload-thumbnail.
-
-        Returns:
-            Dictionary with thumbnail info (relative_path, gcode_filename, etc.)
-            or None if no thumbnail is available.
-        """
-        return self._current_thumbnail_info
 
     def _maybe_expire_watch_window(self, *, now: Optional[datetime] = None) -> None:
         if self._current_mode == "idle":
@@ -1614,16 +1608,6 @@ class TelemetryPublisher:
                      or None to remove the callback.
         """
         self._orchestrator.set_print_state_callback(callback)
-
-    def set_thumbnail_url(self, url: Optional[str]) -> None:
-        """Set the thumbnail URL for the current print job.
-
-        The URL will be included in subsequent status telemetry payloads.
-
-        Args:
-            url: The CDN URL for the thumbnail, or None to clear.
-        """
-        self._orchestrator.set_thumbnail_url(url)
 
     def _wrap_envelope(
         self,
