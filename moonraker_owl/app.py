@@ -1057,23 +1057,23 @@ class MoonrakerOwlApp:
                 self._command_processor = None
         self._commands_ready = False
 
-        # Stop timelapse uploader before telemetry publisher
+        # Stop and always discard uploaders — they are stateless fire-and-forget
+        # workers with no meaningful state to preserve.  After .stop() sets
+        # _stopped=True, schedule_upload() silently returns.  Nulling the
+        # reference lets _start_runtime_components recreate a fresh instance.
         if self._timelapse_uploader is not None:
             try:
                 await self._timelapse_uploader.stop()
             except Exception:  # pragma: no cover - defensive cleanup
                 pass
-            if not preserve_instances:
-                self._timelapse_uploader = None
+            self._timelapse_uploader = None
 
-        # Stop thumbnail uploader before telemetry publisher
         if self._thumbnail_uploader is not None:
             try:
                 await self._thumbnail_uploader.stop()
             except Exception:  # pragma: no cover - defensive cleanup
                 pass
-            if not preserve_instances:
-                self._thumbnail_uploader = None
+            self._thumbnail_uploader = None
 
         if self._telemetry_publisher is not None:
             if keep_telemetry:

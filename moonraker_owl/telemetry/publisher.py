@@ -310,6 +310,7 @@ class TelemetryPublisher:
         """
         uploader = self._timelapse_uploader
         if uploader is None:
+            LOGGER.warning("TimelapseUploader not configured — skipping upload")
             return
 
         filename = data.get("filename")
@@ -1157,6 +1158,11 @@ class TelemetryPublisher:
                         relative_path=thumb_path,
                         gcode_filename=filename,
                         moonraker_job_id=moonraker_job_id,
+                    )
+                else:
+                    LOGGER.warning(
+                        "ThumbnailUploader not configured — skipping upload for %s",
+                        filename,
                     )
 
                 LOGGER.info(
