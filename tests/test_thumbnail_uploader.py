@@ -82,6 +82,9 @@ class FakeS3Client:
         self._success = success
         self.uploads: List[Dict[str, Any]] = []
 
+    async def close(self) -> None:
+        pass
+
     async def upload(
         self,
         presigned_url: str,
@@ -368,6 +371,9 @@ async def test_upload_s3_failure_retries():
     s3_clients = [s3_fail, s3_succeed]
 
     class SwitchingS3:
+        async def close(self):
+            pass
+
         async def upload(self, **kwargs):
             idx = min(attempt_count[0], len(s3_clients) - 1)
             attempt_count[0] += 1

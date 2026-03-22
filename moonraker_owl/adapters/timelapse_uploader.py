@@ -112,6 +112,8 @@ class TimelapseUploader:
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
+        if self._s3_client is not None:
+            await self._s3_client.close()
 
     def schedule_upload(
         self,

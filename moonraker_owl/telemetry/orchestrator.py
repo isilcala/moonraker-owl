@@ -747,6 +747,24 @@ class TelemetryOrchestrator:
         print_stats = self.store.get("print_stats")
         print_data = print_stats.data if print_stats else {}
 
+        # Diagnostic: log print_stats snapshot for terminal events
+        terminal_events = {
+            EventName.PRINT_COMPLETED,
+            EventName.PRINT_FAILED,
+            EventName.PRINT_CANCELLED,
+        }
+        if event_name in terminal_events:
+            filament_raw = print_data.get("filament_used")
+            LOGGER.info(
+                "Building %s event: filament_used=%s, print_stats_keys=%s, "
+                "elapsed=%s, session_id=%s",
+                event_name.value,
+                filament_raw,
+                list(print_data.keys()) if print_data else "[]",
+                session.elapsed_seconds,
+                session.session_id,
+            )
+
         base_data: Dict[str, Any] = {}
         if self._last_filename:
             base_data["filename"] = self._last_filename
