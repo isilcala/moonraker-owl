@@ -100,6 +100,13 @@ class PrinterCommandNames:
     """Exclude an object from the current print."""
 
     # -------------------------------------------------------------------------
+    # GCode Macro Commands (user-triggered)
+    # -------------------------------------------------------------------------
+
+    GCODE_MACRO = "gcode:macro"
+    """Execute a user-defined GCode macro by name."""
+
+    # -------------------------------------------------------------------------
     # Command Sets
     # -------------------------------------------------------------------------
 
@@ -124,6 +131,7 @@ class PrinterCommandNames:
         PAUSE, RESUME, CANCEL, EMERGENCY_STOP, FIRMWARE_RESTART, START,
         HEATER_SET_TARGET, HEATER_TURN_OFF, FAN_SET_SPEED,
         OBJECT_EXCLUDE, SET_TELEMETRY_RATE, METADATA_SYSTEM_REFRESH,
+        GCODE_MACRO,
     })
     """Commands dispatched via Hot Path (ADR-0039): fire-and-forget MQTT."""
 

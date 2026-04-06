@@ -18,6 +18,7 @@ import aiohttp
 from .providers import (
     BaseProvider,
     CameraProvider,
+    GCodeMacroProvider,
     KlipperProvider,
     MoonrakerProvider,
     SensorInventoryProvider,
@@ -158,6 +159,7 @@ class MetadataReporter:
             KlipperProvider(moonraker_url),
             CameraProvider(moonraker_url),
             SensorInventoryProvider(moonraker_url),
+            GCodeMacroProvider(moonraker_url),
         ]
 
     async def _cleanup_providers(self) -> None:
@@ -360,13 +362,17 @@ class MetadataReporter:
             sensor_count = len(
                 result.get("sensors", {}).get("available", [])
             )
+            macro_count = len(
+                result.get("macros", {}).get("available", [])
+            )
             has_system = "system" in result
             LOGGER.info(
-                "Provider '%s' OK: system=%s, components=%s, sensors=%d",
+                "Provider '%s' OK: system=%s, components=%s, sensors=%d, macros=%d",
                 provider.name,
                 has_system,
                 comp_keys or "(none)",
                 sensor_count,
+                macro_count,
             )
 
             # Merge system info
@@ -381,13 +387,18 @@ class MetadataReporter:
             if "sensors" in result:
                 metadata["sensors"] = result["sensors"]
 
+            # Merge macros inventory
+            if "macros" in result:
+                metadata["macros"] = result["macros"]
+
         LOGGER.info(
             "Metadata collection complete: %d/%d providers succeeded, "
-            "components=%s, sensors=%d",
+            "components=%s, sensors=%d, macros=%d",
             succeeded,
             succeeded + failed,
             list(metadata["components"].keys()) or "(empty)",
             len(metadata.get("sensors", {}).get("available", [])),
+            len(metadata.get("macros", {}).get("available", [])),
         )
 
         return metadata

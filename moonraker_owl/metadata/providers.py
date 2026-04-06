@@ -627,3 +627,173 @@ class SensorInventoryProvider(BaseProvider):
         except Exception as exc:
             LOGGER.warning("Failed to query objects for sensor inventory: %s", exc)
             return []
+
+
+class GCodeMacroProvider(BaseProvider):
+    """Discovers user-defined GCode macros from Klipper.
+
+    Queries Moonraker for ``gcode_macro *`` printer objects and the
+    ``/printer/gcode/help`` endpoint to collect macro names with their
+    help-text descriptions.  Internal macros (prefixed with ``_``) and
+    macros that use ``rename_existing`` (wrappers for built-in commands)
+    are excluded.
+
+    The cloud consumes this data to populate the macro configuration UI,
+    allowing users to select which macros appear on the dashboard panel.
+    """
+
+    # Macros commonly known to be destructive / safety-critical.
+    _DANGEROUS_MACROS: frozenset[str] = frozenset({
+        "M112",
+        "FIRMWARE_RESTART",
+        "RESTART",
+        "TURN_OFF_HEATERS",
+        "EMERGENCY_STOP",
+    })
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        session: Optional[aiohttp.ClientSession] = None,
+        timeout: float = 5.0,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._session = session
+        self._owns_session = session is None
+        self._timeout = timeout
+
+    @property
+    def name(self) -> str:
+        return "macros"
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is None:
+            timeout = aiohttp.ClientTimeout(total=self._timeout)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._owns_session = True
+        return self._session
+
+    async def close(self) -> None:
+        if self._owns_session and self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def detect(self) -> Dict[str, Any]:
+        """Detect all user-defined GCode macros.
+
+        Returns:
+            Dictionary with 'macros' key containing:
+            - available: list of macro descriptors with name, description,
+              dangerous flag.
+        """
+        session = await self._ensure_session()
+
+        objects, gcode_help = await asyncio.gather(
+            self._fetch_objects(session),
+            self._fetch_gcode_help(session),
+        )
+
+        # Collect macro names from printer objects (gcode_macro <NAME>)
+        macro_names: List[str] = []
+        for obj_name in objects:
+            if not obj_name.startswith("gcode_macro "):
+                continue
+            macro_name = obj_name[len("gcode_macro "):]
+            # Skip internal macros (prefixed with _)
+            if macro_name.startswith("_"):
+                continue
+            macro_names.append(macro_name)
+
+        # Filter out rename_existing wrappers by querying macro configs
+        wrapper_names = await self._detect_wrappers(session, macro_names)
+
+        macros: List[Dict[str, Any]] = []
+        for name in sorted(macro_names):
+            if name in wrapper_names:
+                continue
+            macros.append({
+                "name": name,
+                "description": gcode_help.get(name, ""),
+                "dangerous": name.upper() in self._DANGEROUS_MACROS,
+            })
+
+        return {"macros": {"available": macros}}
+
+    async def _fetch_objects(self, session: aiohttp.ClientSession) -> List[str]:
+        """Query Moonraker printer objects list."""
+        url = f"{self._base_url}/printer/objects/list"
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        LOGGER.warning(
+                            "Moonraker objects query returned HTTP %d",
+                            response.status,
+                        )
+                        return []
+                    data = await response.json()
+                    return data.get("result", {}).get("objects", [])
+        except Exception as exc:
+            LOGGER.warning("Failed to query objects for macro discovery: %s", exc)
+            return []
+
+    async def _fetch_gcode_help(
+        self, session: aiohttp.ClientSession
+    ) -> Dict[str, str]:
+        """Query /printer/gcode/help for macro descriptions.
+
+        Returns a mapping of uppercase macro name → help text.
+        """
+        url = f"{self._base_url}/printer/gcode/help"
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        LOGGER.warning(
+                            "Moonraker gcode/help returned HTTP %d",
+                            response.status,
+                        )
+                        return {}
+                    data = await response.json()
+                    return data.get("result", {})
+        except Exception as exc:
+            LOGGER.warning("Failed to query gcode/help for macros: %s", exc)
+            return {}
+
+    async def _detect_wrappers(
+        self,
+        session: aiohttp.ClientSession,
+        macro_names: List[str],
+    ) -> set[str]:
+        """Detect macros that use rename_existing (built-in wrappers).
+
+        Queries the gcode_macro object config for each macro. Macros with
+        ``rename_existing`` set are wrappers around built-in commands and
+        should not be exposed to users as runnable macros.
+        """
+        if not macro_names:
+            return set()
+
+        # Build query for all macro configs in one request
+        query_parts = "&".join(
+            f"gcode_macro {name}" for name in macro_names
+        )
+        url = f"{self._base_url}/printer/objects/query?{query_parts}"
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        return set()
+                    data = await response.json()
+                    status = data.get("result", {}).get("status", {})
+        except Exception:
+            return set()
+
+        wrappers: set[str] = set()
+        for name in macro_names:
+            obj_key = f"gcode_macro {name}"
+            macro_info = status.get(obj_key, {})
+            if macro_info.get("rename_existing"):
+                wrappers.add(name)
+        return wrappers

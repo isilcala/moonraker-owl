@@ -41,6 +41,7 @@ class FakeMoonraker:
         }
         self.gcode_files: list[dict] = []
         self.printer_state: str = "standby"
+        self.registered_macros: set[str] = set()  # For gcode_macro existence checks
 
     async def execute_print_action(self, action: str) -> None:
         if action not in {"pause", "resume", "cancel"}:
@@ -84,13 +85,17 @@ class FakeMoonraker:
         self, objects: Optional[dict] = None, timeout: float = 5.0
     ) -> dict:
         """Return printer state for testing."""
-        return {
-            "result": {
-                "status": {
-                    "print_stats": {"state": self.printer_state},
-                }
-            }
+        status: dict[str, Any] = {
+            "print_stats": {"state": self.printer_state},
         }
+        # Support gcode_macro existence queries
+        if objects:
+            for key in objects:
+                if key.startswith("gcode_macro "):
+                    macro_name = key[len("gcode_macro "):]
+                    if macro_name in self.registered_macros:
+                        status[key] = {}
+        return {"result": {"status": status}}
 
 
 class FakeMQTT:
@@ -1398,6 +1403,191 @@ async def test_fan_set_speed_requires_parameters(config):
     failed = json.loads(mqtt.published[1][1].decode("utf-8"))
     assert failed["payload"]["status"] == "failed"
     assert failed["payload"]["reason"]["code"] == "invalid_parameters"
+
+
+# ─── GCode Macro Command Tests ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_gcode_macro_executes_successfully(config):
+    """gcode:macro should execute the macro via execute_gcode and return completed."""
+    moonraker = FakeMoonraker()
+    moonraker.registered_macros = {"LOAD_FILAMENT"}
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "$id": "cmd-macro-1",
+        "payload": {
+            "command": "gcode:macro",
+            "parameters": {"macro": "load_filament"},
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/gcode:macro", message)
+
+    # Macro name should be uppercased
+    assert moonraker.gcode_scripts == ["LOAD_FILAMENT"]
+
+    # Should have accepted + completed acks
+    assert len(mqtt.published) == 2
+    accepted = json.loads(mqtt.published[0][1].decode("utf-8"))
+    assert accepted["payload"]["status"] == "accepted"
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert completed["payload"]["stage"] == "execution"
+    assert completed["payload"]["result"]["macro"] == "LOAD_FILAMENT"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_gcode_macro_rejects_missing_parameter(config):
+    """gcode:macro without a macro parameter should fail with invalid_parameters."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "$id": "cmd-macro-2",
+        "payload": {
+            "command": "gcode:macro",
+            "parameters": {},
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/gcode:macro", message)
+
+    assert not moonraker.gcode_scripts
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_parameters"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_gcode_macro_rejects_internal_macro(config):
+    """gcode:macro should reject macros prefixed with _ (internal)."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "$id": "cmd-macro-3",
+        "payload": {
+            "command": "gcode:macro",
+            "parameters": {"macro": "_INTERNAL_HELPER"},
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/gcode:macro", message)
+
+    assert not moonraker.gcode_scripts
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "forbidden_macro"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_gcode_macro_rejects_unknown_macro(config):
+    """gcode:macro should reject macros not registered in Klipper objects."""
+    moonraker = FakeMoonraker()
+    moonraker.registered_macros = {"G28"}  # Only G28 is registered
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "$id": "cmd-macro-4",
+        "payload": {
+            "command": "gcode:macro",
+            "parameters": {"macro": "NONEXISTENT_MACRO"},
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/gcode:macro", message)
+
+    assert not moonraker.gcode_scripts
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "unknown_macro"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_gcode_macro_uppercases_name(config):
+    """gcode:macro should normalize macro names to uppercase."""
+    moonraker = FakeMoonraker()
+    moonraker.registered_macros = {"CLEAN_NOZZLE"}
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+
+    message = {
+        "$id": "cmd-macro-5",
+        "payload": {
+            "command": "gcode:macro",
+            "parameters": {"macro": "  clean_nozzle  "},
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/gcode:macro", message)
+
+    assert moonraker.gcode_scripts == ["CLEAN_NOZZLE"]
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["result"]["macro"] == "CLEAN_NOZZLE"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_gcode_macro_handles_execution_error(config):
+    """gcode:macro should return gcode_error when execution fails."""
+    moonraker = FakeMoonraker()
+    moonraker.registered_macros = {"BROKEN_MACRO"}
+    mqtt = FakeMQTT()
+
+    # Make execute_gcode raise
+    async def failing_execute(script, **kwargs):
+        raise RuntimeError("Klipper rejected command")
+
+    moonraker.execute_gcode = failing_execute
+
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-macro-6",
+        "payload": {
+            "command": "gcode:macro",
+            "parameters": {"macro": "BROKEN_MACRO"},
+        },
+    }
+
+    await mqtt.emit("owl/printers/device-123/commands/gcode:macro", message)
+
+    failed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "gcode_error"
+
+    await processor.stop()
 
     await processor.stop()
 

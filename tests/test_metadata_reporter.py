@@ -9,6 +9,7 @@ import pytest
 
 from moonraker_owl.metadata import (
     CameraProvider,
+    GCodeMacroProvider,
     KlipperProvider,
     MetadataReporter,
     MetadataReporterConfig,
@@ -885,4 +886,319 @@ class TestForceReportNow:
             token_provider=make_token_provider(),
         )
         # Should not raise
-        reporter.force_report_now()
+
+
+class TestGCodeMacroProvider:
+    """Tests for GCodeMacroProvider."""
+
+    @pytest.fixture
+    def provider(self):
+        return GCodeMacroProvider("http://127.0.0.1:7125")
+
+    def test_provider_name(self, provider):
+        assert provider.name == "macros"
+
+    @pytest.mark.asyncio
+    async def test_detect_typical_macros(self, provider):
+        """Should discover user macros with descriptions and dangerous flag."""
+        objects_response = {
+            "result": {
+                "objects": [
+                    "gcode_macro START_PRINT",
+                    "gcode_macro END_PRINT",
+                    "gcode_macro M112",
+                    "gcode_macro _INTERNAL_HELPER",
+                    "extruder",
+                    "heater_bed",
+                ]
+            }
+        }
+        gcode_help_response = {
+            "result": {
+                "START_PRINT": "Start print with bed mesh",
+                "END_PRINT": "End print cleanup",
+                "M112": "Emergency stop",
+            }
+        }
+        wrapper_query_response = {
+            "result": {
+                "status": {
+                    "gcode_macro START_PRINT": {},
+                    "gcode_macro END_PRINT": {},
+                    "gcode_macro M112": {},
+                }
+            }
+        }
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            responses = [objects_response, gcode_help_response, wrapper_query_response]
+            resp.json = AsyncMock(return_value=responses[min(call_count, 2)])
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        assert "macros" in result
+        macros = result["macros"]["available"]
+        names = [m["name"] for m in macros]
+
+        # _INTERNAL_HELPER should be filtered (underscore prefix)
+        assert "_INTERNAL_HELPER" not in names
+        # Non-macro objects should not appear
+        assert "extruder" not in names
+
+        assert "END_PRINT" in names
+        assert "M112" in names
+        assert "START_PRINT" in names
+
+        by_name = {m["name"]: m for m in macros}
+        assert by_name["START_PRINT"]["description"] == "Start print with bed mesh"
+        assert by_name["START_PRINT"]["dangerous"] is False
+        assert by_name["M112"]["dangerous"] is True
+
+    @pytest.mark.asyncio
+    async def test_detect_filters_internal_macros(self, provider):
+        """Macros prefixed with _ should be excluded."""
+        objects_response = {
+            "result": {
+                "objects": [
+                    "gcode_macro _PRIVATE",
+                    "gcode_macro _ANOTHER_INTERNAL",
+                    "gcode_macro CLEAN_NOZZLE",
+                ]
+            }
+        }
+        gcode_help_response = {"result": {"CLEAN_NOZZLE": "Wipe nozzle"}}
+        wrapper_query_response = {
+            "result": {"status": {"gcode_macro CLEAN_NOZZLE": {}}}
+        }
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            responses = [objects_response, gcode_help_response, wrapper_query_response]
+            resp.json = AsyncMock(return_value=responses[min(call_count, 2)])
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        names = [m["name"] for m in result["macros"]["available"]]
+        assert names == ["CLEAN_NOZZLE"]
+
+    @pytest.mark.asyncio
+    async def test_detect_filters_wrappers(self, provider):
+        """Macros with rename_existing should be excluded as wrappers."""
+        objects_response = {
+            "result": {
+                "objects": [
+                    "gcode_macro PAUSE",
+                    "gcode_macro RESUME",
+                    "gcode_macro LOAD_FILAMENT",
+                ]
+            }
+        }
+        gcode_help_response = {"result": {}}
+        wrapper_query_response = {
+            "result": {
+                "status": {
+                    "gcode_macro PAUSE": {"rename_existing": "BASE_PAUSE"},
+                    "gcode_macro RESUME": {"rename_existing": "BASE_RESUME"},
+                    "gcode_macro LOAD_FILAMENT": {},
+                }
+            }
+        }
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            responses = [objects_response, gcode_help_response, wrapper_query_response]
+            resp.json = AsyncMock(return_value=responses[min(call_count, 2)])
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        names = [m["name"] for m in result["macros"]["available"]]
+        # PAUSE and RESUME are wrappers, should be filtered
+        assert "PAUSE" not in names
+        assert "RESUME" not in names
+        assert "LOAD_FILAMENT" in names
+
+    @pytest.mark.asyncio
+    async def test_detect_marks_all_dangerous_macros(self, provider):
+        """All known dangerous macros should be flagged."""
+        dangerous_names = [
+            "M112", "FIRMWARE_RESTART", "RESTART",
+            "TURN_OFF_HEATERS", "EMERGENCY_STOP",
+        ]
+        objects_response = {
+            "result": {
+                "objects": [f"gcode_macro {n}" for n in dangerous_names]
+            }
+        }
+        gcode_help_response = {"result": {}}
+        wrapper_query_response = {
+            "result": {
+                "status": {
+                    f"gcode_macro {n}": {} for n in dangerous_names
+                }
+            }
+        }
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            responses = [objects_response, gcode_help_response, wrapper_query_response]
+            resp.json = AsyncMock(return_value=responses[min(call_count, 2)])
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        macros = result["macros"]["available"]
+        for macro in macros:
+            assert macro["dangerous"] is True, f"{macro['name']} should be dangerous"
+
+    @pytest.mark.asyncio
+    async def test_detect_empty_objects(self, provider):
+        """Should return empty list when no macros exist."""
+        objects_response = {"result": {"objects": ["extruder", "heater_bed"]}}
+        gcode_help_response = {"result": {}}
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            responses = [objects_response, gcode_help_response]
+            resp.json = AsyncMock(return_value=responses[min(call_count, 1)])
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        assert result["macros"]["available"] == []
+
+    @pytest.mark.asyncio
+    async def test_detect_handles_objects_error(self, provider):
+        """Should return empty macros when objects endpoint fails."""
+
+        async def mock_get(*args, **kwargs):
+            resp = AsyncMock()
+            resp.status = 500
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        assert result["macros"]["available"] == []
+
+    @pytest.mark.asyncio
+    async def test_detect_sorted_by_name(self, provider):
+        """Macros should be returned sorted alphabetically."""
+        objects_response = {
+            "result": {
+                "objects": [
+                    "gcode_macro ZHOP",
+                    "gcode_macro CLEAN_NOZZLE",
+                    "gcode_macro ACTIVATE_PROBE",
+                ]
+            }
+        }
+        gcode_help_response = {"result": {}}
+        wrapper_query_response = {
+            "result": {
+                "status": {
+                    "gcode_macro ZHOP": {},
+                    "gcode_macro CLEAN_NOZZLE": {},
+                    "gcode_macro ACTIVATE_PROBE": {},
+                }
+            }
+        }
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            responses = [objects_response, gcode_help_response, wrapper_query_response]
+            resp.json = AsyncMock(return_value=responses[min(call_count, 2)])
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        names = [m["name"] for m in result["macros"]["available"]]
+        assert names == ["ACTIVATE_PROBE", "CLEAN_NOZZLE", "ZHOP"]

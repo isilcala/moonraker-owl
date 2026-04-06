@@ -34,6 +34,7 @@ from .parsing import _build_ack_topic, _extract_command_name, _parse_command, _r
 from .handlers import (
     ControlCommandsMixin,
     FanCommandsMixin,
+    GCodeCommandsMixin,
     HeaterCommandsMixin,
     MetadataCommandsMixin,
     PrintCommandsMixin,
@@ -52,6 +53,7 @@ class CommandProcessor(
     ControlCommandsMixin,
     QueryCommandsMixin,
     MetadataCommandsMixin,
+    GCodeCommandsMixin,
 ):
     """Consumes MQTT command messages and forwards them to Moonraker."""
 
@@ -535,6 +537,10 @@ class CommandProcessor(
         # Object control commands (ADR-0016)
         if message.command == PrinterCommandNames.OBJECT_EXCLUDE:
             return await self._execute_object_exclude(message)
+
+        # GCode macro commands
+        if message.command == PrinterCommandNames.GCODE_MACRO:
+            return await self._execute_gcode_macro(message)
 
         # System task commands
         if message.command == PrinterCommandNames.CAPTURE_IMAGE:
