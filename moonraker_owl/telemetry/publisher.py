@@ -55,6 +55,7 @@ from .events import EventCollector, RateLimitConfig
 from .moonraker_bridge import (
     TelemetrySource,
     discover_moonraker_sensors,
+    fetch_output_pin_pwm_config,
     is_heater_object,
     heater_has_target,
 )
@@ -380,6 +381,12 @@ class TelemetryPublisher:
             LOGGER.warning("Failed to discover heaters/sensors: %s", exc)
             return
 
+        registered: list[str] | None = None
+        try:
+            registered = await self._source.fetch_registered_objects()
+        except (OSError, asyncio.TimeoutError) as exc:
+            LOGGER.debug("Failed to fetch registered objects: %s", exc)
+
         objects_before = set(self._subscription_objects)
 
         added = discover_moonraker_sensors(
@@ -387,18 +394,31 @@ class TelemetryPublisher:
             heater_info,
             self._subscription_objects,
             self._sensor_filter,
+            registered_objects=registered,
             static_objects=self._static_manifest_keys,
         )
 
         changed = added or set(self._subscription_objects) != objects_before
         if added:
             LOGGER.debug(
-                "Discovered %d temperature sensors: %s",
+                "Discovered %d sensors: %s",
                 len(added),
                 ", ".join(added),
             )
         if changed:
             self._source.set_subscription_objects(self._subscription_objects)
+
+        # Fetch PWM config for output pins so the sensor payload includes it
+        pin_objects = [
+            obj for obj in self._subscription_objects
+            if obj.startswith("output_pin ")
+        ]
+        if pin_objects:
+            pin_config = await fetch_output_pin_pwm_config(
+                self._source, pin_objects
+            )
+            if pin_config:
+                self._orchestrator.sensors_selector.update_pin_pwm_config(pin_config)
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -1382,6 +1402,10 @@ class TelemetryPublisher:
                     entry.merge(forced=True, respect_cadence=False)
             self._event.set()
 
+        # Re-discover sensors so newly-allowed objects get subscribed.
+        # This is async; schedule it on the event loop without blocking.
+        self._schedule_sensor_rediscovery()
+
         LOGGER.info(
             "Base config refreshed: idle_interval=%.1fs",
             new_idle_interval,
@@ -1986,6 +2010,45 @@ class TelemetryPublisher:
             self._force_full_channels_after_reset.add("status")
         elif ready_signal:
             self._klippy_ready_applied = False
+
+    def _schedule_sensor_rediscovery(self) -> None:
+        """Schedule async sensor re-discovery after a config filter change.
+
+        Re-runs discovery to pick up sensors newly allowed by the updated
+        SensorFilter, then re-sends the Moonraker WebSocket subscription
+        so the printer starts reporting data for the new objects.
+        """
+        loop = self._loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+
+        async def _run() -> None:
+            try:
+                await self._discover_and_subscribe_sensors()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to re-discover sensors after config change: %s", exc
+                )
+                return
+
+            # Re-send WebSocket subscription so Moonraker delivers updates
+            # for the newly-discovered objects.
+            if hasattr(self._source, "resubscribe"):
+                try:
+                    await self._source.resubscribe()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Failed to resubscribe after sensor rediscovery: %s", exc
+                    )
+
+        loop.create_task(_run())
 
     def _schedule_resubscribe(self, reason: str) -> None:
         if not hasattr(self._source, "resubscribe"):

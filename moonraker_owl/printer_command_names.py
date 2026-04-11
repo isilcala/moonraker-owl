@@ -69,6 +69,36 @@ class PrinterCommandNames:
     """Set fan speed."""
 
     # -------------------------------------------------------------------------
+    # LED Control Commands (user-triggered)
+    # -------------------------------------------------------------------------
+
+    SET_LED = "led:set-brightness"
+    """Set LED brightness (SET_LED)."""
+
+    # -------------------------------------------------------------------------
+    # Output Pin Control Commands (user-triggered)
+    # -------------------------------------------------------------------------
+
+    SET_OUTPUT_PIN = "output-pin:set-value"
+    """Set output pin value (SET_PIN)."""
+
+    # -------------------------------------------------------------------------
+    # Print Parameter Control Commands (user-triggered)
+    # -------------------------------------------------------------------------
+
+    SET_SPEED = "print-param:set-speed"
+    """Set print speed factor (M220)."""
+
+    SET_FLOW = "print-param:set-flow"
+    """Set extrusion flow rate factor (M221)."""
+
+    SET_Z_OFFSET = "print-param:set-z-offset"
+    """Adjust Z offset by relative amount (SET_GCODE_OFFSET Z_ADJUST)."""
+
+    RESET_Z_OFFSET = "print-param:reset-z-offset"
+    """Reset Z offset to zero (SET_GCODE_OFFSET Z=0)."""
+
+    # -------------------------------------------------------------------------
     # System Task Commands (cloud-triggered, requires result)
     # -------------------------------------------------------------------------
 
@@ -129,7 +159,9 @@ class PrinterCommandNames:
 
     HOT_PATH_COMMANDS: frozenset[str] = frozenset({
         PAUSE, RESUME, CANCEL, EMERGENCY_STOP, FIRMWARE_RESTART, START,
-        HEATER_SET_TARGET, HEATER_TURN_OFF, FAN_SET_SPEED,
+        HEATER_SET_TARGET, HEATER_TURN_OFF, FAN_SET_SPEED, SET_LED,
+        SET_OUTPUT_PIN,
+        SET_SPEED, SET_FLOW, SET_Z_OFFSET, RESET_Z_OFFSET,
         OBJECT_EXCLUDE, SET_TELEMETRY_RATE, METADATA_SYSTEM_REFRESH,
         GCODE_MACRO,
     })

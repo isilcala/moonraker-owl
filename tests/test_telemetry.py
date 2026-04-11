@@ -34,7 +34,7 @@ from moonraker_owl.telemetry import (
     PollSpec,
     build_subscription_manifest,
 )
-from moonraker_owl.telemetry.selectors import StatusSelector
+from moonraker_owl.telemetry.selectors import SensorFilter, SensorsSelector, StatusSelector
 from moonraker_owl.telemetry.state_store import MoonrakerStateStore
 from moonraker_owl.telemetry.trackers import HeaterMonitor, PrintSessionTracker
 from moonraker_owl.version import __version__ as PLUGIN_VERSION
@@ -75,6 +75,9 @@ class FakeMoonrakerClient:
     async def fetch_available_heaters(self, timeout: float = 5.0) -> Dict[str, list[str]]:
         """Return configured available heaters and sensors."""
         return self._available_heaters
+
+    async def fetch_registered_objects(self, timeout: float = 5.0) -> list[str]:
+        return getattr(self, '_registered_objects', [])
 
     async def fetch_printer_state(self, objects=None, timeout=5.0):
         self.last_query_objects = objects
@@ -3052,3 +3055,347 @@ def test_status_payload_job_id_equals_session_id() -> None:
     # sessionId should be present; jobId was removed in the envelope refactor
     assert job.get("sessionId") is not None, "Expected sessionId in job payload"
     assert "jobId" not in job, "jobId was removed in the envelope refactor"
+
+
+def test_status_payload_includes_print_parameters() -> None:
+    """StatusSelector includes printParameters from gcode_move data."""
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "standby"},
+                    "idle_timeout": {"state": "Idle"},
+                    "gcode_move": {
+                        "speed_factor": 1.5,
+                        "extrude_factor": 0.98,
+                        "homing_origin": [0.0, 0.0, -0.15, 0.0],
+                    },
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+
+    assert status is not None
+    pp = status.get("printParameters")
+    assert pp is not None, "Expected printParameters in status payload"
+    assert pp["speedPercent"] == 150
+    assert pp["flowPercent"] == 98
+    assert pp["zOffsetMm"] == -0.15
+
+
+def test_status_payload_print_parameters_absent_without_gcode_move() -> None:
+    """printParameters is absent when gcode_move data is not available."""
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "standby"},
+                    "idle_timeout": {"state": "Idle"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+
+    assert status is not None
+    assert "printParameters" not in status
+
+
+def test_sensors_output_pin_includes_pwm_flag() -> None:
+    """Output pin sensor payload includes pwm: true when configured as PWM."""
+    store = MoonrakerStateStore()
+    sensor_filter = SensorFilter(
+        allowlist=["output_pin caselight", "output_pin relay"],
+        max_custom_sensors=10,
+        max_sensor_count=20,
+    )
+    selector = SensorsSelector(sensor_filter=sensor_filter)
+
+    selector.update_pin_pwm_config({
+        "output_pin caselight": True,
+        "output_pin relay": False,
+    })
+
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest({
+        "result": {
+            "status": {
+                "output_pin caselight": {"value": 0.75},
+                "output_pin relay": {"value": 1.0},
+            }
+        }
+    })
+
+    payload = selector.build(
+        store,
+        mode="idle",
+        interval_seconds=30.0,
+        watch_window_expires=None,
+        observed_at=observed_at,
+        force_emit=True,
+    )
+
+    assert payload is not None
+    sensors = payload["sensors"]
+    assert len(sensors) == 2
+
+    by_channel = {s["channel"]: s for s in sensors}
+
+    caselight = by_channel["output_pin caselight"]
+    assert caselight["type"] == "outputPin"
+    assert caselight["pwm"] is True
+    assert caselight["value"] == pytest.approx(75.0, rel=1e-3)
+
+    relay = by_channel["output_pin relay"]
+    assert relay["type"] == "outputPin"
+    assert relay["pwm"] is False
+    assert relay["value"] == pytest.approx(100.0, rel=1e-3)
+
+
+def test_sensors_output_pin_defaults_pwm_false() -> None:
+    """Output pin sensor defaults to pwm: false when no config is set."""
+    store = MoonrakerStateStore()
+    sensor_filter = SensorFilter(
+        allowlist=["output_pin my_pin"],
+        max_custom_sensors=10,
+        max_sensor_count=20,
+    )
+    selector = SensorsSelector(sensor_filter=sensor_filter)
+    # No update_pin_pwm_config call
+
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest({
+        "result": {
+            "status": {
+                "output_pin my_pin": {"value": 0.5},
+            }
+        }
+    })
+
+    payload = selector.build(
+        store,
+        mode="idle",
+        interval_seconds=30.0,
+        watch_window_expires=None,
+        observed_at=observed_at,
+        force_emit=True,
+    )
+
+    assert payload is not None
+    sensors = payload["sensors"]
+    assert len(sensors) == 1
+    assert sensors[0]["pwm"] is False
+
+
+# ── discover_moonraker_sensors / fetch_output_pin_pwm_config tests ──
+
+
+from moonraker_owl.telemetry.moonraker_bridge import (
+    discover_moonraker_sensors,
+    fetch_output_pin_pwm_config,
+    is_discoverable_object,
+)
+
+
+def test_discover_non_thermal_devices_from_registered_objects() -> None:
+    """discover_moonraker_sensors should add LEDs, output_pins, fans, filament
+    sensors from the registered objects list when the filter allows them."""
+    source = FakeMoonrakerClient(initial_state={})
+    sensor_filter = SensorFilter(
+        allowlist=[
+            "extruder", "heater_bed",
+            "neopixel bed_leds", "output_pin caselight",
+            "fan_generic nevermore", "filament_switch_sensor fila",
+            "heater_fan hotend_fan",
+        ],
+        max_custom_sensors=20,
+        max_sensor_count=30,
+    )
+
+    heater_info = {
+        "available_heaters": ["extruder", "heater_bed"],
+        "available_sensors": ["extruder", "heater_bed"],
+    }
+    registered = [
+        "extruder", "heater_bed", "fan",
+        "neopixel bed_leds", "output_pin caselight",
+        "fan_generic nevermore", "filament_switch_sensor fila",
+        "heater_fan hotend_fan",
+        "gcode_move", "toolhead",  # non-sensor objects that should be ignored
+    ]
+
+    current_objects: dict = {}
+    added = discover_moonraker_sensors(
+        source, heater_info, current_objects, sensor_filter,
+        registered_objects=registered,
+    )
+
+    # fan is always added
+    assert "fan" in current_objects
+    # heaters
+    assert "extruder" in current_objects
+    assert current_objects["extruder"] == ["temperature", "target"]
+    # Non-thermal devices added
+    assert "neopixel bed_leds" in current_objects
+    assert current_objects["neopixel bed_leds"] == ["color_data"]
+    assert "output_pin caselight" in current_objects
+    assert current_objects["output_pin caselight"] == ["value"]
+    assert "fan_generic nevermore" in current_objects
+    assert current_objects["fan_generic nevermore"] == ["speed"]
+    assert "filament_switch_sensor fila" in current_objects
+    assert current_objects["filament_switch_sensor fila"] == ["filament_detected", "enabled"]
+    assert "heater_fan hotend_fan" in current_objects
+    assert current_objects["heater_fan hotend_fan"] == ["speed"]
+    # Non-sensor objects should NOT be subscribed
+    assert "gcode_move" not in current_objects
+    assert "toolhead" not in current_objects
+
+
+def test_discover_sensors_skips_hidden_objects() -> None:
+    """Objects with underscore-prefixed instance names should be skipped."""
+    source = FakeMoonrakerClient(initial_state={})
+    sensor_filter = SensorFilter(
+        allowlist=["output_pin _internal"],
+        max_custom_sensors=20,
+        max_sensor_count=30,
+    )
+
+    current_objects: dict = {}
+    discover_moonraker_sensors(
+        source,
+        {"available_heaters": [], "available_sensors": []},
+        current_objects,
+        sensor_filter,
+        registered_objects=["output_pin _internal"],
+    )
+
+    # "fan" always added, but hidden object should be skipped
+    assert "output_pin _internal" not in current_objects
+
+
+def test_discover_sensors_filter_blocks_non_allowed() -> None:
+    """Sensors not in the allowlist should not be added."""
+    source = FakeMoonrakerClient(initial_state={})
+    sensor_filter = SensorFilter(
+        allowlist=["extruder", "heater_bed"],
+        max_custom_sensors=0,
+        max_sensor_count=6,
+    )
+
+    current_objects: dict = {}
+    discover_moonraker_sensors(
+        source,
+        {"available_heaters": ["extruder"], "available_sensors": ["extruder"]},
+        current_objects,
+        sensor_filter,
+        registered_objects=["neopixel bed_leds", "output_pin caselight"],
+    )
+
+    assert "neopixel bed_leds" not in current_objects
+    assert "output_pin caselight" not in current_objects
+
+
+def test_discover_sensors_removes_stale_objects() -> None:
+    """Sensors no longer reported by Moonraker should be removed."""
+    source = FakeMoonrakerClient(initial_state={})
+    sensor_filter = SensorFilter(
+        allowlist=["extruder", "heater_bed", "output_pin old_pin"],
+        max_custom_sensors=10,
+        max_sensor_count=20,
+    )
+
+    current_objects: dict = {
+        "fan": ["speed"],
+        "extruder": ["temperature", "target"],
+        "output_pin old_pin": ["value"],  # will become stale
+    }
+    discover_moonraker_sensors(
+        source,
+        {"available_heaters": ["extruder"], "available_sensors": ["extruder"]},
+        current_objects,
+        sensor_filter,
+        registered_objects=["extruder", "fan"],  # old_pin no longer reported
+    )
+
+    assert "output_pin old_pin" not in current_objects
+    assert "extruder" in current_objects
+    assert "fan" in current_objects
+
+
+def test_is_discoverable_detects_all_types() -> None:
+    """is_discoverable_object should recognize all sensor types."""
+    assert is_discoverable_object("fan")
+    assert is_discoverable_object("extruder")
+    assert is_discoverable_object("heater_bed")
+    assert is_discoverable_object("neopixel bed_leds")
+    assert is_discoverable_object("dotstar tool_leds")
+    assert is_discoverable_object("led strips")
+    assert is_discoverable_object("output_pin caselight")
+    assert is_discoverable_object("fan_generic nevermore")
+    assert is_discoverable_object("heater_fan hotend")
+    assert is_discoverable_object("controller_fan psu")
+    assert is_discoverable_object("filament_switch_sensor fila")
+    assert is_discoverable_object("filament_motion_sensor motion")
+    # Non-sensor
+    assert not is_discoverable_object("gcode_move")
+    assert not is_discoverable_object("toolhead")
+    assert not is_discoverable_object("display")
+
+
+@pytest.mark.asyncio
+async def test_fetch_output_pin_pwm_config() -> None:
+    """fetch_output_pin_pwm_config should read PWM capability from configfile."""
+    source = FakeMoonrakerClient(initial_state={
+        "result": {
+            "status": {
+                "configfile": {
+                    "settings": {
+                        "output_pin caselight": {"pwm": True, "value": 0},
+                        "output_pin relay": {"value": 0},  # no pwm key → defaults False
+                    }
+                }
+            }
+        }
+    })
+
+    result = await fetch_output_pin_pwm_config(
+        source, ["output_pin caselight", "output_pin relay"]
+    )
+
+    assert result["output_pin caselight"] is True
+    assert result["output_pin relay"] is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_output_pin_pwm_config_empty_list() -> None:
+    """Empty pin list returns empty dict."""
+    source = FakeMoonrakerClient(initial_state={})
+    result = await fetch_output_pin_pwm_config(source, [])
+    assert result == {}

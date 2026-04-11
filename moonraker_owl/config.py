@@ -33,6 +33,7 @@ DEFAULT_TELEMETRY_FIELDS = [
     "webhooks.state_message",
     "gcode_move.speed_factor",
     "gcode_move.extrude_factor",
+    "gcode_move.homing_origin",
     "history",
     "gcode_macro _OBICO_LAYER_CHANGE",
     "fan.speed",

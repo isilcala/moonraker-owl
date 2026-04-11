@@ -77,6 +77,11 @@ class FakeMoonraker:
         """Return configured available heaters for testing."""
         return self.available_heaters
 
+    async def fetch_registered_objects(
+        self, timeout: float = 5.0
+    ) -> list[str]:
+        return []
+
     async def list_gcode_files(self, timeout: float = 15.0) -> list[dict]:
         """Return configured GCode file list for testing."""
         return self.gcode_files
@@ -1987,6 +1992,482 @@ async def test_metadata_system_refresh_fails_without_reporter(config):
     last_ack = json.loads(mqtt.published[-1][1].decode("utf-8"))
     assert last_ack["payload"]["status"] == "failed"
     assert last_ack["payload"]["reason"]["code"] == "metadata_unavailable"
+
+    await processor.stop()
+
+
+# ── Print Parameter Command Tests ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_set_speed_executes_gcode(config):
+    """print-param:set-speed sends M220 S<percent>."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-speed-1",
+        "payload": {
+            "command": "print-param:set-speed",
+            "parameters": {"percent": 150},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print-param:set-speed", message)
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "M220 S150" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_speed_validates_range(config):
+    """print-param:set-speed rejects percent outside 1-999."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-speed-2",
+        "payload": {
+            "command": "print-param:set-speed",
+            "parameters": {"percent": 0},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print-param:set-speed", message)
+
+    failed = json.loads(mqtt.published[-1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_speed"
+    assert len(moonraker.gcode_scripts) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_speed_requires_percent_parameter(config):
+    """print-param:set-speed requires percent parameter."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-speed-3",
+        "payload": {
+            "command": "print-param:set-speed",
+            "parameters": {},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print-param:set-speed", message)
+
+    failed = json.loads(mqtt.published[-1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_parameters"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_flow_executes_gcode(config):
+    """print-param:set-flow sends M221 S<percent>."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-flow-1",
+        "payload": {
+            "command": "print-param:set-flow",
+            "parameters": {"percent": 105},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print-param:set-flow", message)
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "M221 S105" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_flow_validates_range(config):
+    """print-param:set-flow rejects percent outside 1-999."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-flow-2",
+        "payload": {
+            "command": "print-param:set-flow",
+            "parameters": {"percent": 1000},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print-param:set-flow", message)
+
+    failed = json.loads(mqtt.published[-1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_flow"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_z_offset_executes_gcode(config):
+    """print-param:set-z-offset sends SET_GCODE_OFFSET Z_ADJUST."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-zoff-1",
+        "payload": {
+            "command": "print-param:set-z-offset",
+            "parameters": {"adjustMm": 0.05},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print-param:set-z-offset", message)
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "SET_GCODE_OFFSET Z_ADJUST=0.050 MOVE=1" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_z_offset_negative_adjust(config):
+    """print-param:set-z-offset handles negative adjustments."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-zoff-neg",
+        "payload": {
+            "command": "print-param:set-z-offset",
+            "parameters": {"adjustMm": -0.025},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print-param:set-z-offset", message)
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "SET_GCODE_OFFSET Z_ADJUST=-0.025 MOVE=1" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_z_offset_rejects_exceeding_range(config):
+    """print-param:set-z-offset rejects adjustMm beyond ±1.0mm."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-zoff-2",
+        "payload": {
+            "command": "print-param:set-z-offset",
+            "parameters": {"adjustMm": 1.5},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print-param:set-z-offset", message)
+
+    failed = json.loads(mqtt.published[-1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_z_offset"
+    assert len(moonraker.gcode_scripts) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_reset_z_offset_executes_gcode(config):
+    """print-param:reset-z-offset sends SET_GCODE_OFFSET Z=0 MOVE=1."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-zoff-reset",
+        "payload": {
+            "command": "print-param:reset-z-offset",
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print-param:reset-z-offset", message)
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "SET_GCODE_OFFSET Z=0 MOVE=1" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+# ── LED Command Tests ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_set_led_executes_gcode(config):
+    """led:set-brightness sends SET_LED with all channels at brightness."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-led-1",
+        "payload": {
+            "command": "led:set-brightness",
+            "parameters": {"led": "neopixel my_leds", "brightness": 0.5},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/led:set-brightness", message)
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "SET_LED LED=my_leds RED=0.50 GREEN=0.50 BLUE=0.50 WHITE=0.50" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_led_extracts_dotstar_prefix(config):
+    """led:set-brightness strips 'dotstar ' prefix from LED name."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-led-2",
+        "payload": {
+            "command": "led:set-brightness",
+            "parameters": {"led": "dotstar bar", "brightness": 1.0},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/led:set-brightness", message)
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "SET_LED LED=bar" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_led_extracts_led_prefix(config):
+    """led:set-brightness strips 'led ' prefix from LED name."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-led-3",
+        "payload": {
+            "command": "led:set-brightness",
+            "parameters": {"led": "led foo", "brightness": 0.0},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/led:set-brightness", message)
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    script = moonraker.gcode_scripts[0]
+    assert "SET_LED LED=foo" in script
+    assert "WHITE=0.00" in script
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_led_validates_brightness_range(config):
+    """led:set-brightness rejects brightness outside 0.0-1.0."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-led-4",
+        "payload": {
+            "command": "led:set-brightness",
+            "parameters": {"led": "neopixel x", "brightness": 1.5},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/led:set-brightness", message)
+
+    failed = json.loads(mqtt.published[-1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_brightness"
+    assert len(moonraker.gcode_scripts) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_led_requires_parameters(config):
+    """led:set-brightness requires both led and brightness parameters."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-led-5",
+        "payload": {
+            "command": "led:set-brightness",
+            "parameters": {"led": "neopixel x"},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/led:set-brightness", message)
+
+    failed = json.loads(mqtt.published[-1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_parameters"
+
+    await processor.stop()
+
+
+# ── Output Pin Command Tests ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_set_output_pin_executes_gcode(config):
+    """output-pin:set-value sends SET_PIN with correct name and value."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-pin-1",
+        "payload": {
+            "command": "output-pin:set-value",
+            "parameters": {"pin": "output_pin caselight", "value": 0.75},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/output-pin:set-value", message)
+
+    assert len(mqtt.published) == 2
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "SET_PIN PIN=caselight VALUE=0.75" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_output_pin_off(config):
+    """output-pin:set-value sends value 0.00 for off."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-pin-off",
+        "payload": {
+            "command": "output-pin:set-value",
+            "parameters": {"pin": "output_pin relay", "value": 0.0},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/output-pin:set-value", message)
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "SET_PIN PIN=relay VALUE=0.00" in moonraker.gcode_scripts[0]
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_output_pin_validates_range(config):
+    """output-pin:set-value rejects value outside 0.0-1.0."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-pin-2",
+        "payload": {
+            "command": "output-pin:set-value",
+            "parameters": {"pin": "output_pin x", "value": 2.0},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/output-pin:set-value", message)
+
+    failed = json.loads(mqtt.published[-1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_value"
+    assert len(moonraker.gcode_scripts) == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_output_pin_requires_parameters(config):
+    """output-pin:set-value requires both pin and value parameters."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-pin-3",
+        "payload": {
+            "command": "output-pin:set-value",
+            "parameters": {"pin": "output_pin x"},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/output-pin:set-value", message)
+
+    failed = json.loads(mqtt.published[-1][1].decode("utf-8"))
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["reason"]["code"] == "invalid_parameters"
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_output_pin_plain_name_passthrough(config):
+    """output-pin:set-value passes through names without 'output_pin ' prefix."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-pin-plain",
+        "payload": {
+            "command": "output-pin:set-value",
+            "parameters": {"pin": "my_pin", "value": 1.0},
+        },
+    }
+    await mqtt.emit("owl/printers/device-123/commands/output-pin:set-value", message)
+
+    completed = json.loads(mqtt.published[1][1].decode("utf-8"))
+    assert completed["payload"]["status"] == "completed"
+    assert "SET_PIN PIN=my_pin VALUE=1.00" in moonraker.gcode_scripts[0]
 
     await processor.stop()
 

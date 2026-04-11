@@ -477,10 +477,19 @@ class SensorInventoryProvider(BaseProvider):
     UI, allowing users to select which sensors to monitor.
     """
 
-    # Sensor name prefixes that indicate temperature-related objects
-    _HEATER_PREFIXES = ("extruder", "heater_generic", "heater_bed")
-    _SENSOR_PREFIXES = ("temperature_sensor", "temperature_fan")
-    _FAN_PREFIXES = ("fan", "heater_fan", "controller_fan", "fan_generic")
+    # Non-thermal object prefixes discoverable from printer objects list.
+    # Maps prefix → sensor type string.
+    _OBJECT_TYPE_MAP: tuple[tuple[str, str], ...] = (
+        ("heater_fan ",               "fan"),
+        ("controller_fan ",           "fan"),
+        ("fan_generic ",              "fan"),
+        ("neopixel ",                 "led"),
+        ("dotstar ",                  "led"),
+        ("led ",                      "led"),
+        ("output_pin ",               "output_pin"),
+        ("filament_switch_sensor ",   "filament_sensor"),
+        ("filament_motion_sensor ",   "filament_sensor"),
+    )
 
     def __init__(
         self,
@@ -548,13 +557,17 @@ class SensorInventoryProvider(BaseProvider):
             sensors.append(self._classify_sensor(sensor, has_target=has_target))
             seen.add(sensor)
 
-        # Discover fans from printer objects list
+        # Discover non-thermal devices from printer objects list
         for obj_name in objects:
             if not obj_name or obj_name.startswith("_"):
                 continue
+            # Skip hidden objects (prefixed with _ after the type prefix)
+            if " " in obj_name and obj_name.split(" ", 1)[1].startswith("_"):
+                continue
             if obj_name in seen:
                 continue
-            if self._is_fan_object(obj_name):
+            obj_type = self._object_type(obj_name)
+            if obj_type is not None or obj_name == "fan":
                 sensors.append(self._classify_sensor(obj_name, has_target=False))
                 seen.add(obj_name)
 
@@ -580,15 +593,21 @@ class SensorInventoryProvider(BaseProvider):
             return "temperature_fan"
         if name.startswith("temperature_sensor"):
             return "temperature_sensor"
-        if self._is_fan_object(name):
+        # Check non-thermal object type map (fans, LEDs, pins, filament)
+        obj_type = self._object_type(name)
+        if obj_type is not None:
+            return obj_type
+        # Bare "fan" exact match
+        if name == "fan":
             return "fan"
         return "unknown"
 
-    def _is_fan_object(self, name: str) -> bool:
-        """Check if a Klipper object name represents a fan."""
-        return name == "fan" or any(
-            name.startswith(prefix) for prefix in self._FAN_PREFIXES
-        )
+    def _object_type(self, name: str) -> Optional[str]:
+        """Return the sensor type for a non-thermal object, or None."""
+        for prefix, sensor_type in self._OBJECT_TYPE_MAP:
+            if name.startswith(prefix):
+                return sensor_type
+        return None
 
     async def _fetch_heaters(self, session: aiohttp.ClientSession) -> Dict[str, Any]:
         """Query the Moonraker heaters endpoint."""

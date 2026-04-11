@@ -119,6 +119,10 @@ class StatusSelector:
                 progress_section = job_payload.setdefault("progress", {})
                 progress_section["estimatedTimeRemainingSeconds"] = estimated_remaining
 
+        print_params = _build_print_parameters(store)
+        if print_params:
+            status["printParameters"] = print_params
+
         status["cadence"] = {
             "heartbeatSeconds": self._heartbeat_seconds,
             "watchWindowActive": False,
@@ -268,6 +272,16 @@ class SensorsSelector:
         self._sensor_state: Dict[str, _SensorState] = {}
         self._last_contract_hash: Optional[str] = None
         self._sensor_filter = sensor_filter or SensorFilter()
+        self._pin_pwm_config: Dict[str, bool] = {}
+
+    def update_pin_pwm_config(self, config: Dict[str, bool]) -> None:
+        """Set the PWM capability map for output pins.
+
+        Keys are Moonraker object names (e.g. 'output_pin caselight').
+        Values indicate whether the pin supports PWM (True) or is binary (False).
+        Klipper default is ``pwm: false`` (binary).
+        """
+        self._pin_pwm_config = config
 
     def update_sensor_filter(self, sensor_filter: SensorFilter) -> None:
         """Replace the active sensor filter and invalidate cached state.
@@ -351,15 +365,24 @@ class SensorsSelector:
     ) -> tuple[Dict[str, Any], _SensorState]:
         sensor_type = _infer_sensor_type(section.name)
         unit = _infer_unit(sensor_type)
-        is_fan = _is_fan_type(sensor_type)
 
-        # For fans, use 'speed' field; for temperature sensors, use 'temperature'
-        if is_fan:
-            raw_value = section.data.get("speed")
+        value: Optional[float] = None
+        target: Optional[float] = None
+
+        if _is_fan_type(sensor_type):
             # Fan speed is 0.0-1.0, convert to percent (0-100)
-            value = _round_fan_speed(raw_value)
-            target = None  # Regular fans don't have target
+            value = _round_fan_speed(section.data.get("speed"))
+        elif sensor_type == "led":
+            value = _extract_led_brightness(section.data)
+        elif sensor_type == "filamentSensor":
+            detected = section.data.get("filament_detected")
+            value = 1.0 if detected else 0.0
+        elif sensor_type == "outputPin":
+            raw = section.data.get("value")
+            value = _round_fan_speed(raw)  # 0.0-1.0 → 0-100%
+            is_pwm = self._pin_pwm_config.get(section.name, False)
         else:
+            # Temperature-based sensors
             raw_value = section.data.get("temperature")
             if raw_value is None:
                 raw_value = section.data.get("value")
@@ -381,7 +404,7 @@ class SensorsSelector:
                 last_updated=last_updated,
             )
 
-        payload = {
+        payload: Dict[str, Any] = {
             "channel": channel,
             "type": sensor_type,
             "unit": unit,
@@ -391,6 +414,9 @@ class SensorsSelector:
             "status": status,
             "lastUpdated": last_updated.replace(microsecond=0).isoformat(),
         }
+
+        if sensor_type == "outputPin":
+            payload["pwm"] = is_pwm  # noqa: F821 — assigned in outputPin branch above
 
         return payload, previous
 
@@ -434,6 +460,38 @@ class EventsSelector:
             },
             "items": events,
         }
+
+
+def _build_print_parameters(
+    store: MoonrakerStateStore,
+) -> Optional[Dict[str, Any]]:
+    """Build printParameters section from gcode_move data.
+
+    Always emitted when gcode_move data is available (not gated by active job).
+    Speed/flow factors are reported as integer percentages (e.g. 1.0 → 100).
+    Z offset is reported in mm with 3 decimal precision.
+    """
+    gcode_move = store.get("gcode_move")
+    if gcode_move is None:
+        return None
+
+    params: Dict[str, Any] = {}
+
+    speed_factor = _to_float(gcode_move.data.get("speed_factor"))
+    if speed_factor is not None:
+        params["speedPercent"] = int(round(speed_factor * 100))
+
+    extrude_factor = _to_float(gcode_move.data.get("extrude_factor"))
+    if extrude_factor is not None:
+        params["flowPercent"] = int(round(extrude_factor * 100))
+
+    homing_origin = gcode_move.data.get("homing_origin")
+    if isinstance(homing_origin, (list, tuple)) and len(homing_origin) > 2:
+        z_val = _to_float(homing_origin[2])
+        if z_val is not None:
+            params["zOffsetMm"] = round(z_val, 3)
+
+    return params if params else None
 
 
 def _build_job_payload(session: SessionInfo) -> Optional[Dict[str, Any]]:
@@ -519,72 +577,105 @@ def _should_use_display_message(message: str, session: SessionInfo) -> bool:
     return True
 
 
+# ── Sensor type registry ─────────────────────────────────────────────────
+#
+# Single source of truth for mapping Moonraker object names to sensor
+# metadata (type, unit, value field).  All helper functions below derive
+# their answers from this registry, eliminating the growing if-chain
+# anti-pattern and ensuring fan variants are never silently dropped.
+#
+# Each entry is (prefix, exact_match, sensor_type, unit, value_field).
+# Order matters — first match wins.
+
+_SENSOR_TYPE_REGISTRY: tuple[tuple[str, bool, str, str, str], ...] = (
+    # Heaters (temperature-based, controllable target)
+    ("heater_bed",          True,  "heater",         "celsius", "temperature"),
+    ("heater_generic ",     False, "heater",         "celsius", "temperature"),
+    ("extruder",            False, "heater",         "celsius", "temperature"),
+    # Temperature sensors (read-only)
+    ("temperature_sensor ", False, "sensor",         "celsius", "temperature"),
+    # Temperature-controlled fans (temperature-based, controllable target)
+    ("temperature_fan ",    False, "temperatureFan", "celsius", "temperature"),
+    # User-controllable fans (speed-based)
+    ("fan_generic ",        False, "fan",            "percent", "speed"),
+    # Auto-controlled fans (speed-based, NOT user-controllable)
+    ("heater_fan ",         False, "controllerFan",  "percent", "speed"),
+    ("controller_fan ",     False, "controllerFan",  "percent", "speed"),
+    # Part cooling fan (speed-based, controllable via M106/M107)
+    ("fan",                 True,  "fan",            "percent", "speed"),
+    # LED devices (brightness-based, controllable)
+    ("neopixel ",           False, "led",            "brightness", "color_data"),
+    ("dotstar ",            False, "led",            "brightness", "color_data"),
+    ("led ",                False, "led",            "brightness", "color_data"),
+    # Filament sensors (boolean, read-only)
+    ("filament_switch_sensor ", False, "filamentSensor", "boolean", "filament_detected"),
+    ("filament_motion_sensor ", False, "filamentSensor", "boolean", "filament_detected"),
+    # Output pins (float 0-1, controllable)
+    ("output_pin ",         False, "outputPin",      "percent", "value"),
+)
+
+_EXCLUDED_OBJECTS: frozenset[str] = frozenset({"temperatures", "toolhead"})
+
+_FAN_TYPES: frozenset[str] = frozenset({"fan", "controllerFan"})
+_PERCENT_TYPES: frozenset[str] = frozenset({"fan", "controllerFan", "outputPin"})
+
+
+def _match_registry_entry(
+    name: str,
+) -> Optional[tuple[str, bool, str, str, str]]:
+    """Return the first matching registry entry for *name*, or None."""
+    for entry in _SENSOR_TYPE_REGISTRY:
+        prefix, exact, *_ = entry
+        if exact:
+            if name == prefix:
+                return entry
+        else:
+            if name.startswith(prefix):
+                return entry
+    return None
+
+
 def _get_channel_name(name: str) -> Optional[str]:
     """Get the channel name from a Moonraker object name.
-    
+
     Returns the original Moonraker object name as the channel identifier,
     or None if this object type should be excluded from sensors.
-    
+
     The UI layer is responsible for formatting these names for display.
     """
-    # Exclude non-sensor objects
-    if name in {"temperatures", "toolhead"}:
+    if name in _EXCLUDED_OBJECTS:
         return None
-    
-    # Include all recognized sensor types
-    if name.startswith("extruder"):
-        return name
-    if name == "heater_bed":
-        return name
-    if name.startswith("heater_generic "):
-        return name
-    if name.startswith("temperature_sensor "):
-        return name
-    if name.startswith("temperature_fan "):
-        return name
-    if name == "fan":
-        return name
-    if name.startswith("fan_generic "):
-        return name
-    if name.startswith("heater_fan "):
-        return name
-    if name.startswith("controller_fan "):
-        return name
-    
-    return None
+    entry = _match_registry_entry(name)
+    return name if entry is not None else None
 
 
 def _infer_sensor_type(name: str) -> str:
     """Infer sensor type from Moonraker object name.
-    
-    Types:
+
+    Types returned:
     - 'heater': extruder, heater_bed, heater_generic (can set target)
     - 'temperatureFan': temperature_fan (can set target temperature)
     - 'sensor': temperature_sensor (read-only temperature)
-    - 'fan': regular fan (speed only, no temperature)
+    - 'fan': part cooling fan / fan_generic (speed-based, controllable)
+    - 'controllerFan': heater_fan / controller_fan (speed-based, NOT user-controllable)
     """
-    if name.startswith("extruder") or name == "heater_bed":
-        return "heater"
-    if name.startswith("heater_generic"):
-        return "heater"
-    if name.startswith("temperature_fan"):
-        return "temperatureFan"
-    if name.startswith("temperature_sensor"):
-        return "sensor"
-    if name == "fan":
-        return "fan"
-    return "sensor"
+    entry = _match_registry_entry(name)
+    return entry[2] if entry else "sensor"
 
 
 def _is_fan_type(sensor_type: str) -> bool:
     """Check if sensor type is a fan (speed-based, not temperature-based)."""
-    return sensor_type == "fan"
+    return sensor_type in _FAN_TYPES
 
 
 def _infer_unit(sensor_type: str) -> str:
     """Determine the unit based on sensor type."""
-    if sensor_type == "fan":
+    if sensor_type in _PERCENT_TYPES:
         return "percent"
+    if sensor_type == "led":
+        return "brightness"
+    if sensor_type == "filamentSensor":
+        return "boolean"
     return "celsius"
 
 
@@ -609,6 +700,41 @@ def _round_fan_speed(value: Any) -> Optional[float]:
         return None
     # Convert 0.0-1.0 to 0-100 and round to nearest integer (0.505 -> 51%)
     return float(round(numeric * 100))
+
+
+def _extract_led_brightness(data: Any) -> Optional[float]:
+    """Extract overall brightness (0-100%) from LED color_data.
+
+    Klipper's neopixel/dotstar/led objects expose `color_data` as a list
+    of per-LED RGBW tuples: [[R, G, B, W], ...].  We average the white
+    channel (index 3) across all LEDs and convert 0.0-1.0 to 0-100%.
+    If no white channel exists (RGB-only), we use the max of RGB per LED
+    and average across LEDs.
+    """
+    color_data = data.get("color_data") if isinstance(data, dict) else None
+    if not isinstance(color_data, list) or len(color_data) == 0:
+        return None
+
+    total = 0.0
+    count = 0
+    for led in color_data:
+        if not isinstance(led, (list, tuple)) or len(led) < 3:
+            continue
+        if len(led) >= 4:
+            brightness = _to_float(led[3])  # white channel
+        else:
+            brightness = max(
+                _to_float(led[0]) or 0.0,
+                _to_float(led[1]) or 0.0,
+                _to_float(led[2]) or 0.0,
+            )
+        if brightness is not None:
+            total += brightness
+            count += 1
+
+    if count == 0:
+        return None
+    return float(round((total / count) * 100))
 
 
 def _to_float(value: Any) -> Optional[float]:

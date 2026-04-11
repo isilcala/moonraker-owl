@@ -175,6 +175,29 @@ class MoonrakerClient(PrinterAdapter):
             LOGGER.warning("Failed to fetch available heaters: %s", exc)
             return {"available_heaters": [], "available_sensors": []}
 
+    async def fetch_registered_objects(self, timeout: float = 5.0) -> list[str]:
+        """Fetch the list of all registered Moonraker printer objects.
+
+        Returns object names like 'neopixel my_led', 'filament_switch_sensor runout',
+        'output_pin my_pin', etc.  Used for discovering non-thermal devices.
+        """
+        session = await self._ensure_session()
+        url = f"{self._base_url}/printer/objects/list"
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with session.get(url, headers=self._headers) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+
+            return data.get("result", {}).get("objects", [])
+        except asyncio.TimeoutError:
+            LOGGER.warning("Fetching registered objects timed out after %.1fs", timeout)
+            return []
+        except (OSError, KeyError) as exc:
+            LOGGER.warning("Failed to fetch registered objects: %s", exc)
+            return []
+
     def set_subscription_objects(
         self, objects: Mapping[str, Optional[list[str]]] | None
     ) -> None:

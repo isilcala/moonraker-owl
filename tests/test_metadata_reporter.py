@@ -778,7 +778,77 @@ class TestSensorInventoryProvider:
             assert by_name[fan_name]["hasTarget"] is False
 
     @pytest.mark.asyncio
-    async def test_detect_empty_printer(self, provider):
+    async def test_detect_leds_output_pins_filament_sensors(self, provider):
+        """LEDs, output pins, and filament sensors from objects list should be discovered."""
+        heaters_response = {
+            "result": {"status": {"heaters": {"available_heaters": [], "available_sensors": []}}}
+        }
+        objects_response = {
+            "result": {
+                "objects": [
+                    "neopixel bed_leds",
+                    "neopixel tool_leds",
+                    "dotstar my_dotstar",
+                    "led caselight_led",
+                    "output_pin caselight",
+                    "output_pin relay",
+                    "filament_switch_sensor btt_sensor",
+                    "filament_motion_sensor encoder",
+                    "fan_generic nevermore",
+                    "gcode_move",
+                    "toolhead",
+                ]
+            }
+        }
+
+        call_count = 0
+
+        async def mock_get(*args, **kwargs):
+            nonlocal call_count
+            resp = AsyncMock()
+            resp.status = 200
+            resp.json = AsyncMock(
+                return_value=heaters_response if call_count == 0 else objects_response
+            )
+            call_count += 1
+            return resp
+
+        with patch.object(provider, "_ensure_session") as mock_session:
+            session_obj = MagicMock()
+            ctx = AsyncMock()
+            ctx.__aenter__ = mock_get
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            session_obj.get = MagicMock(return_value=ctx)
+            mock_session.return_value = session_obj
+
+            result = await provider.detect()
+
+        by_name = {s["name"]: s for s in result["sensors"]["available"]}
+
+        # LEDs
+        assert by_name["neopixel bed_leds"]["type"] == "led"
+        assert by_name["neopixel tool_leds"]["type"] == "led"
+        assert by_name["dotstar my_dotstar"]["type"] == "led"
+        assert by_name["led caselight_led"]["type"] == "led"
+
+        # Output pins
+        assert by_name["output_pin caselight"]["type"] == "output_pin"
+        assert by_name["output_pin relay"]["type"] == "output_pin"
+
+        # Filament sensors
+        assert by_name["filament_switch_sensor btt_sensor"]["type"] == "filament_sensor"
+        assert by_name["filament_motion_sensor encoder"]["type"] == "filament_sensor"
+
+        # Fan (from _OBJECT_TYPE_MAP)
+        assert by_name["fan_generic nevermore"]["type"] == "fan"
+
+        # Non-sensor objects should NOT be discovered
+        assert "gcode_move" not in by_name
+        assert "toolhead" not in by_name
+
+        # All should have hasTarget = False
+        for sensor in result["sensors"]["available"]:
+            assert sensor["hasTarget"] is False
         """Should return empty list when no sensors at all."""
         heaters_response = {
             "result": {"status": {"heaters": {"available_heaters": [], "available_sensors": []}}}

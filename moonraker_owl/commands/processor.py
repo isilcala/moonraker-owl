@@ -36,8 +36,11 @@ from .handlers import (
     FanCommandsMixin,
     GCodeCommandsMixin,
     HeaterCommandsMixin,
+    LedCommandsMixin,
     MetadataCommandsMixin,
+    OutputPinCommandsMixin,
     PrintCommandsMixin,
+    PrintParamCommandsMixin,
     QueryCommandsMixin,
     TaskCommandsMixin,
 )
@@ -49,6 +52,9 @@ class CommandProcessor(
     PrintCommandsMixin,
     HeaterCommandsMixin,
     FanCommandsMixin,
+    LedCommandsMixin,
+    OutputPinCommandsMixin,
+    PrintParamCommandsMixin,
     TaskCommandsMixin,
     ControlCommandsMixin,
     QueryCommandsMixin,
@@ -533,6 +539,24 @@ class CommandProcessor(
         # Fan control commands
         if message.command == PrinterCommandNames.FAN_SET_SPEED:
             return await self._execute_fan_set_speed(message)
+
+        # LED control commands
+        if message.command == PrinterCommandNames.SET_LED:
+            return await self._execute_set_led(message)
+
+        # Output pin control commands
+        if message.command == PrinterCommandNames.SET_OUTPUT_PIN:
+            return await self._execute_set_output_pin(message)
+
+        # Print parameter control commands
+        if message.command == PrinterCommandNames.SET_SPEED:
+            return await self._execute_set_speed(message)
+        if message.command == PrinterCommandNames.SET_FLOW:
+            return await self._execute_set_flow(message)
+        if message.command == PrinterCommandNames.SET_Z_OFFSET:
+            return await self._execute_set_z_offset(message)
+        if message.command == PrinterCommandNames.RESET_Z_OFFSET:
+            return await self._execute_reset_z_offset(message)
 
         # Object control commands (ADR-0016)
         if message.command == PrinterCommandNames.OBJECT_EXCLUDE:
