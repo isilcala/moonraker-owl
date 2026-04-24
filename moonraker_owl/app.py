@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional
 
@@ -494,29 +495,34 @@ class MoonrakerOwlApp:
 
         # Configure Last Will and Testament (LWT) for crash detection (D5)
         # The broker publishes this message if the agent disconnects unexpectedly.
-        # Note: $ts is set at registration time, not crash time.
+        # Note: $ts/lastUpdated are set at registration time, not crash time.
         from .version import __version__
         from .identifiers import uuid7
 
+        lwt_registered_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         lwt_payload = {
             "$v": 1,
             "$type": "telemetry.status",
             "$id": str(uuid7()),
-            "$ts": "",
+            "$ts": lwt_registered_at,
             "$origin": f"moonraker-owl@{__version__}",
+            "$seq": 0,
+            "kind": "full",
+            "sessionId": None,
             "deviceId": str(device_id),
             "payload": {
                 "lifecycle": {
                     "phase": "Offline",
                     "isHeating": False,
                     "hasActiveJob": False,
+                    "isShutdown": False,
                     "reason": "Connection lost (LWT)",
                 },
                 "cadence": {
-                    "heartbeatSeconds": 0,
+                    "heartbeatSeconds": self._config.telemetry_cadence.status_heartbeat_seconds,
                     "watchWindowActive": False,
                 },
-                "lastUpdated": "",
+                "lastUpdated": lwt_registered_at,
             },
         }
         lwt_topic = f"{self._base_topic}/status"

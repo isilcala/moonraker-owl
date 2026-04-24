@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import types
 from typing import Any, Optional
 
@@ -55,6 +56,57 @@ class _StubCommandProcessor:
         self.abandon_reasons.append(reason)
 
 
+class _StubPrinterBackend:
+    def __init__(self) -> None:
+        self.stop_calls = 0
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+
+
+class _StubTokenManager:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.started = False
+        self.stopped = False
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    def get_token(self) -> str:
+        return "token"
+
+
+class _StubCloudConfigManager:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.callbacks: list[Any] = []
+        self.loaded = False
+
+    def register_callback(self, callback: Any) -> None:
+        self.callbacks.append(callback)
+
+    def load_lkg(self) -> None:
+        self.loaded = True
+
+
+class _StubMqttClient:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.disconnect_handlers: list[Any] = []
+        self.connect_handlers: list[Any] = []
+        self.last_will: dict[str, Any] | None = None
+
+    def register_disconnect_handler(self, handler: Any) -> None:
+        self.disconnect_handlers.append(handler)
+
+    def register_connect_handler(self, handler: Any) -> None:
+        self.connect_handlers.append(handler)
+
+    def set_last_will(self, **kwargs: Any) -> None:
+        self.last_will = kwargs
+
+
 @pytest.mark.asyncio
 async def test_moonraker_breaker_trips_after_failures() -> None:
     config = build_config(breaker_threshold=2)
@@ -83,6 +135,54 @@ async def test_moonraker_breaker_trips_after_failures() -> None:
     assert telemetry.stop_calls == 0
     assert telemetry.system_status_calls == [("error", "rpc timeout")]
     assert app._telemetry_ready is True
+
+
+@pytest.mark.asyncio
+async def test_start_services_registers_contract_compliant_lwt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_config()
+    config.cloud.device_private_key = "test-private-key"
+    backend = _StubPrinterBackend()
+    app = MoonrakerOwlApp(config, printer_backend=backend)
+
+    monkeypatch.setattr("moonraker_owl.app.TokenManager", _StubTokenManager)
+    monkeypatch.setattr("moonraker_owl.app.CloudConfigManager", _StubCloudConfigManager)
+    monkeypatch.setattr("moonraker_owl.app.MQTTClient", _StubMqttClient)
+
+    async def _fake_start_metadata_reporter(self: MoonrakerOwlApp, device_id: str) -> None:
+        return None
+
+    async def _fake_connect_mqtt(self: MoonrakerOwlApp) -> bool:
+        return False
+
+    monkeypatch.setattr(MoonrakerOwlApp, "_start_metadata_reporter", _fake_start_metadata_reporter)
+    monkeypatch.setattr(MoonrakerOwlApp, "_connect_mqtt", _fake_connect_mqtt)
+
+    started = await app._start_services()
+
+    assert started is False
+    assert backend.stop_calls == 1
+    assert isinstance(app._mqtt_client, _StubMqttClient)
+    assert app._mqtt_client.last_will is not None
+    assert app._device_id is not None
+
+    last_will = app._mqtt_client.last_will
+    assert last_will["topic"] == f"owl/printers/{app._device_id}/status"
+    assert last_will["qos"] == 1
+    assert last_will["retain"] is True
+
+    document = json.loads(last_will["payload"].decode("utf-8"))
+    assert document["$type"] == "telemetry.status"
+    assert document["deviceId"] == app._device_id
+    assert document["$seq"] == 0
+    assert document["kind"] == "full"
+    assert document["sessionId"] is None
+    assert document["$ts"]
+    assert document["payload"]["lastUpdated"] == document["$ts"]
+    assert document["payload"]["lifecycle"]["phase"] == "Offline"
+    assert document["payload"]["lifecycle"]["isShutdown"] is False
+    assert document["payload"]["cadence"]["heartbeatSeconds"] == config.telemetry_cadence.status_heartbeat_seconds
 
 
 @pytest.mark.asyncio

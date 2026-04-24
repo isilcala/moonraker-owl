@@ -238,26 +238,33 @@ class TestLwtPayloadStructure:
     def _build_lwt_payload() -> dict:
         """Build an LWT payload matching app.py's structure."""
         import uuid
+        from datetime import datetime, timezone
+
+        registered_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
         return {
             "$v": 1,
             "$type": "telemetry.status",
             "$id": str(uuid.uuid4()),
-            "$ts": "",
+            "$ts": registered_at,
             "$origin": "moonraker-owl@0.5.0",
+            "$seq": 0,
+            "kind": "full",
+            "sessionId": None,
             "deviceId": str(uuid.uuid4()),
             "payload": {
                 "lifecycle": {
                     "phase": "Offline",
                     "isHeating": False,
                     "hasActiveJob": False,
+                    "isShutdown": False,
                     "reason": "Connection lost (LWT)",
                 },
                 "cadence": {
-                    "heartbeatSeconds": 0,
+                    "heartbeatSeconds": 60,
                     "watchWindowActive": False,
                 },
-                "lastUpdated": "",
+                "lastUpdated": registered_at,
             },
         }
 
@@ -267,8 +274,12 @@ class TestLwtPayloadStructure:
         assert doc["$v"] == 1
         assert doc["$type"] == "telemetry.status"
         assert doc["$id"]
-        assert "$ts" in doc
+        assert doc["$ts"]
         assert doc["$origin"]
+        assert doc["$seq"] == 0
+        assert doc["kind"] == "full"
+        assert "sessionId" in doc
+        assert doc["sessionId"] is None
         assert doc["deviceId"]
 
     def test_lwt_lifecycle_phase_is_offline(self):
@@ -278,19 +289,20 @@ class TestLwtPayloadStructure:
         assert lifecycle["phase"] == "Offline"
         assert lifecycle["isHeating"] is False
         assert lifecycle["hasActiveJob"] is False
+        assert lifecycle["isShutdown"] is False
         assert lifecycle["reason"] == "Connection lost (LWT)"
 
     def test_lwt_cadence_is_zeroed(self):
         doc = self._build_lwt_payload()
         cadence = doc["payload"]["cadence"]
 
-        assert cadence["heartbeatSeconds"] == 0
+        assert cadence["heartbeatSeconds"] > 0
         assert cadence["watchWindowActive"] is False
 
     def test_lwt_payload_has_last_updated(self):
         doc = self._build_lwt_payload()
 
-        assert "lastUpdated" in doc["payload"]
+        assert doc["payload"]["lastUpdated"]
 
 
 # ---------------------------------------------------------------------------
