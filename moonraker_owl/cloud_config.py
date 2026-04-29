@@ -12,7 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
+import stat
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -362,9 +365,34 @@ class CloudConfigManager:
         try:
             self._lkg_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._lkg_path.with_suffix(".tmp")
+            # Restrict permissions on the tmp file *before* writing the
+            # secret-bearing payload (audit A-05 / Q-2). LKG snapshots can
+            # contain device-scoped policy that should not be world-readable
+            # on shared hosts. POSIX-only; chmod is a no-op on Windows.
             with tmp.open("w", encoding="utf-8") as f:
+                if sys.platform != "win32":
+                    try:
+                        os.fchmod(f.fileno(), stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+                    except OSError as chmod_exc:
+                        LOGGER.warning(
+                            "Failed to chmod LKG tmp file %s: %s",
+                            tmp,
+                            chmod_exc,
+                        )
                 json.dump(lkg, f, indent=2)
             tmp.replace(self._lkg_path)
+            # Re-assert mode after replace in case umask widened it on the
+            # destination inode (defensive — `replace` preserves the source
+            # mode on POSIX, but make the invariant explicit).
+            if sys.platform != "win32":
+                try:
+                    os.chmod(self._lkg_path, stat.S_IRUSR | stat.S_IWUSR)
+                except OSError as chmod_exc:
+                    LOGGER.warning(
+                        "Failed to chmod LKG file %s: %s",
+                        self._lkg_path,
+                        chmod_exc,
+                    )
             LOGGER.debug("LKG cache written to %s", self._lkg_path)
         except OSError as exc:
             LOGGER.warning("Failed to write LKG cache: %s", exc)

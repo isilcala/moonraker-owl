@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict
 
 from ..types import CommandMessage, CommandProcessingError
+from ._validation import validate_klipper_identifier
 
 LOGGER = logging.getLogger(__name__)
 
@@ -53,6 +54,13 @@ class HeaterCommandsMixin:
 
         # Validate heater exists and get temperature limits
         heater_normalized = heater.strip().lower()
+        # Defense-in-depth: even though heater_normalized is matched against
+        # an allow-list below, validate the identifier shape so that if the
+        # allow-list source is ever broken or bypassed we still cannot inject
+        # G-code via a crafted heater name.
+        heater_normalized = validate_klipper_identifier(
+            heater_normalized, field="heater", command_id=message.command_id
+        )
         valid_heaters = await self._get_valid_heaters()
         if heater_normalized not in valid_heaters:
             raise CommandProcessingError(
@@ -120,6 +128,10 @@ class HeaterCommandsMixin:
             )
 
         heater_normalized = heater.strip().lower()
+        # Defense-in-depth: see comment in _execute_heater_set_target.
+        heater_normalized = validate_klipper_identifier(
+            heater_normalized, field="heater", command_id=message.command_id
+        )
         valid_heaters = await self._get_valid_heaters()
         if heater_normalized not in valid_heaters:
             raise CommandProcessingError(

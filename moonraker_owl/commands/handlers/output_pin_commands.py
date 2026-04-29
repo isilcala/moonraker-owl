@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict
 
 from ..types import CommandMessage, CommandProcessingError
+from ._validation import validate_klipper_identifier
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +67,11 @@ class OutputPinCommandsMixin:
             pin_name = pin_lower[len("output_pin "):]
         else:
             pin_name = pin_lower
+
+        # Defense against G-code injection: see _validation module.
+        pin_name = validate_klipper_identifier(
+            pin_name, field="pin", command_id=message.command_id
+        )
 
         script = f"SET_PIN PIN={pin_name} VALUE={pin_value:.2f}"
 

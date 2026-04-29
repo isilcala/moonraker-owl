@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict
 
 from ..types import CommandMessage, CommandProcessingError
+from ._validation import validate_klipper_identifier
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +72,13 @@ class LedCommandsMixin:
                 break
         else:
             led_name = led_lower
+
+        # Defense against G-code injection: reject any name with whitespace,
+        # newlines, '=' or other metacharacters before interpolating into the
+        # SET_LED script. See _validation.validate_klipper_identifier.
+        led_name = validate_klipper_identifier(
+            led_name, field="led", command_id=message.command_id
+        )
 
         v = f"{brightness_value:.2f}"
         script = f"SET_LED LED={led_name} RED={v} GREEN={v} BLUE={v} WHITE={v}"

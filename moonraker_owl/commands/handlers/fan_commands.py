@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict
 
 from ..types import CommandMessage, CommandProcessingError
+from ._validation import validate_klipper_identifier
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,6 +85,11 @@ class FanCommandsMixin:
             else:
                 # Assume fan_lower is already the short name
                 fan_name = fan_lower
+
+            # Defense against G-code injection: see _validation module.
+            fan_name = validate_klipper_identifier(
+                fan_name, field="fan", command_id=message.command_id
+            )
 
             script = f"SET_FAN_SPEED FAN={fan_name} SPEED={speed_value:.2f}"
 

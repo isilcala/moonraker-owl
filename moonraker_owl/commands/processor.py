@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from ..printer_command_names import PrinterCommandNames
 from ..identifiers import uuid7
 from ..config import OwlConfig
+from ..constants import DEFAULT_IDEMPOTENCY_PATH
 from ..version import __version__
 from ..telemetry import TelemetryPublisher
 from ..adapters.s3_upload import S3UploadClient
@@ -97,11 +98,15 @@ class CommandProcessor(
         self._inflight: Dict[str, _InflightCommand] = {}
 
         # Idempotency guard for duplicate command detection (ADR-0013 Appendix D)
-        # Uses TTL-based expiration instead of fixed-size history
+        # Uses TTL-based expiration instead of fixed-size history.
+        # Audit A-08: persisted across process restarts so an in-flight
+        # Cold Path retry from the cloud cannot replay a command that
+        # already executed before a `systemctl restart` window.
         self._idempotency = CommandIdempotencyGuard(
             ttl_hours=24,
             max_entries=10000,
             cleanup_interval=100,
+            state_path=DEFAULT_IDEMPOTENCY_PATH,
         )
 
         # State-based command completion tracking

@@ -62,6 +62,13 @@ class TelemetryCadenceConfig:
     status_idle_interval_seconds: float = 60.0
     status_active_interval_seconds: float = 15.0
     status_min_interval_seconds: float = 2.0  # Defensive rate cap for status channel
+    # Audit A-09: defensive rate floor for the sensors channel. The cloud's
+    # `control:set-telemetry-rate` (mode=watch) accepts an arbitrary
+    # intervalSeconds; without an agent-side floor, a malicious or buggy
+    # cloud could drive intervalSeconds=0.001 and DoS Moonraker. 0.5s is
+    # well below any legitimate UI watch-window cadence (~1–2 Hz) but
+    # caps worst-case load at 2 Hz.
+    sensors_min_interval_seconds: float = 0.5
     sensors_force_publish_seconds: float = 300.0  # Maximum seconds without sensor publish before forcing one
     events_max_per_second: int = 1
     events_max_per_minute: int = 20
@@ -81,6 +88,14 @@ class CloudConfig:
     username: Optional[str] = None
     password: Optional[str] = None
     device_private_key: Optional[str] = None  # Base64-encoded Ed25519 private key for JWT authentication
+    # Audit A-02 / A-03: hosts the cloud is allowed to send the agent to
+    # via task:download-gcode `downloadUrl` and task:capture-image
+    # `uploadUrl`. The host parsed from `base_url` is always implicitly
+    # trusted. Entries may be exact hostnames ("files.example.com") or
+    # suffixes starting with a dot (".amazonaws.com" matches any
+    # subdomain). Loopback / private-IP literals are rejected unless
+    # listed verbatim (opt-in for dev/MinIO setups).
+    allowed_storage_hosts: List[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -275,6 +290,23 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
 
     cloud_raw = raw.get("cloud", {})
 
+    # Deprecation warnings (audit OQ-5): credentials belong in
+    # ~/.moonraker-owl/credentials.json, not the world-readable TOML.
+    # We continue to honour these keys for backward-compat, but warn loudly
+    # so users migrate before the next major release removes them.
+    if cloud_raw.get("password"):
+        LOGGER.warning(
+            "[deprecation] cloud.password is deprecated and will be removed "
+            "in a future release. Move credentials to "
+            "~/.moonraker-owl/credentials.json (run `moonraker-owl link`)."
+        )
+    if cloud_raw.get("device_private_key"):
+        LOGGER.warning(
+            "[deprecation] cloud.device_private_key is deprecated and will "
+            "be removed in a future release. Move it to "
+            "~/.moonraker-owl/credentials.json (run `moonraker-owl link`)."
+        )
+
     broker_host_value = str(cloud_raw.get("broker_host", constants.DEFAULT_BROKER_HOST))
     broker_port_value = int(cloud_raw.get("broker_port", 8883))
 
@@ -303,6 +335,9 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         username=cloud_raw.get("username") or None,
         password=cloud_raw.get("password") or None,
         device_private_key=cloud_raw.get("device_private_key") or None,
+        allowed_storage_hosts=[
+            str(h) for h in cloud_raw.get("allowed_storage_hosts", []) if isinstance(h, str)
+        ],
     )
 
     mr_raw = raw.get("moonraker", {})
@@ -334,6 +369,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         status_heartbeat_seconds=int(_get(cad_raw, "status_heartbeat_seconds", cad_defaults.status_heartbeat_seconds)),
         status_idle_interval_seconds=float(_get(cad_raw, "status_idle_interval_seconds", cad_defaults.status_idle_interval_seconds)),
         status_active_interval_seconds=float(_get(cad_raw, "status_active_interval_seconds", cad_defaults.status_active_interval_seconds)),
+        sensors_min_interval_seconds=float(_get(cad_raw, "sensors_min_interval_seconds", cad_defaults.sensors_min_interval_seconds)),
         sensors_force_publish_seconds=float(_get(cad_raw, "sensors_force_publish_seconds", cad_defaults.sensors_force_publish_seconds)),
         events_max_per_second=int(_get(cad_raw, "events_max_per_second", cad_defaults.events_max_per_second)),
         events_max_per_minute=int(_get(cad_raw, "events_max_per_minute", cad_defaults.events_max_per_minute)),
@@ -473,3 +509,37 @@ def merge_credentials(config: OwlConfig, credentials_path: Optional[Path] = None
         cloud.username = cloud.device_id
 
 
+class ConfigurationError(RuntimeError):
+    """Raised when the loaded configuration is missing required values.
+
+    Distinct from parser-level errors so that callers (cli.py, app startup)
+    can present a friendly message and exit non-zero rather than dump a
+    stack trace.
+    """
+
+
+def validate_runtime_config(config: OwlConfig) -> None:
+    """Fail-fast on missing critical cloud-connection settings.
+
+    Audit A-10 / OQ-3: there is intentionally no shipped default for
+    ``cloud.base_url`` / ``cloud.broker_host``. A fresh install must explicitly
+    name its cloud target so we cannot silently route a production printer at
+    a developer endpoint.
+
+    This is invoked at the boundary of `start` / `link` (and from the app
+    bootstrap) — `load_config` itself remains pure parsing so unit tests can
+    continue to exercise partial TOML files without tripping these checks.
+    """
+    missing: list[str] = []
+    if not config.cloud.base_url:
+        missing.append("cloud.base_url")
+    if not config.cloud.broker_host:
+        missing.append("cloud.broker_host")
+
+    if missing:
+        joined = ", ".join(missing)
+        raise ConfigurationError(
+            f"Missing required configuration: {joined}. "
+            f"Set these values in {config.path} (see owl.toml.example) "
+            "before running `moonraker-owl start` or `moonraker-owl link`."
+        )

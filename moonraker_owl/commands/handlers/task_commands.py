@@ -13,6 +13,13 @@ from datetime import timezone
 from typing import Any, Dict
 
 from ..types import CommandMessage, CommandProcessingError
+from ._url_validation import (
+    MAX_CAPTURE_UPLOAD_BYTES,
+    MAX_DOWNLOAD_BYTES,
+    build_allowlist,
+    validate_external_url,
+    validate_gcode_content_type,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -94,7 +101,19 @@ class TaskCommandsMixin:
         frame_id = params.get("frameId")
         upload_url = params.get("uploadUrl")
         blob_key = params.get("blobKey")
-        max_size_bytes = params.get("maxFileSizeBytes", 5 * 1024 * 1024)  # 5 MB default
+
+        # Audit A-03: enforce an agent-side hard ceiling on capture
+        # size regardless of what the cloud says. The cloud may pass
+        # a *smaller* maxFileSizeBytes (e.g. for thumbnail captures),
+        # but never a larger one.
+        cloud_supplied_max = params.get("maxFileSizeBytes", 5 * 1024 * 1024)
+        try:
+            cloud_supplied_max = int(cloud_supplied_max)
+        except (TypeError, ValueError):
+            cloud_supplied_max = 5 * 1024 * 1024
+        if cloud_supplied_max <= 0:
+            cloud_supplied_max = 5 * 1024 * 1024
+        max_size_bytes = min(cloud_supplied_max, MAX_CAPTURE_UPLOAD_BYTES)
 
         if not frame_id:
             raise CommandProcessingError(
@@ -116,6 +135,20 @@ class TaskCommandsMixin:
                 code="invalid_parameters",
                 command_id=message.command_id,
             )
+
+        # Audit A-03: pin uploadUrl host against the configured allowlist
+        # so a compromised cloud cannot exfiltrate camera frames to an
+        # attacker-controlled bucket.
+        allowlist = build_allowlist(
+            cloud_base_url=self._config.cloud.base_url,
+            extra_allowed_hosts=self._config.cloud.allowed_storage_hosts,
+        )
+        validate_external_url(
+            upload_url,
+            field="uploadUrl",
+            command_id=message.command_id,
+            allowlist=allowlist,
+        )
 
         # Capture image from webcam
         capture_result = await self._camera.capture()
@@ -253,13 +286,44 @@ class TaskCommandsMixin:
                 command_id=message.command_id,
             )
 
+        # Audit A-02: pin downloadUrl host against the configured
+        # allowlist before opening any sockets. Defends against SSRF
+        # to LAN/loopback hosts and against arbitrary attacker-controlled
+        # CDNs being used to substitute GCode.
+        allowlist = build_allowlist(
+            cloud_base_url=self._config.cloud.base_url,
+            extra_allowed_hosts=self._config.cloud.allowed_storage_hosts,
+        )
+        download_host = validate_external_url(
+            download_url,
+            field="downloadUrl",
+            command_id=message.command_id,
+            allowlist=allowlist,
+        )
+
+        # Audit A-02: also reject up-front if the cloud-supplied size
+        # is larger than the agent's hard cap. The streaming loop below
+        # enforces this as well, but rejecting early avoids opening the
+        # connection at all.
+        if isinstance(file_size, int) and file_size > MAX_DOWNLOAD_BYTES:
+            return {
+                "success": False,
+                "transferId": transfer_id,
+                "error": "file_too_large",
+                "errorMessage": (
+                    f"declared fileSizeBytes={file_size} exceeds agent hard cap "
+                    f"{MAX_DOWNLOAD_BYTES}"
+                ),
+            }
+
         # Dynamic timeout: base 30s + file_size / 100KB/s (conservative)
         min_bandwidth_bps = 100 * 1024  # 100 KB/s minimum
         download_timeout = 30.0 + (file_size / min_bandwidth_bps if file_size > 0 else 60.0)
 
         LOGGER.info(
-            "Downloading GCode file for transfer %s: %s (%d bytes, timeout=%.0fs)",
+            "Downloading GCode file for transfer %s from host=%s: %s (%d bytes, timeout=%.0fs)",
             transfer_id,
+            download_host,
             file_name,
             file_size,
             download_timeout,
@@ -282,6 +346,15 @@ class TaskCommandsMixin:
                                 "errorMessage": f"HTTP {response.status}: {detail[:200]}",
                             }
 
+                        # Audit A-02: reject non-GCode content types
+                        # before consuming the body. A compromised cloud
+                        # could otherwise smuggle HTML/JSON into
+                        # Moonraker's GCode store.
+                        validate_gcode_content_type(
+                            response.headers.get("Content-Type"),
+                            command_id=message.command_id,
+                        )
+
                         # Write to temp file
                         tmp_fd = tempfile.NamedTemporaryFile(
                             suffix=".gcode", delete=False
@@ -295,6 +368,17 @@ class TaskCommandsMixin:
                                     tmp_fd.write(chunk)
                                     sha256.update(chunk)
                                     total_bytes += len(chunk)
+                                    # Audit A-02: enforce hard cap on
+                                    # actual streamed bytes. A malicious
+                                    # server can ignore Content-Length
+                                    # and stream forever; abort early.
+                                    if total_bytes > MAX_DOWNLOAD_BYTES:
+                                        raise CommandProcessingError(
+                                            f"download exceeded hard cap of "
+                                            f"{MAX_DOWNLOAD_BYTES} bytes",
+                                            code="download_too_large",
+                                            command_id=message.command_id,
+                                        )
                         except Exception:
                             raise
 
@@ -362,6 +446,21 @@ class TaskCommandsMixin:
                 "transferId": transfer_id,
                 "error": "download_timeout",
                 "errorMessage": f"Download timed out after {download_timeout:.0f}s",
+            }
+        except CommandProcessingError as exc:
+            # Audit A-02: surface validation failures (size cap,
+            # content-type) as a structured error rather than a
+            # generic download_failed.
+            LOGGER.warning(
+                "GCode download rejected for transfer %s: %s",
+                transfer_id,
+                exc,
+            )
+            return {
+                "success": False,
+                "transferId": transfer_id,
+                "error": exc.code or "download_rejected",
+                "errorMessage": str(exc),
             }
         except Exception as exc:
             LOGGER.error(

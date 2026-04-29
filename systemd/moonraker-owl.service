@@ -24,6 +24,12 @@ WorkingDirectory={{PROJECT_DIR}}
 ExecStart={{VENV_DIR}}/bin/moonraker-owl --config {{CONFIG_FILE}} start
 Restart=always
 RestartSec=5
+# Audit Sprint-1 follow-up (Boy Scout): exit code 2 is reserved for
+# `ConfigurationError` from `validate_runtime_config` (missing required
+# cloud.base_url / cloud.broker_host). Restarting on a configuration
+# fault would loop forever and spam journald \u2014 fail-fast instead so
+# the operator notices and fixes the TOML.
+RestartPreventExitStatus=2
 StandardOutput=journal
 StandardError=journal
 

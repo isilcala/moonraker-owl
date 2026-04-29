@@ -143,6 +143,19 @@ install_package() {
     # Upgrade pip first
     "${VENV_DIR}/bin/pip" install --upgrade pip -i "${PIP_MIRROR}" --quiet
 
+    # Audit A-07: prefer the hash-pinned lockfile when it ships with the
+    # release. `--require-hashes` forces every dependency (transitive too)
+    # to come with a recorded hash; if the lockfile is missing or the user
+    # is on an older release that predates it, fall back to editable install
+    # against pyproject's bounded version specifiers.
+    if [[ -f "${PROJECT_DIR}/requirements.lock.txt" ]]; then
+        print_info "Installing pinned dependencies from requirements.lock.txt..."
+        "${VENV_DIR}/bin/pip" install \
+            --require-hashes \
+            -r "${PROJECT_DIR}/requirements.lock.txt" \
+            -i "${PIP_MIRROR}"
+    fi
+
     # Install the package in editable mode so that source changes from
     # Moonraker's git-based update_manager take effect immediately
     # without requiring a separate `pip install` step.
@@ -165,7 +178,15 @@ create_config() {
             exit 1
         fi
         cp "${PROJECT_DIR}/owl.toml.example" "${CONFIG_FILE}"
-        print_step "Configuration file created at ${CONFIG_FILE}"
+        # Audit A-06 / Q-3: configuration may contain MQTT credentials and the
+        # Moonraker API key. Restrict to owner before the operator edits it.
+        chmod 0600 "${CONFIG_FILE}"
+        print_step "Configuration file created at ${CONFIG_FILE} (mode 0600)"
+    fi
+    # Re-assert tight permissions even when the file already existed: if a
+    # previous install was interrupted before chmod, fix it on next run.
+    if [[ -f "${CONFIG_FILE}" ]]; then
+        chmod 0600 "${CONFIG_FILE}" 2>/dev/null || true
     fi
 }
 
@@ -191,6 +212,9 @@ WorkingDirectory=${PROJECT_DIR}
 ExecStart=${VENV_DIR}/bin/moonraker-owl --config ${CONFIG_FILE} start
 Restart=always
 RestartSec=5
+# Exit code 2 is reserved for ConfigurationError (missing required
+# cloud.base_url / cloud.broker_host); do not restart-loop on it.
+RestartPreventExitStatus=2
 StandardOutput=journal
 StandardError=journal
 

@@ -233,6 +233,7 @@ class TelemetryPublisher:
             self._cadence.status_active_interval_seconds
         )
         self._status_min_interval = self._cadence.status_min_interval_seconds
+        self._sensors_min_interval = self._cadence.sensors_min_interval_seconds
         self._sensors_force_publish_seconds = self._cadence.sensors_force_publish_seconds
         self._watch_window_expires: Optional[datetime] = None
         self._current_mode = "idle"
@@ -1353,6 +1354,7 @@ class TelemetryPublisher:
         self._status_idle_interval = cfg.telemetry_cadence.status_idle_interval_seconds
         self._status_active_interval = cfg.telemetry_cadence.status_active_interval_seconds
         self._status_min_interval = cfg.telemetry_cadence.status_min_interval_seconds
+        self._sensors_min_interval = cfg.telemetry_cadence.sensors_min_interval_seconds
         self._sensors_force_publish_seconds = cfg.telemetry_cadence.sensors_force_publish_seconds
 
         # If in idle mode, propagate the new idle interval to sensors
@@ -1482,6 +1484,25 @@ class TelemetryPublisher:
     ) -> Optional[datetime]:
         mode = (mode or "idle").strip().lower() or "idle"
         interval_seconds = max(0.0, interval_seconds)
+        # Audit A-09: enforce an agent-side floor so a malicious or
+        # buggy cloud cannot send `control:set-telemetry-rate` with
+        # mode=watch, intervalSeconds=0.001 and DoS Moonraker. We
+        # only floor the *watch* mode \u2014 idle cadence is operator-
+        # configured via TOML (`telemetry.sensors_interval_seconds`)
+        # and legitimately runs as fast as 100 ms in tests/dev. The
+        # cloud-side dispatcher already rate-limits; this is
+        # defense-in-depth at the trust boundary.
+        if (
+            mode == "watch"
+            and interval_seconds > 0
+            and interval_seconds < self._sensors_min_interval
+        ):
+            LOGGER.warning(
+                "sensors watch interval %.3fs clamped to floor %.3fs",
+                interval_seconds,
+                self._sensors_min_interval,
+            )
+            interval_seconds = self._sensors_min_interval
         requested_at = requested_at or datetime.now(timezone.utc)
         normalized_duration = (
             duration_seconds if duration_seconds and duration_seconds > 0 else None

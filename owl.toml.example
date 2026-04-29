@@ -13,14 +13,42 @@
 # Network infrastructure settings for reaching the Owl Cloud.
 # Device credentials are stored separately in ~/.moonraker-owl/credentials.json
 # and are populated automatically by `moonraker-owl link`.
+#
+# IMPORTANT: do NOT put `password` or `device_private_key` in this file.
+# Those keys are deprecated and will be removed in a future release; the
+# secure location is ~/.moonraker-owl/credentials.json (mode 0600).
 [cloud]
-# Owl Cloud API endpoint (Staging environment)
-base_url = "https://owl.elencala.com"
+# Owl Cloud API endpoint. REQUIRED — there is no shipped default; the agent
+# refuses to start if this is missing so it cannot silently target a
+# developer environment. Ask your operator for the correct value, e.g.:
+#   base_url = "https://owl.example.com"
+base_url = ""
 
-# MQTT broker for real-time communication (Staging environment)
-# Uses TLS on port 8883 - Traefik terminates TLS and forwards to EMQX
-broker_host = "mqtt.owl.elencala.com"
+# MQTT broker for real-time communication. REQUIRED.
+# Uses TLS on port 8883 by default.
+broker_host = ""
 broker_port = 8883
+
+# Audit A-02 / A-03 (Sprint 2): allowlist of additional hosts the cloud
+# is allowed to send the agent to via `task:download-gcode` (downloadUrl)
+# and `task:capture-image` (uploadUrl). The host parsed from `base_url`
+# above is always implicitly trusted, so you only need this list when
+# downloads / uploads target a different host (typically object storage).
+#
+# Entries may be:
+#   * exact hostnames     — "files.example.com"
+#   * suffix matches      — ".amazonaws.com" matches any subdomain
+#   * IP literals (dev)   — "127.0.0.1" or "192.168.1.50" are accepted
+#                           ONLY when listed verbatim here (to allow
+#                           local MinIO / dev setups). Otherwise
+#                           private/loopback IPs are rejected as SSRF.
+#
+# Example for production with Aliyun OSS:
+#   allowed_storage_hosts = [".aliyuncs.com"]
+#
+# Example for local development with MinIO:
+#   allowed_storage_hosts = ["127.0.0.1"]
+allowed_storage_hosts = []
 
 # -----------------------------------------------------------------------------
 # [moonraker] - Local Moonraker Connection
@@ -170,7 +198,11 @@ level = "INFO"
 # Log file path (use ~ for home directory)
 path = "~/printer_data/logs/moonraker-owl.log"
 
-# Enable detailed network logging (verbose, for debugging only)
+# Enable detailed network logging (verbose, for debugging only).
+# WARNING: when true, request/response bodies and MQTT payloads may be
+# written to the log file. Do NOT enable in production — logs may then
+# contain device tokens, presigned URLs, and telemetry payloads. Reset to
+# false before sharing logs with support.
 log_network = false
 
 # -----------------------------------------------------------------------------

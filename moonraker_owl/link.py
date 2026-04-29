@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import logging
 from dataclasses import dataclass
@@ -115,7 +116,10 @@ def perform_linking(
             f"Credentials already exist at {target_path}. Use --force to re-link."
         )
 
-    code = link_code or input("Enter printer link code: ").strip()
+    # Audit Q-7: link codes grant full device-onboarding authority for their
+    # short lifetime. Use getpass so the value is not echoed to the terminal
+    # and does not land in shell history when copy-paste fails.
+    code = link_code or getpass.getpass("Enter printer link code: ").strip()
     if not code:
         raise DeviceLinkingError("Link code cannot be empty")
 

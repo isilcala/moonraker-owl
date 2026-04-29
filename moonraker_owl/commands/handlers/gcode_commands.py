@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict
 
 from ..types import CommandMessage, CommandProcessingError
+from ._validation import validate_klipper_identifier
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,24 +43,45 @@ class GCodeCommandsMixin:
                 command_id=message.command_id,
             )
 
-        # Validate macro exists in Klipper's registered objects
+        # Defense against G-code injection: macros are sent verbatim to
+        # `execute_gcode`, so any whitespace / newline / metacharacter would
+        # let a compromised cloud queue follow-up commands. Reject anything
+        # outside the Klipper identifier alphabet.
+        macro_name = validate_klipper_identifier(
+            macro_name, field="macro", command_id=message.command_id
+        )
+
+        # Validate macro exists in Klipper's registered objects.
+        # Fail-closed: if the pre-flight query times out or errors, we refuse
+        # the command. The previous behaviour ("proceed anyway") was a
+        # defense-in-depth gap against a compromised cloud bus — it allowed
+        # an attacker to dispatch arbitrary macro names whenever the
+        # Moonraker query layer was degraded. (audit A-01, Q-5)
         try:
             result = await self._moonraker.fetch_printer_state(
                 objects={f"gcode_macro {macro_name}": None}, timeout=3.0
             )
-            status = result.get("result", {}).get("status", {})
-            if f"gcode_macro {macro_name}" not in status:
-                raise CommandProcessingError(
-                    f"Macro '{macro_name}' is not registered in Klipper",
-                    code="unknown_macro",
-                    command_id=message.command_id,
-                )
         except CommandProcessingError:
             raise
-        except Exception:
-            # If pre-flight check fails (e.g. timeout), proceed anyway —
-            # execute_gcode will catch real errors
-            LOGGER.debug("Macro existence check failed, proceeding: %s", macro_name)
+        except Exception as exc:
+            LOGGER.warning(
+                "Macro pre-flight check failed for %s; refusing command: %s",
+                macro_name,
+                exc,
+            )
+            raise CommandProcessingError(
+                "Unable to verify macro registration; refusing for safety",
+                code="macro_preflight_failed",
+                command_id=message.command_id,
+            ) from exc
+
+        status = result.get("result", {}).get("status", {})
+        if f"gcode_macro {macro_name}" not in status:
+            raise CommandProcessingError(
+                f"Macro '{macro_name}' is not registered in Klipper",
+                code="unknown_macro",
+                command_id=message.command_id,
+            )
 
         try:
             await self._moonraker.execute_gcode(macro_name)

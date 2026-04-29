@@ -1,10 +1,16 @@
 # Python dependencies for moonraker-owl
 # This file is read by Moonraker's update_manager to track dependency changes.
 # Keep in sync with [project.dependencies] in pyproject.toml.
-aiohttp>=3.9
-paho-mqtt>=1.6
-backoff>=2.2
-pydantic>=2.7
-cryptography>=42.0
-Pillow>=10.0
-tomli-w>=1.0
+#
+# Audit A-07: upper bounds prevent a future breaking major release from
+# silently landing on operator devices. For reproducible installs, pin
+# the resolved versions + hashes via `requirements.lock.txt` (generated
+# by `uv pip compile pyproject.toml -o requirements.lock.txt --generate-hashes`)
+# and pass `--require-hashes` to `pip install` in `scripts/install.sh`.
+aiohttp>=3.10,<4
+paho-mqtt>=2,<3
+backoff>=2.2,<3
+pydantic>=2.7,<3
+cryptography>=42.0,<46
+Pillow>=10.3,<12
+tomli-w>=1.0,<2

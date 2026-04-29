@@ -10,10 +10,26 @@ from typing import Optional
 
 from . import constants
 from .app import MoonrakerOwlApp
-from .config import load_config
+from .config import ConfigurationError, load_config, validate_runtime_config
 from .link import DeviceLinkingError, perform_linking
 
 LOGGER = logging.getLogger(__name__)
+
+# Keys whose values must never be printed by `show-config`. Audit A-04 / Q-1:
+# credentials and API keys are sometimes pasted into TOML during testing, and
+# operators frequently capture `show-config` output into bug reports / logs.
+# Redact at the point of display rather than rely on operators to scrub.
+_REDACTED_KEYS: dict[str, set[str]] = {
+    "cloud": {"password", "device_private_key"},
+    "moonraker": {"api_key"},
+}
+_REDACTED_PLACEHOLDER = "***redacted***"
+
+
+def _format_config_value(section: str, key: str, value: object) -> str:
+    if key in _REDACTED_KEYS.get(section, set()) and value not in (None, ""):
+        return _REDACTED_PLACEHOLDER
+    return repr(value) if isinstance(value, str) else str(value)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,10 +67,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     config = load_config(args.config)
 
     if args.command == "start":
+        try:
+            validate_runtime_config(config)
+        except ConfigurationError as exc:
+            LOGGER.error("%s", exc)
+            return 2
         MoonrakerOwlApp.start(config)
         return 0
 
     if args.command == "link":
+        try:
+            validate_runtime_config(config)
+        except ConfigurationError as exc:
+            LOGGER.error("%s", exc)
+            return 2
         try:
             perform_linking(config, force=args.force)
         except DeviceLinkingError as exc:
@@ -68,7 +94,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             if isinstance(values, dict):
                 print(f"[{section}]")
                 for key, value in values.items():
-                    print(f"{key} = {value}")
+                    print(f"{key} = {_format_config_value(section, key, value)}")
                 print()
         return 0
 
