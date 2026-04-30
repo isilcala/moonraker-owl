@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from dataclasses import field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
 from ..printer_command_names import PrinterCommandNames
 from ..identifiers import uuid7
@@ -118,6 +119,68 @@ class CommandProcessor(
         self._capture_semaphore = asyncio.Semaphore(1)
         self._last_capture_time: Optional[float] = None
         self._min_capture_interval = 2.0  # seconds
+
+        # Command dispatch table — maps each command name to the bound handler
+        # method on this CommandProcessor (mixed in from *CommandsMixin).
+        # Adding a new command means: (1) define the constant in
+        # PrinterCommandNames, (2) implement `_execute_*` on a mixin,
+        # (3) add an entry here. No other changes required in `_execute`.
+        self._dispatch: Dict[
+            str,
+            Callable[[CommandMessage], Union[Optional[Dict[str, Any]], Awaitable[Optional[Dict[str, Any]]]]],
+        ] = {
+            # System control
+            PrinterCommandNames.SET_TELEMETRY_RATE: self._execute_set_telemetry_rate,
+            PrinterCommandNames.METADATA_SYSTEM_REFRESH: self._execute_metadata_system_refresh,
+
+            # Heater control
+            PrinterCommandNames.HEATER_SET_TARGET: self._execute_heater_set_target,
+            PrinterCommandNames.HEATER_TURN_OFF: self._execute_heater_turn_off,
+
+            # Fan control
+            PrinterCommandNames.FAN_SET_SPEED: self._execute_fan_set_speed,
+
+            # LED control
+            PrinterCommandNames.SET_LED: self._execute_set_led,
+
+            # Output pin control
+            PrinterCommandNames.SET_OUTPUT_PIN: self._execute_set_output_pin,
+
+            # Print parameter control
+            PrinterCommandNames.SET_SPEED: self._execute_set_speed,
+            PrinterCommandNames.SET_FLOW: self._execute_set_flow,
+            PrinterCommandNames.SET_Z_OFFSET: self._execute_set_z_offset,
+            PrinterCommandNames.RESET_Z_OFFSET: self._execute_reset_z_offset,
+
+            # Object control (ADR-0016)
+            PrinterCommandNames.OBJECT_EXCLUDE: self._execute_object_exclude,
+
+            # GCode macro
+            PrinterCommandNames.GCODE_MACRO: self._execute_gcode_macro,
+
+            # System task commands
+            PrinterCommandNames.CAPTURE_IMAGE: self._execute_capture_image,
+            PrinterCommandNames.DOWNLOAD_GCODE: self._execute_download_gcode,
+
+            # Job lifecycle
+            PrinterCommandNames.JOB_REGISTERED: self._execute_job_registered,
+
+            # Emergency / firmware
+            PrinterCommandNames.EMERGENCY_STOP: self._execute_emergency_stop,
+            PrinterCommandNames.FIRMWARE_RESTART: self._execute_firmware_restart,
+
+            # Start print
+            PrinterCommandNames.START: self._handle_print_start,
+
+            # Cold Path query commands (data retrieval via ACK result)
+            PrinterCommandNames.QUERY_FILE_LIST: self._handle_query_file_list,
+
+            # Print control (pause/resume/cancel) — share a single helper that
+            # also triggers an immediate print_stats query for state detection.
+            PrinterCommandNames.PAUSE: lambda m: self._execute_print_action(m, "pause"),
+            PrinterCommandNames.RESUME: lambda m: self._execute_print_action(m, "resume"),
+            PrinterCommandNames.CANCEL: lambda m: self._execute_print_action(m, "cancel"),
+        }
 
     async def start(self) -> None:
         if self._handler_registered:
@@ -512,131 +575,70 @@ class CommandProcessor(
     async def _execute(self, message: CommandMessage) -> Optional[Dict[str, Any]]:
         """Execute a command and return result details.
 
-        Commands are dispatched based on their name (ADR-0013 naming):
-        - control:set-telemetry-rate: Configure telemetry cadence
-        - heater:set-target: Set heater target temperature
-        - heater:turn-off: Turn off a specific heater
-        - fan:set-speed: Set fan speed
-        - print:pause/resume/cancel: Print control actions
-        - print:emergency-stop: Emergency stop
-        - print:firmware-restart: Restart Klipper firmware
-        - print:start: Start printing a specified GCode file
-        - query:file-list: Query GCode file list (Cold Path data retrieval)
-        - task:capture-image: Capture and upload camera frame
-        - object:exclude: Exclude an object from the current print (ADR-0016)
+        Routing is performed via the ``self._dispatch`` table built in
+        ``__init__``.  Handlers may be sync or async; both are normalised
+        here.  Unknown commands raise ``CommandProcessingError`` with code
+        ``unsupported_command`` so the caller emits a "failed" ACK on the
+        execution stage.
+
+        See ADR-0013 for command naming and ADR-0039 for Hot/Cold Path
+        routing (Hot/Cold Path classification lives in
+        ``PrinterCommandNames.HOT_PATH_COMMANDS`` and is enforced cloud-side,
+        not here).
         """
-        LOGGER.debug("[CommandDispatch] Executing command: %s (id=%s)", message.command, message.command_id[:8])
-        
-        # System control commands
-        if message.command == PrinterCommandNames.SET_TELEMETRY_RATE:
-            return self._execute_set_telemetry_rate(message)
-
-        # Metadata commands
-        if message.command == PrinterCommandNames.METADATA_SYSTEM_REFRESH:
-            return self._execute_metadata_system_refresh(message)
-
-        # Heater control commands
-        if message.command == PrinterCommandNames.HEATER_SET_TARGET:
-            return await self._execute_heater_set_target(message)
-        if message.command == PrinterCommandNames.HEATER_TURN_OFF:
-            return await self._execute_heater_turn_off(message)
-
-        # Fan control commands
-        if message.command == PrinterCommandNames.FAN_SET_SPEED:
-            return await self._execute_fan_set_speed(message)
-
-        # LED control commands
-        if message.command == PrinterCommandNames.SET_LED:
-            return await self._execute_set_led(message)
-
-        # Output pin control commands
-        if message.command == PrinterCommandNames.SET_OUTPUT_PIN:
-            return await self._execute_set_output_pin(message)
-
-        # Print parameter control commands
-        if message.command == PrinterCommandNames.SET_SPEED:
-            return await self._execute_set_speed(message)
-        if message.command == PrinterCommandNames.SET_FLOW:
-            return await self._execute_set_flow(message)
-        if message.command == PrinterCommandNames.SET_Z_OFFSET:
-            return await self._execute_set_z_offset(message)
-        if message.command == PrinterCommandNames.RESET_Z_OFFSET:
-            return await self._execute_reset_z_offset(message)
-
-        # Object control commands (ADR-0016)
-        if message.command == PrinterCommandNames.OBJECT_EXCLUDE:
-            return await self._execute_object_exclude(message)
-
-        # GCode macro commands
-        if message.command == PrinterCommandNames.GCODE_MACRO:
-            return await self._execute_gcode_macro(message)
-
-        # System task commands
-        if message.command == PrinterCommandNames.CAPTURE_IMAGE:
-            return await self._execute_capture_image(message)
-
-        if message.command == PrinterCommandNames.DOWNLOAD_GCODE:
-            return await self._execute_download_gcode(message)
-
-        # Job lifecycle commands
-        if message.command == PrinterCommandNames.JOB_REGISTERED:
-            return self._execute_job_registered(message)
-
-        # Emergency stop command
-        if message.command == PrinterCommandNames.EMERGENCY_STOP:
-            return await self._execute_emergency_stop(message)
-
-        # Firmware restart command
-        if message.command == PrinterCommandNames.FIRMWARE_RESTART:
-            return await self._execute_firmware_restart(message)
-
-        # Start print command
-        if message.command == PrinterCommandNames.START:
-            return await self._handle_print_start(message)
-
-        # Query commands (Cold Path — data retrieval via ACK result)
-        if message.command == PrinterCommandNames.QUERY_FILE_LIST:
-            return await self._handle_query_file_list(message)
-
-        # Print control commands (pause, resume, cancel)
-        # Map command name to Moonraker action (print:pause -> pause)
-        command_to_action = {
-            PrinterCommandNames.PAUSE: "pause",
-            PrinterCommandNames.RESUME: "resume",
-            PrinterCommandNames.CANCEL: "cancel",
-        }
-        if message.command in command_to_action:
-            moonraker_action = command_to_action[message.command]
-            try:
-                await self._moonraker.execute_print_action(moonraker_action)
-            except ValueError as exc:
-                raise CommandProcessingError(
-                    str(exc), code="unsupported_command", command_id=message.command_id
-                ) from exc
-            except Exception as exc:  # pragma: no cover - networking errors
-                raise CommandProcessingError(
-                    f"Moonraker command failed: {exc}",
-                    code="moonraker_error",
-                    command_id=message.command_id,
-                ) from exc
-
-            # Trigger immediate print_stats query to detect state change.
-            # Moonraker may not push state changes via WebSocket for these commands,
-            # so we actively query to ensure the orchestrator sees the transition.
-            if self._telemetry is not None:
-                try:
-                    await self._telemetry.request_print_state_query()
-                except Exception as exc:  # pragma: no cover - non-critical
-                    LOGGER.debug("Failed to request print state query: %s", exc)
-
-            return {"command": message.command}
-
-        # Unknown command
-        raise CommandProcessingError(
-            f"Unknown command: {message.command}",
-            code="unsupported_command",
-            command_id=message.command_id,
+        LOGGER.debug(
+            "[CommandDispatch] Executing command: %s (id=%s)",
+            message.command,
+            message.command_id[:8],
         )
+
+        handler = self._dispatch.get(message.command)
+        if handler is None:
+            LOGGER.warning(
+                "Unknown command received: %s (id=%s)",
+                message.command,
+                message.command_id[:8],
+            )
+            raise CommandProcessingError(
+                f"Unknown command: {message.command}",
+                code="unsupported_command",
+                command_id=message.command_id,
+            )
+
+        result = handler(message)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def _execute_print_action(
+        self, message: CommandMessage, action: str
+    ) -> Dict[str, Any]:
+        """Execute a print control action (pause / resume / cancel).
+
+        Moonraker may not push state changes via WebSocket for these
+        commands, so we actively trigger an immediate print_stats query
+        to ensure the orchestrator observes the transition.
+        """
+        try:
+            await self._moonraker.execute_print_action(action)
+        except ValueError as exc:
+            raise CommandProcessingError(
+                str(exc), code="unsupported_command", command_id=message.command_id
+            ) from exc
+        except Exception as exc:  # pragma: no cover - networking errors
+            raise CommandProcessingError(
+                f"Moonraker command failed: {exc}",
+                code="moonraker_error",
+                command_id=message.command_id,
+            ) from exc
+
+        if self._telemetry is not None:
+            try:
+                await self._telemetry.request_print_state_query()
+            except Exception as exc:  # pragma: no cover - non-critical
+                LOGGER.debug("Failed to request print state query: %s", exc)
+
+        return {"command": message.command}
 
     async def _publish_ack(
         self,
