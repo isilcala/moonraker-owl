@@ -789,6 +789,8 @@ class TelemetryOrchestrator:
             # Moonraker reports. The print_stats.state transition to "complete"
             # is the authoritative signal that the print finished successfully.
             base_data["progressPercent"] = 100.0
+            # P1-21: stable end-reason code consumed by NexusService PrintJobEventHandler.
+            base_data["endReason"] = "completed"
             return base_data
 
         if event_name == EventName.PRINT_FAILED:
@@ -802,6 +804,19 @@ class TelemetryOrchestrator:
             error_message = print_data.get("message", "")
             if error_message:
                 base_data["error"] = error_message
+            # P1-21: classify failure reason. Klippy shutdown/error is the most reliable
+            # diagnostic source. Fallback to print_stats.message, then "unknown".
+            klippy_state = self.store.klippy_state
+            if klippy_state == "shutdown":
+                base_data["endReason"] = "error:klippy_shutdown"
+            elif klippy_state == "error":
+                base_data["endReason"] = "error:klippy_error"
+            elif error_message:
+                # Compact, machine-friendly: collapse internal whitespace, cap length.
+                compact = " ".join(error_message.split())
+                base_data["endReason"] = f"error:{compact[:120]}"
+            else:
+                base_data["endReason"] = "error:unknown"
             return base_data
 
         if event_name == EventName.PRINT_CANCELLED:
@@ -812,6 +827,15 @@ class TelemetryOrchestrator:
             filament_used = print_data.get("filament_used")
             if filament_used is not None:
                 base_data["filamentUsedMm"] = filament_used
+            # P1-21: cancelled jobs default to "cancelled". If print_stats.message
+            # carries a more specific reason (e.g. UI-initiated vs gcode M0 abort),
+            # propagate it as a suffix.
+            cancel_reason = print_data.get("message", "")
+            if cancel_reason:
+                compact = " ".join(cancel_reason.split())
+                base_data["endReason"] = f"cancelled:{compact[:120]}"
+            else:
+                base_data["endReason"] = "cancelled"
             return base_data
 
         if event_name in (EventName.PRINT_PAUSED, EventName.PRINT_RESUMED):
