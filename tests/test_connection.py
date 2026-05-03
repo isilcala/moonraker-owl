@@ -28,6 +28,7 @@ class FakeMQTTClient:
         self.connect_call_count = 0
         self.disconnect_call_count = 0
         self._connected = False
+        self._last_connect_rc: int | None = None
 
     async def connect(
         self, *, clean_start: bool = True, session_expiry: int | None = None
@@ -36,7 +37,9 @@ class FakeMQTTClient:
         if self.connect_delay > 0:
             await asyncio.sleep(self.connect_delay)
         if not self.connect_succeeds:
+            self._last_connect_rc = 134  # Simulate auth failure
             raise ConnectionError("Simulated connection failure")
+        self._last_connect_rc = 0
         self._connected = True
 
     async def disconnect(self):
@@ -478,4 +481,33 @@ async def test_perpetual_retry_stops_on_stop_event(coordinator_setup):
     assert result is False
     # Should have made at least one attempt before being stopped
     assert mqtt_client.connect_call_count >= 1
+    await stop_task
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_during_backoff_refreshes_token(coordinator_setup):
+    """Test that auth failures during _connect_with_backoff trigger token refresh.
+
+    Regression test: when EMQX disconnects the agent due to token expiry with
+    rc=0 (clean disconnect), the coordinator classifies it as CONNECTION_LOST
+    and skips the upfront token refresh.  Without this fix, _connect_with_backoff
+    retries with the same expired token forever because the auth-retry inside
+    MQTTClient.connect() is bypassed when _connect_with_backoff catches the
+    exception.
+    """
+    coordinator, mqtt_client, token_manager = coordinator_setup(
+        connect_succeeds=False
+    )
+
+    # Stop after a few attempts to avoid infinite loop
+    async def stop_after_delay():
+        await asyncio.sleep(0.5)
+        coordinator._stop_event.set()
+
+    stop_task = asyncio.create_task(stop_after_delay())
+
+    await coordinator._connect_with_backoff()
+
+    # Token should have been refreshed on each auth-failure attempt
+    assert token_manager.refresh_call_count >= 1
     await stop_task

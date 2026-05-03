@@ -326,6 +326,25 @@ class ConnectionCoordinator:
                 return True
 
             except Exception as exc:
+                # If the broker rejected us with an auth-failure code the
+                # token is likely expired.  Refresh it *before* the back-off
+                # sleep so the next attempt uses fresh credentials.  Without
+                # this the agent loops forever with a stale token because the
+                # auth-retry inside MQTTClient.connect() is bypassed when
+                # _connect_with_backoff() catches the exception.
+                if self._mqtt_client._last_connect_rc in (5, 134, 135):
+                    try:
+                        LOGGER.info(
+                            "Auth failure during reconnection (rc=%d), refreshing JWT token",
+                            self._mqtt_client._last_connect_rc,
+                        )
+                        await self._token_manager.refresh_token_now()
+                    except Exception as refresh_exc:
+                        LOGGER.error(
+                            "Failed to refresh token during reconnection: %s",
+                            refresh_exc,
+                        )
+
                 if in_perpetual:
                     sleep_for = perpetual_delay
                     LOGGER.warning(
