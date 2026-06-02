@@ -218,8 +218,11 @@ reconnect_max_seconds = 30.0
 # Jitter ratio for reconnection timing (0.0 - 1.0)
 reconnect_jitter_ratio = 0.5
 
-# MQTT session expiry (seconds)
-session_expiry_seconds = 86400
+# MQTT session expiry (seconds). How long the broker retains this agent's
+# subscriptions and queued QoS-1 messages while it is disconnected. 1h covers
+# typical field network blips; shorter than this risks losing in-flight cold-path
+# commands across longer outages, longer wastes broker memory on stale sessions.
+session_expiry_seconds = 3600
 
 # Buffer window for offline message queuing (seconds)
 buffer_window_seconds = 60.0
@@ -234,3 +237,10 @@ heartbeat_interval_seconds = 30
 health_enabled = false
 health_host = "127.0.0.1"
 health_port = 3333
+
+# Periodic MQTT self-health snapshot publisher (cloud-visible agent health).
+# Publishes a structured snapshot (reconnects, dropped frames, Moonraker
+# outage, token-renewal failures, ...) to owl/printers/{deviceId}/health on a
+# fixed cadence. Independent of the local health_* HTTP endpoint above.
+health_report_enabled = true
+health_report_interval_seconds = 60.0

@@ -161,12 +161,15 @@ class TelemetryPublisher:
 
         self._cadence = config.telemetry_cadence
 
-        self._base_topic = f"owl/printers/{self._device_id}"
+        self._base_topic = constants.MQTTTopics.resolve(
+            constants.MQTTTopics.BASE, self._device_id
+        )
+        _topics = constants.MQTTTopics.for_device(self._device_id)
         self._channel_topics: Dict[str, str] = {
-            "status": f"{self._base_topic}/status",
-            "sensors": f"{self._base_topic}/sensors",
-            "events": f"{self._base_topic}/events",
-            "objects": f"{self._base_topic}/objects",
+            "status": _topics.status,
+            "sensors": _topics.sensors,
+            "events": _topics.events,
+            "objects": _topics.objects,
         }
         self._channel_qos = {
             "status": 1,
@@ -208,6 +211,12 @@ class TelemetryPublisher:
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=max(queue_size, 1))
         self._event = asyncio.Event()
         self._stop_event = asyncio.Event()
+        # Visibility for the intake queue: count dropped snapshots and rate-limit
+        # the warning so an overloaded agent reports backpressure without spamming.
+        self._queue_dropped_total = 0
+        self._queue_dropped_since_warn = 0
+        self._last_queue_drop_warn: float = 0.0
+        self._queue_drop_warn_interval: float = 30.0
         self._worker: Optional[asyncio.Task[None]] = None
         self._callback_registered = False
         self._pending_payload: Optional[Dict[str, Any]] = None
@@ -370,17 +379,22 @@ class TelemetryPublisher:
         self._start_pollers()
         self._start_timelapse_poller()
 
-    async def _discover_and_subscribe_sensors(self) -> None:
+    async def _discover_and_subscribe_sensors(self) -> bool:
         """Discover available heaters/sensors and update subscriptions.
 
         Delegates Moonraker-specific naming logic to
         :func:`discover_moonraker_sensors` in ``moonraker_bridge``.
+
+        Returns ``True`` if the subscription object set changed (so the caller —
+        or this method — can trigger a WebSocket resubscribe). When a change is
+        detected the resubscribe is issued automatically so newly-discovered
+        sensors begin reporting without waiting for an external trigger (P1-13).
         """
         try:
             heater_info = await self._source.fetch_available_heaters()
         except (OSError, asyncio.TimeoutError) as exc:
             LOGGER.warning("Failed to discover heaters/sensors: %s", exc)
-            return
+            return False
 
         registered: list[str] | None = None
         try:
@@ -420,6 +434,20 @@ class TelemetryPublisher:
             )
             if pin_config:
                 self._orchestrator.sensors_selector.update_pin_pwm_config(pin_config)
+
+        # Auto-resubscribe when the object set changed so Moonraker starts
+        # delivering updates for the newly-tracked sensors immediately (P1-13).
+        if changed and hasattr(self._source, "resubscribe"):
+            try:
+                await self._source.resubscribe()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.warning(
+                    "Failed to resubscribe after sensor discovery change: %s", exc
+                )
+
+        return bool(changed)
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -615,12 +643,45 @@ class TelemetryPublisher:
         if self._queue.full():
             try:
                 self._queue.get_nowait()
-                LOGGER.debug("Telemetry queue full (maxsize=%d), dropped oldest payload", self._queue.maxsize)
+                self._queue_dropped_total += 1
+                self._queue_dropped_since_warn += 1
+                self._warn_queue_drops()
             except asyncio.QueueEmpty:
                 pass
 
         await self._queue.put(payload)
         self._event.set()
+
+    def _warn_queue_drops(self) -> None:
+        """Emit a rate-limited WARNING when the intake queue is shedding load.
+
+        Dropping the oldest raw snapshot is safe (``_gather_payloads`` merges
+        latest-wins), but a sustained drop rate signals the worker cannot keep
+        up, so surface it instead of hiding it behind a debug log.
+        """
+
+        now = time.monotonic()
+        if now - self._last_queue_drop_warn < self._queue_drop_warn_interval:
+            return
+        LOGGER.warning(
+            "Telemetry intake queue saturated (maxsize=%d): dropped %d snapshot(s) "
+            "in last %.0fs, %d total since start",
+            self._queue.maxsize,
+            self._queue_dropped_since_warn,
+            self._queue_drop_warn_interval,
+            self._queue_dropped_total,
+        )
+        self._last_queue_drop_warn = now
+        self._queue_dropped_since_warn = 0
+
+    def queue_stats(self) -> Dict[str, int]:
+        """Return intake-queue counters for health reporting."""
+
+        return {
+            "depth": self._queue.qsize(),
+            "maxsize": self._queue.maxsize,
+            "dropped_total": self._queue_dropped_total,
+        }
 
     def _build_poll_groups(self) -> list[_PollGroup]:
         if not self._poll_specs:
@@ -1735,6 +1796,8 @@ class TelemetryPublisher:
                 qos=self._channel_qos.get(channel, 1),
                 retain=retain,
                 properties=properties,
+                buffer_on_failure=True,
+                coalesce=(channel != "events"),
             )
         except MQTTConnectionError as exc:
             LOGGER.warning("Telemetry publish failed: %s", exc)
@@ -2057,17 +2120,9 @@ class TelemetryPublisher:
                 )
                 return
 
-            # Re-send WebSocket subscription so Moonraker delivers updates
-            # for the newly-discovered objects.
-            if hasattr(self._source, "resubscribe"):
-                try:
-                    await self._source.resubscribe()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    LOGGER.warning(
-                        "Failed to resubscribe after sensor rediscovery: %s", exc
-                    )
+            # _discover_and_subscribe_sensors() now auto-resubscribes when the
+            # object set changed (P1-13), so no explicit resubscribe is needed
+            # here.
 
         loop.create_task(_run())
 

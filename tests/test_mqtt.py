@@ -91,6 +91,13 @@ class FakeMqttClient:
         self._events.setdefault("subscribed", []).append((topic, qos))
         return self._subscribe_rc, 1
 
+    def message_callback_add(self, topic, callback):
+        self._events.setdefault("callbacks_added", []).append(topic)
+
+    def unsubscribe(self, topic):
+        self._events.setdefault("unsubscribed", []).append(topic)
+        return self._subscribe_rc, 1
+
     def reconnect(self):
         self._events["reconnect_called"] = self._events.get("reconnect_called", 0) + 1
         if self.on_connect:
@@ -319,7 +326,117 @@ async def test_publish_failure_raises(monkeypatch):
     await client.disconnect()
 
 
-# NOTE: test_reconnect_triggers_paho was removed as reconnect() method
+@pytest.mark.asyncio
+async def test_publish_buffers_on_failure_and_replays(monkeypatch):
+    from unittest.mock import Mock
+
+    loop = asyncio.get_running_loop()
+    events: dict = {}
+
+    def factory(*args, **kwargs):
+        return FakeMqttClient(
+            loop, events, *args, publish_rc=mqtt.MQTT_ERR_NO_CONN, **kwargs
+        )
+
+    monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
+
+    config = CloudConfig(broker_host="broker.owl.dev", broker_port=1883)
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+
+    client = MQTTClient(config, client_id="printer-buf", token_manager=token_manager)
+    await client.connect()
+
+    # Failing publishes with buffering enabled must NOT raise.
+    client.publish("owl/p/events", b"e1", qos=2, buffer_on_failure=True, coalesce=False)
+    client.publish("owl/p/status", b"s1", qos=1, buffer_on_failure=True, coalesce=True)
+    client.publish("owl/p/status", b"s2", qos=1, buffer_on_failure=True, coalesce=True)
+
+    stats = client.offline_buffer_stats()
+    assert stats["pending_events"] == 1
+    assert stats["pending_coalesced"] == 1  # latest-wins coalescing
+    assert stats["pending"] == 2
+
+    # Recover the broker and replay (only buffered frames are flushed now).
+    before = len(events.get("published", []))
+    client._client._publish_rc = mqtt.MQTT_ERR_SUCCESS  # type: ignore[union-attr]
+    client._replay_offline_buffer()
+
+    replayed = [p[1] for p in events.get("published", [])[before:]]
+    assert b"s2" in replayed  # latest status replayed
+    assert b"e1" in replayed  # event replayed
+    assert b"s1" not in replayed  # stale status coalesced away
+
+    stats = client.offline_buffer_stats()
+    assert stats["pending"] == 0
+    assert stats["replayed_total"] == 2
+
+    await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_publish_buffers_when_disconnected(monkeypatch):
+    from unittest.mock import Mock
+
+    loop = asyncio.get_running_loop()
+    events: dict = {}
+
+    def factory(*args, **kwargs):
+        return FakeMqttClient(loop, events, *args, **kwargs)
+
+    monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
+
+    config = CloudConfig(broker_host="broker.owl.dev", broker_port=1883)
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+
+    client = MQTTClient(config, client_id="printer-off", token_manager=token_manager)
+    # No connect(): _client is None.
+
+    # Without buffering, a disconnected publish raises.
+    with pytest.raises(RuntimeError):
+        client.publish("owl/p/status", b"x")
+
+    # With buffering, it is held instead of raising.
+    client.publish("owl/p/status", b"x", buffer_on_failure=True, coalesce=True)
+    assert client.offline_buffer_stats()["pending"] == 1
+
+
+@pytest.mark.asyncio
+async def test_offline_event_buffer_drops_oldest(monkeypatch):
+    from unittest.mock import Mock
+
+    loop = asyncio.get_running_loop()
+    events: dict = {}
+
+    def factory(*args, **kwargs):
+        return FakeMqttClient(loop, events, *args, **kwargs)
+
+    monkeypatch.setattr("moonraker_owl.adapters.mqtt.mqtt.Client", factory)
+
+    config = CloudConfig(broker_host="broker.owl.dev", broker_port=1883)
+    token_manager = Mock()
+    token_manager.get_mqtt_credentials.return_value = ("device-test", "mock-jwt")
+
+    client = MQTTClient(
+        config,
+        client_id="printer-cap",
+        token_manager=token_manager,
+        offline_buffer_size=2,
+    )
+
+    for i in range(5):
+        client.publish(
+            "owl/p/events",
+            f"e{i}".encode(),
+            buffer_on_failure=True,
+            coalesce=False,
+        )
+
+    stats = client.offline_buffer_stats()
+    assert stats["pending_events"] == 2  # bounded
+    assert stats["dropped_total"] == 3  # oldest three evicted
+
 # has been moved to ConnectionCoordinator (see connection.py).
 # MQTTClient now only provides connect/disconnect as a pure communication layer.
 
@@ -501,3 +618,95 @@ async def test_mqttv5_bad_password_rc134_triggers_auth_failure(monkeypatch):
 
     # Token refresh should have been attempted once (after first failure)
     token_manager.refresh_token_now.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_resubscribes_tracked_topics_on_reconnect(mqtt_client):
+    """Tracked subscriptions are replayed when the broker reconnects."""
+    client, events = mqtt_client
+
+    client.subscribe("owl/cmd/#", qos=1)
+    client.subscribe_with_handler("owl/state/#", lambda t, p: None, qos=1)
+
+    # Clear the initial subscribe bookkeeping to isolate the replay.
+    events["subscribed"] = []
+    events["callbacks_added"] = []
+
+    # Simulate a reconnect: paho invokes on_connect again (session_present
+    # unknown -> treated as False, forcing a full resubscribe).
+    fake = client._client
+    fake.on_connect(fake, None, None, 0, None)
+    await asyncio.sleep(0)
+
+    topics = {t for t, _ in events["subscribed"]}
+    assert topics == {"owl/cmd/#", "owl/state/#"}
+    # Handler-backed subscription must have its callback re-added.
+    assert "owl/state/#" in events["callbacks_added"]
+    stats = client.subscription_stats()
+    assert stats["tracked"] == 2
+    assert stats["resubscribed_total"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_drops_tracked_subscription(mqtt_client):
+    client, events = mqtt_client
+
+    client.subscribe("owl/cmd/#", qos=1)
+    assert client.subscription_stats()["tracked"] == 1
+
+    client.unsubscribe("owl/cmd/#")
+    assert client.subscription_stats()["tracked"] == 0
+    assert "owl/cmd/#" in events["unsubscribed"]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_tears_down_prior_client(mqtt_client):
+    """A second connect without disconnect stops the previous paho client."""
+    client, events = mqtt_client
+
+    loop_stops_before = events.get("loop_stop", 0)
+    await client.connect()
+    # The prior client''s network loop must have been stopped to avoid fd leaks.
+    assert events.get("loop_stop", 0) > loop_stops_before
+
+
+def _make_bare_client():
+    config = CloudConfig(broker_host="broker.owl.dev", broker_port=1883)
+    return MQTTClient(config, client_id="printer-rc", token_manager=None)
+
+
+def test_last_connect_rc_accessor_reflects_internal_state():
+    client = _make_bare_client()
+    assert client.last_connect_rc is None
+    client._last_connect_rc = 5
+    assert client.last_connect_rc == 5
+
+
+def test_call_soon_on_loop_skips_closed_loop():
+    client = _make_bare_client()
+    loop = asyncio.new_event_loop()
+    loop.close()
+    client._loop = loop
+    # Must not raise even though the loop is closed.
+    client._call_soon_on_loop(lambda: None)
+
+
+def test_call_soon_on_loop_skips_missing_loop():
+    client = _make_bare_client()
+    client._loop = None
+    client._call_soon_on_loop(lambda: None)
+
+
+def test_run_coro_on_loop_closes_coro_when_loop_closed():
+    client = _make_bare_client()
+    loop = asyncio.new_event_loop()
+    loop.close()
+
+    async def _coro():
+        return None
+
+    coro = _coro()
+    client._run_coro_on_loop(coro, loop)
+    # Submitting again on the now-closed coroutine raises (already closed).
+    with pytest.raises(RuntimeError):
+        coro.send(None)

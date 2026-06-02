@@ -74,6 +74,7 @@ class CameraClient:
         max_retries: int = 2,
         base_retry_delay: float = 0.5,
         timeout: float = 10.0,
+        max_image_bytes: int = 10 * 1024 * 1024,
     ) -> None:
         """Initialize the camera capture client.
 
@@ -83,6 +84,10 @@ class CameraClient:
             max_retries: Maximum number of retry attempts for failed captures.
             base_retry_delay: Base delay between retries (exponential backoff).
             timeout: Request timeout in seconds.
+            max_image_bytes: Hard cap on snapshot size. A user-configurable
+                webcam URL could (maliciously or by fault) return an enormous
+                or unbounded stream and OOM the edge device, so we reject any
+                response whose declared or streamed size exceeds this limit.
         """
         self._snapshot_url = snapshot_url
         self._session = session
@@ -90,6 +95,7 @@ class CameraClient:
         self._max_retries = max_retries
         self._base_retry_delay = base_retry_delay
         self._timeout = timeout
+        self._max_image_bytes = max(1, int(max_image_bytes))
 
     @property
     def snapshot_url(self) -> str:
@@ -109,6 +115,20 @@ class CameraClient:
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
+
+    async def _read_capped(self, response: aiohttp.ClientResponse) -> Optional[bytes]:
+        """Read the response body, aborting if it exceeds ``_max_image_bytes``.
+
+        Returns the bytes on success, or ``None`` if the cap was exceeded.
+        """
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.content.iter_chunked(64 * 1024):
+            total += len(chunk)
+            if total > self._max_image_bytes:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     async def capture(self) -> CaptureResult:
         """Capture a snapshot from the webcam.
@@ -143,7 +163,35 @@ class CameraClient:
                                 error_message=f"Expected image, got {content_type}",
                             )
 
-                        image_data = await response.read()
+                        # Reject oversized snapshots up-front via Content-Length
+                        # to avoid buffering a huge body into memory.
+                        declared = response.headers.get("Content-Length")
+                        if declared is not None:
+                            try:
+                                if int(declared) > self._max_image_bytes:
+                                    return CaptureResult(
+                                        success=False,
+                                        error_code="image_too_large",
+                                        error_message=(
+                                            f"Snapshot {declared} bytes exceeds "
+                                            f"limit {self._max_image_bytes}"
+                                        ),
+                                    )
+                            except ValueError:
+                                pass  # Malformed header; fall through to streamed cap
+
+                        # Stream with a hard cap so a chunked/unbounded response
+                        # (no/garbage Content-Length) cannot OOM the device.
+                        image_data = await self._read_capped(response)
+                        if image_data is None:
+                            return CaptureResult(
+                                success=False,
+                                error_code="image_too_large",
+                                error_message=(
+                                    f"Snapshot exceeds limit "
+                                    f"{self._max_image_bytes} bytes"
+                                ),
+                            )
 
                         if not image_data:
                             return CaptureResult(

@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import random
+import time
 from typing import Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
@@ -28,10 +29,19 @@ class MoonrakerClient(PrinterAdapter):
         session: Optional[aiohttp.ClientSession] = None,
         reconnect_initial: float = 1.0,
         reconnect_max: float = 30.0,
+        outage_alert_after: int = 5,
+        dispatch_timeout: float = 5.0,
     ) -> None:
         self.config = config
         self.reconnect_initial = reconnect_initial
         self.reconnect_max = reconnect_max
+        # After this many consecutive websocket failures the outage is escalated
+        # from a routine WARNING to a CRITICAL log so a prolonged Moonraker
+        # disconnect is unmistakable in the diagnostics.
+        self.outage_alert_after = max(1, outage_alert_after)
+        # Per-callback timeout in the websocket dispatch loop so a single slow
+        # handler cannot stall the whole telemetry pump.
+        self._dispatch_timeout = max(0.1, dispatch_timeout)
 
         self._base_url = self.config.url.rstrip("/")
         self._headers = {}
@@ -45,7 +55,46 @@ class MoonrakerClient(PrinterAdapter):
         self._stop_event = asyncio.Event()
         self._subscription_objects: Optional[dict[str, Optional[list[str]]]] = None
         self._rpc_id = 0
+        self._rpc_id_lock = asyncio.Lock()
         self._active_ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws_connected = False
+        self._consecutive_failures = 0
+        self._outage_started_at: Optional[float] = None
+        self._outage_alerted = False
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the websocket is currently established."""
+
+        return self._ws_connected
+
+    @property
+    def consecutive_failures(self) -> int:
+        """Number of consecutive websocket connection failures."""
+
+        return self._consecutive_failures
+
+    @property
+    def outage_seconds(self) -> float:
+        """Seconds since the current websocket outage began (0.0 when healthy)."""
+
+        started = self._outage_started_at
+        if started is None:
+            return 0.0
+        return max(0.0, time.monotonic() - started)
+
+    def _redact(self, text: str) -> str:
+        """Redact the Moonraker API key from arbitrary text (e.g. error bodies).
+
+        Moonraker (or a misbehaving proxy) can echo request headers/values back
+        in an error response. Scrub the configured API key before it reaches a
+        log line or a raised exception message (P2 security hardening).
+        """
+        api_key = self.config.api_key
+        if api_key and api_key in text:
+            return text.replace(api_key, "***REDACTED***")
+        return text
+
 
     # ------------------------------------------------------------------
     # Public API
@@ -230,9 +279,9 @@ class MoonrakerClient(PrinterAdapter):
 
         async with session.post(url, headers=self._headers) as response:
             if response.status >= 400:
-                detail = await response.text()
+                detail = self._redact((await response.text()).strip())
                 raise RuntimeError(
-                    f"Moonraker action '{action_normalized}' failed with status {response.status}: {detail.strip()}"
+                    f"Moonraker action '{action_normalized}' failed with status {response.status}: {detail}"
                 )
 
     async def emergency_stop(self) -> None:
@@ -246,9 +295,9 @@ class MoonrakerClient(PrinterAdapter):
 
         async with session.post(url, headers=self._headers) as response:
             if response.status >= 400:
-                detail = await response.text()
+                detail = self._redact((await response.text()).strip())
                 raise RuntimeError(
-                    f"Emergency stop failed with status {response.status}: {detail.strip()}"
+                    f"Emergency stop failed with status {response.status}: {detail}"
                 )
 
     async def firmware_restart(self) -> None:
@@ -262,9 +311,9 @@ class MoonrakerClient(PrinterAdapter):
 
         async with session.post(url, headers=self._headers) as response:
             if response.status >= 400:
-                detail = await response.text()
+                detail = self._redact((await response.text()).strip())
                 raise RuntimeError(
-                    f"Firmware restart failed with status {response.status}: {detail.strip()}"
+                    f"Firmware restart failed with status {response.status}: {detail}"
                 )
 
     async def start_print(self, filename: str) -> None:
@@ -286,9 +335,9 @@ class MoonrakerClient(PrinterAdapter):
 
         async with session.post(url, params=params, headers=self._headers) as response:
             if response.status >= 400:
-                detail = await response.text()
+                detail = self._redact((await response.text()).strip())
                 raise RuntimeError(
-                    f"Start print failed with status {response.status}: {detail.strip()}"
+                    f"Start print failed with status {response.status}: {detail}"
                 )
 
     async def execute_gcode(
@@ -324,15 +373,15 @@ class MoonrakerClient(PrinterAdapter):
                         url, json=payload, headers=self._headers
                     ) as response:
                         if response.status >= 400:
-                            detail = await response.text()
+                            detail = self._redact((await response.text()).strip())
                             LOGGER.warning(
                                 "GCode send failed with status %d: %s (script=%r)",
                                 response.status,
-                                detail.strip(),
+                                detail,
                                 script[:50] + "..." if len(script) > 50 else script,
                             )
                             raise RuntimeError(
-                                f"GCode send failed with status {response.status}: {detail.strip()}"
+                                f"GCode send failed with status {response.status}: {detail}"
                             )
                         LOGGER.debug("GCode sent (fire-and-forget): %r", script)
             except asyncio.TimeoutError:
@@ -351,9 +400,9 @@ class MoonrakerClient(PrinterAdapter):
                     url, json=payload, headers=self._headers
                 ) as response:
                     if response.status >= 400:
-                        detail = await response.text()
+                        detail = self._redact((await response.text()).strip())
                         raise RuntimeError(
-                            f"GCode execution failed with status {response.status}: {detail.strip()}"
+                            f"GCode execution failed with status {response.status}: {detail}"
                         )
         except asyncio.TimeoutError:
             LOGGER.warning(
@@ -431,9 +480,9 @@ class MoonrakerClient(PrinterAdapter):
                         LOGGER.debug("Thumbnail not found: %s (url=%s)", full_path, url)
                         return None
                     if response.status >= 400:
-                        detail = await response.text()
+                        detail = self._redact((await response.text()).strip())
                         raise RuntimeError(
-                            f"Thumbnail fetch failed with status {response.status}: {detail.strip()}"
+                            f"Thumbnail fetch failed with status {response.status}: {detail}"
                         )
                     return await response.read()
         except asyncio.TimeoutError:
@@ -480,7 +529,7 @@ class MoonrakerClient(PrinterAdapter):
                         LOGGER.debug("GCode metadata not found: %s", filename)
                         return None
                     if response.status >= 400:
-                        detail = await response.text()
+                        detail = self._redact((await response.text()).strip())
                         LOGGER.warning(
                             "Failed to fetch gcode metadata for %s: %s",
                             filename,
@@ -533,7 +582,7 @@ class MoonrakerClient(PrinterAdapter):
                     url, params=params, headers=self._headers
                 ) as response:
                     if response.status >= 400:
-                        detail = await response.text()
+                        detail = self._redact((await response.text()).strip())
                         LOGGER.warning(
                             "Failed to fetch history list: %s",
                             detail[:200],
@@ -583,9 +632,9 @@ class MoonrakerClient(PrinterAdapter):
             async with asyncio.timeout(timeout):
                 async with session.get(url, headers=self._headers) as response:
                     if response.status >= 400:
-                        detail = await response.text()
+                        detail = self._redact((await response.text()).strip())
                         raise RuntimeError(
-                            f"Timelapse list failed with status {response.status}: {detail.strip()}"
+                            f"Timelapse list failed with status {response.status}: {detail}"
                         )
                     data = await response.json()
                     # Response format: {"result": [{"path": "file.mp4", "modified": 1234567890.0, "size": 12345}, ...]}
@@ -631,9 +680,9 @@ class MoonrakerClient(PrinterAdapter):
                         LOGGER.debug("Timelapse file not found: %s (url=%s)", filename, url)
                         return None
                     if response.status >= 400:
-                        detail = await response.text()
+                        detail = self._redact((await response.text()).strip())
                         raise RuntimeError(
-                            f"Timelapse fetch failed with status {response.status}: {detail.strip()}"
+                            f"Timelapse fetch failed with status {response.status}: {detail}"
                         )
                     return await response.read()
         except asyncio.TimeoutError:
@@ -693,9 +742,9 @@ class MoonrakerClient(PrinterAdapter):
                     url, data=data, headers=self._headers
                 ) as response:
                     if response.status >= 400:
-                        detail = await response.text()
+                        detail = self._redact((await response.text()).strip())
                         raise RuntimeError(
-                            f"GCode upload failed with status {response.status}: {detail.strip()}"
+                            f"GCode upload failed with status {response.status}: {detail}"
                         )
                     result = await response.json()
                     item = result.get("result", {}).get("item", {})
@@ -728,6 +777,7 @@ class MoonrakerClient(PrinterAdapter):
                 async with session.ws_connect(ws_url, headers=self._headers) as ws:
                     LOGGER.info("Connected to Moonraker websocket at %s", ws_url)
                     backoff = self.reconnect_initial
+                    self._note_ws_connected()
 
                     self._active_ws = ws
                     try:
@@ -748,13 +798,64 @@ class MoonrakerClient(PrinterAdapter):
             except Exception as exc:  # pragma: no cover - defensive net handling
                 if self._stop_event.is_set():
                     break
-                LOGGER.warning("Moonraker websocket error: %s", exc)
+                self._note_ws_failure(exc)
                 # Apply full jitter to reconnect delay to avoid herd storms. Sleep a random
                 # duration uniformly between 0 and the current backoff value, then increase
                 # the backoff (capped by reconnect_max) for the next attempt.
                 jittered = random.uniform(0, backoff)
                 await asyncio.sleep(jittered)
                 backoff = min(backoff * 2, self.reconnect_max)
+
+    def _note_ws_connected(self) -> None:
+        """Record a successful websocket connection and clear outage state."""
+
+        was_disconnected = (
+            self._consecutive_failures > 0 or self._outage_started_at is not None
+        )
+        if was_disconnected:
+            elapsed = (
+                time.monotonic() - self._outage_started_at
+                if self._outage_started_at is not None
+                else 0.0
+            )
+            LOGGER.info(
+                "Moonraker websocket recovered after %d failed attempt(s) (%.0fs outage)",
+                self._consecutive_failures,
+                elapsed,
+            )
+        self._ws_connected = True
+        self._consecutive_failures = 0
+        self._outage_started_at = None
+        self._outage_alerted = False
+
+    def _note_ws_failure(self, exc: BaseException) -> None:
+        """Record a websocket failure and escalate to CRITICAL on a sustained outage."""
+
+        self._ws_connected = False
+        self._consecutive_failures += 1
+        if self._outage_started_at is None:
+            self._outage_started_at = time.monotonic()
+
+        if (
+            self._consecutive_failures >= self.outage_alert_after
+            and not self._outage_alerted
+        ):
+            elapsed = time.monotonic() - self._outage_started_at
+            LOGGER.critical(
+                "Moonraker websocket unreachable after %d consecutive failures "
+                "(%.0fs outage); continuing to retry. Last error: %s",
+                self._consecutive_failures,
+                elapsed,
+                exc,
+            )
+            self._outage_alerted = True
+        else:
+            LOGGER.warning(
+                "Moonraker websocket error (attempt %d): %s",
+                self._consecutive_failures,
+                exc,
+            )
+
 
     async def resubscribe(self) -> None:
         """Re-send printer.objects.subscribe for the active websocket."""
@@ -783,27 +884,60 @@ class MoonrakerClient(PrinterAdapter):
             try:
                 result = callback(payload)
                 if asyncio.iscoroutine(result):
-                    await result
+                    # Bound each async callback so one slow/stuck handler can't
+                    # block the websocket message pump and stall all telemetry.
+                    await asyncio.wait_for(result, timeout=self._dispatch_timeout)
+            except asyncio.TimeoutError:
+                LOGGER.error(
+                    "Moonraker callback timed out after %.1fs; skipping",
+                    self._dispatch_timeout,
+                )
+            except asyncio.CancelledError:
+                raise
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.exception("Moonraker callback failed")
 
-    async def _send_subscription(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-        # Subscribe to printer status objects
-        if self._subscription_objects:
-            self._rpc_id += 1
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "printer.objects.subscribe",
-                "id": self._rpc_id,
-                "params": {"objects": self._subscription_objects},
-            }
+    async def _next_rpc_id(self) -> int:
+        """Allocate a unique JSON-RPC request id.
 
-            try:
-                await ws.send_json(payload)
-            except Exception:  # pragma: no cover - defensive logging
-                LOGGER.exception(
-                    "Failed to send Moonraker printer objects subscription"
-                )
+        Guarded by an ``asyncio.Lock`` so concurrent callers on the event loop
+        cannot observe or assign a duplicate id.
+        """
+        async with self._rpc_id_lock:
+            self._rpc_id += 1
+            return self._rpc_id
+
+    async def _send_subscription(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        # Subscribe to printer status objects. Recovery after a reconnect reuses
+        # the last-known subscription set persisted on this adapter instance.
+        if not self._subscription_objects:
+            LOGGER.warning(
+                "No Moonraker subscription objects configured; telemetry will not "
+                "flow until set_subscription_objects() is called"
+            )
+            return
+
+        rpc_id = await self._next_rpc_id()
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "printer.objects.subscribe",
+            "id": rpc_id,
+            "params": {"objects": self._subscription_objects},
+        }
+
+        try:
+            await ws.send_json(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Fail-fast: a websocket that cannot accept our subscription will
+            # never deliver status updates. Propagate so _listen_loop tears the
+            # connection down and reconnects instead of sitting on a silently
+            # dead subscription.
+            LOGGER.error(
+                "Failed to send Moonraker printer objects subscription: %s", exc
+            )
+            raise
 
 
 def _build_ws_url(http_url: str) -> str:

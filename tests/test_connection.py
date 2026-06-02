@@ -30,6 +30,10 @@ class FakeMQTTClient:
         self._connected = False
         self._last_connect_rc: int | None = None
 
+    @property
+    def last_connect_rc(self) -> int | None:
+        return self._last_connect_rc
+
     async def connect(
         self, *, clean_start: bool = True, session_expiry: int | None = None
     ):
@@ -350,6 +354,46 @@ async def test_connect_with_backoff_retries(coordinator_setup):
     # Should have made multiple attempts
     assert mqtt_client.connect_call_count > 1
     await stop_task
+
+
+@pytest.mark.asyncio
+async def test_connect_with_backoff_uses_full_jitter(coordinator_setup):
+    """Backoff sleeps should be drawn from the full [floor, delay] range.
+
+    With full jitter the sampled sleep must never exceed the current backoff
+    delay (symmetric jitter could exceed it). We capture the timeouts passed to
+    asyncio.wait_for and assert they stay within the expected bounds.
+    """
+    coordinator, mqtt_client, _ = coordinator_setup(connect_succeeds=False)
+    coordinator._resilience.reconnect_jitter_ratio = 1.0
+
+    captured: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def spy_wait_for(awaitable, timeout):
+        captured.append(timeout)
+        if len(captured) >= 4:
+            coordinator._stop_event.set()
+        return await real_wait_for(awaitable, timeout)
+
+    import moonraker_owl.connection as connection_module
+
+    original = connection_module.asyncio.wait_for
+    connection_module.asyncio.wait_for = spy_wait_for
+    try:
+        await coordinator._connect_with_backoff()
+    finally:
+        connection_module.asyncio.wait_for = original
+
+    assert captured, "expected at least one backoff sleep"
+    # The coordinator floors the initial delay at 0.5s.
+    effective_initial = max(0.5, coordinator._resilience.reconnect_initial_seconds)
+    upper = max(effective_initial, coordinator._resilience.reconnect_max_seconds)
+    # full jitter => each sleep in [floor, current_delay] <= upper
+    for sleep_for in captured:
+        assert 0.0 <= sleep_for <= upper + 1e-9
+    # Not every sample should equal the deterministic delay (jitter applied).
+    assert any(abs(s - effective_initial) > 1e-6 for s in captured)
 
 
 @pytest.mark.asyncio

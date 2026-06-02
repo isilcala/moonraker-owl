@@ -445,3 +445,87 @@ async def test_print_start_allows_subdirectory_files(config):
     assert ack["payload"]["status"] == "completed"
 
     await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_loop_expires_stuck_pending_commands(config):
+    """The periodic sweep fails commands whose expected state never arrives."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+
+    processor = CommandProcessor(config, moonraker, mqtt)
+    # Make the sweep fire almost immediately for the test.
+    processor._cleanup_interval_seconds = 0.01
+    processor._command_timeout_seconds = 0.0  # expire on next sweep
+
+    await processor.start()
+    assert processor._cleanup_task is not None
+
+    # Manually register a pending-state command that will never complete.
+    from moonraker_owl.commands.types import CommandMessage
+
+    msg = CommandMessage(
+        command_id="stuck-1",
+        command="pause",
+        parameters={},
+    )
+    processor._begin_pending_state("pause", msg, "paused")
+    assert len(processor._pending_state_commands) == 1
+
+    # Wait for the periodic sweep to run and expire it.
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if not processor._pending_state_commands:
+            break
+
+    assert len(processor._pending_state_commands) == 0
+
+    await processor.stop()
+    assert processor._cleanup_task is None
+
+
+@pytest.mark.asyncio
+async def test_register_command_adds_custom_handler(config) -> None:
+    from moonraker_owl.commands.types import CommandMessage
+
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    calls = []
+
+    async def _custom(msg):
+        calls.append(msg.command)
+        return {"ok": True}
+
+    processor.register_command("custom:thing", _custom)
+
+    msg = CommandMessage(command_id="c1", command="custom:thing", parameters={})
+    result = await processor._execute(msg)
+    assert result == {"ok": True}
+    assert calls == ["custom:thing"]
+
+
+def test_register_command_rejects_duplicate_without_override(config) -> None:
+    from moonraker_owl.printer_command_names import PrinterCommandNames
+
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    existing = PrinterCommandNames.PAUSE
+    with pytest.raises(ValueError):
+        processor.register_command(existing, lambda m: None)
+
+    # override=True allows replacement.
+    sentinel = lambda m: {"replaced": True}
+    processor.register_command(existing, sentinel, override=True)
+    assert processor._dispatch[existing] is sentinel
+
+
+def test_register_command_rejects_empty_name(config) -> None:
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    with pytest.raises(ValueError):
+        processor.register_command("", lambda m: None)

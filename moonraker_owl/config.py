@@ -166,13 +166,17 @@ class ResilienceConfig:
     reconnect_max_seconds: float = 30.0
     reconnect_jitter_ratio: float = 0.5
     reconnect_perpetual_seconds: float = 900.0
-    session_expiry_seconds: int = 86400
+    session_expiry_seconds: int = 3600
     buffer_window_seconds: float = 60.0
     moonraker_breaker_threshold: int = 5
     heartbeat_interval_seconds: int = 30
     health_enabled: bool = False
     health_host: str = "127.0.0.1"
     health_port: int = 0
+    health_report_enabled: bool = True
+    """Whether the agent publishes periodic self-health snapshots to the MQTT health channel."""
+    health_report_interval_seconds: float = 60.0
+    """Cadence of the MQTT health-snapshot publisher."""
 
 
 @dataclass(slots=True)
@@ -394,13 +398,17 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
         reconnect_max_seconds=float(_get(res_raw, "reconnect_max_seconds", 30.0)),
         reconnect_jitter_ratio=max(0.0, min(1.0, float(_get(res_raw, "reconnect_jitter_ratio", 0.5)))),
         reconnect_perpetual_seconds=max(60.0, float(_get(res_raw, "reconnect_perpetual_seconds", 900.0))),
-        session_expiry_seconds=max(0, int(_get(res_raw, "session_expiry_seconds", 86400))),
+        session_expiry_seconds=max(0, int(_get(res_raw, "session_expiry_seconds", 3600))),
         buffer_window_seconds=max(0.0, float(_get(res_raw, "buffer_window_seconds", 60.0))),
         moonraker_breaker_threshold=max(1, int(_get(res_raw, "moonraker_breaker_threshold", 5))),
         heartbeat_interval_seconds=max(1, int(_get(res_raw, "heartbeat_interval_seconds", 30))),
         health_enabled=bool(res_raw.get("health_enabled", False)),
         health_host=str(res_raw.get("health_host", "127.0.0.1")),
         health_port=int(_get(res_raw, "health_port", 0)),
+        health_report_enabled=bool(res_raw.get("health_report_enabled", True)),
+        health_report_interval_seconds=max(
+            5.0, float(_get(res_raw, "health_report_interval_seconds", 60.0))
+        ),
     )
 
     # Compression config - environment variable takes precedence

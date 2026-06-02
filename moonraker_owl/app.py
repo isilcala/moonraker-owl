@@ -25,6 +25,7 @@ from .connection import ConnectionCoordinator, ReconnectReason
 from .core import PrinterBackend, PrinterHealthAssessment
 from .core.job_registry import PrintJobRegistry
 from .health import HealthReporter, HealthServer
+from .health_publisher import HealthPublisher
 from .logging import configure_logging
 from .metadata import MetadataReporter, MetadataReporterConfig
 from .telemetry import (
@@ -147,6 +148,7 @@ class MoonrakerOwlApp:
         self._moonraker_failures = 0
         self._moonraker_monitor_task: Optional[asyncio.Task[None]] = None
         self._startup_retry_task: Optional[asyncio.Task[None]] = None
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._moonraker_breaker_tripped = False
         self._telemetry_status_listener: Callable[[dict[str, Any]], Awaitable[None]] = (
             self._handle_telemetry_status_update
@@ -161,6 +163,8 @@ class MoonrakerOwlApp:
         self._job_registry = PrintJobRegistry()
         # Metadata reporter for device capability reporting (ADR-0032)
         self._metadata_reporter: Optional[MetadataReporter] = None
+        # Periodic MQTT self-health snapshot publisher (audit Q6)
+        self._health_publisher: Optional[HealthPublisher] = None
         # Cloud configuration manager (ADR-0040 — Tier C config)
         self._cloud_config_manager: Optional[CloudConfigManager] = None
         # Agent-Initiated timelapse uploader (replaces task:upload-timelapse)
@@ -280,6 +284,33 @@ class MoonrakerOwlApp:
             detail=message_detail,
         )
 
+    def _spawn_background(
+        self, coro: "Awaitable[None]", *, name: str
+    ) -> "asyncio.Task[None]":
+        """Create a tracked background task with crash-visible exception handling.
+
+        Fire-and-forget ``asyncio.create_task`` calls drop their references and
+        silently swallow exceptions if no one awaits the task. This helper keeps
+        a strong reference until completion and logs any unhandled exception so
+        background failures are never invisible.
+        """
+
+        task = asyncio.ensure_future(coro)
+        self._background_tasks.add(task)
+
+        def _on_done(completed: "asyncio.Task[None]") -> None:
+            self._background_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            exc = completed.exception()
+            if exc is not None:
+                LOGGER.error(
+                    "Background task '%s' failed: %s", name, exc, exc_info=exc
+                )
+
+        task.add_done_callback(_on_done)
+        return task
+
     def _schedule_state_transition(
         self, state: AgentState, *, detail: Optional[str] = None
     ) -> None:
@@ -296,7 +327,7 @@ class MoonrakerOwlApp:
             current_loop = None
 
         if current_loop is loop:
-            asyncio.create_task(_runner())
+            self._spawn_background(_runner(), name=f"state-transition:{state.value}")
         else:
             asyncio.run_coroutine_threadsafe(_runner(), loop)
 
@@ -310,7 +341,9 @@ class MoonrakerOwlApp:
         async def _runner() -> None:
             await self._health.update(name, healthy, detail)
 
-        loop.call_soon_threadsafe(lambda: asyncio.create_task(_runner()))
+        loop.call_soon_threadsafe(
+            lambda: self._spawn_background(_runner(), name=f"health-update:{name}")
+        )
 
     def _command_health_detail(self, baseline: Optional[str] = None) -> Optional[str]:
         processor = self._command_processor
@@ -395,6 +428,9 @@ class MoonrakerOwlApp:
                 pass
             self._metadata_reporter = None
 
+        if self._health_publisher is not None:
+            await self._stop_health_publisher()
+
         if self._cloud_config_manager is not None:
             try:
                 await self._cloud_config_manager.stop()
@@ -429,7 +465,11 @@ class MoonrakerOwlApp:
         device_id = _resolve_device_id(self._config)
         client_id = _build_client_id(device_id)
         self._device_id = device_id
-        self._base_topic = f"owl/printers/{device_id}" if device_id else None
+        self._base_topic = (
+            constants.MQTTTopics.resolve(constants.MQTTTopics.BASE, device_id)
+            if device_id
+            else None
+        )
 
         self._stopping = False
         self._last_disconnect_rc = None
@@ -463,6 +503,11 @@ class MoonrakerOwlApp:
             )
             await self._token_manager.start()
             LOGGER.info("TokenManager initialized successfully")
+            # Start the renewal loop immediately (P1-10): a slow initial MQTT
+            # connect must never be able to let the freshly-issued token expire
+            # before background renewal kicks in. _on_token_renewed null-guards
+            # the (not-yet-created) MQTT coordinator, so this is safe here.
+            self._token_manager.start_renewal_loop(on_renewed=self._on_token_renewed)
         except Exception as exc:
             LOGGER.error("Failed to initialize TokenManager: %s", exc, exc_info=True)
             # Clean up resources on failure
@@ -525,7 +570,7 @@ class MoonrakerOwlApp:
                 "lastUpdated": lwt_registered_at,
             },
         }
-        lwt_topic = f"{self._base_topic}/status"
+        lwt_topic = constants.MQTTTopics.for_device(str(device_id)).status
         self._mqtt_client.set_last_will(
             topic=lwt_topic,
             payload=json.dumps(lwt_payload).encode("utf-8"),
@@ -587,6 +632,9 @@ class MoonrakerOwlApp:
 
         # Start connection supervisor via ConnectionCoordinator
         self._connection_coordinator.start_supervisor()
+
+        # Start periodic MQTT health-snapshot publisher (audit Q6).
+        await self._start_health_publisher(device_id)
 
         if runtime_ready:
             await self._transition_state(AgentState.ACTIVE, detail="runtime ready")
@@ -672,6 +720,46 @@ class MoonrakerOwlApp:
             LOGGER.warning("Error stopping MetadataReporter: %s", exc)
         finally:
             self._metadata_reporter = None
+
+    async def _start_health_publisher(self, device_id: str) -> None:
+        """Start the periodic MQTT self-health snapshot publisher (audit Q6).
+
+        Non-blocking and best-effort: a failure here must never abort startup,
+        since health reporting is purely observability.
+        """
+        resilience = self._config.resilience
+        if not resilience.health_report_enabled:
+            LOGGER.info("MQTT health reporting disabled by configuration")
+            return
+        if self._mqtt_client is None:
+            LOGGER.warning("Cannot start HealthPublisher: MQTT client not available")
+            return
+
+        self._health_publisher = HealthPublisher(
+            mqtt_client=self._mqtt_client,
+            device_id=device_id,
+            moonraker=self._moonraker_client,
+            publisher=self._telemetry_publisher,
+            token_manager=self._token_manager,
+            coordinator=self._connection_coordinator,
+            interval_seconds=resilience.health_report_interval_seconds,
+        )
+        try:
+            await self._health_publisher.start()
+        except Exception as exc:
+            LOGGER.warning("Failed to start HealthPublisher: %s", exc)
+            self._health_publisher = None
+
+    async def _stop_health_publisher(self) -> None:
+        """Stop the MQTT health publisher and clean up."""
+        if self._health_publisher is None:
+            return
+        try:
+            await self._health_publisher.stop()
+        except Exception as exc:
+            LOGGER.warning("Error stopping HealthPublisher: %s", exc)
+        finally:
+            self._health_publisher = None
 
     def _start_moonraker_monitor(self) -> None:
         if (
@@ -865,6 +953,15 @@ class MoonrakerOwlApp:
         if self._connection_coordinator is None:
             return False
 
+        # Startup precheck (P1-10): if anything between token issuance and now
+        # has pushed the token within its safety buffer, refresh before we
+        # attempt to authenticate against the broker.
+        if self._token_manager is not None:
+            try:
+                await self._token_manager.ensure_valid_token()
+            except Exception as exc:  # noqa: BLE001 - log and continue to connect
+                LOGGER.warning("Token precheck refresh failed: %s", exc)
+
         try:
             await self._connection_coordinator.connect()
         except MQTTConnectionError as exc:
@@ -874,11 +971,6 @@ class MoonrakerOwlApp:
 
         self._mqtt_ready = True
         await self._health.update("mqtt", True, None)
-
-        # Start JWT token renewal loop after MQTT connection succeeds
-        if self._token_manager:
-            LOGGER.info("Starting TokenManager renewal loop")
-            self._token_manager.start_renewal_loop(on_renewed=self._on_token_renewed)
 
         return True
 
@@ -1224,6 +1316,59 @@ class MoonrakerOwlApp:
     # MQTT Client Callbacks (from paho-mqtt thread)
     # -------------------------------------------------------------------------
 
+    def _publish_graceful_offline(self) -> None:
+        """Publish a retained graceful-offline status before disconnecting.
+
+        Overrides the broker-delivered Last Will (which signals an *unexpected*
+        drop) with an explicit clean-shutdown status so consumers can tell a
+        planned stop apart from a crash. Best-effort: any failure is swallowed
+        because shutdown must continue regardless.
+        """
+        mqtt_client = self._mqtt_client
+        device_id = self._device_id
+        if mqtt_client is None or device_id is None:
+            return
+        try:
+            from .identifiers import uuid7
+            from .version import __version__
+
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            payload = {
+                "$v": 1,
+                "$type": "telemetry.status",
+                "$id": str(uuid7()),
+                "$ts": now,
+                "$origin": f"moonraker-owl@{__version__}",
+                "$seq": 0,
+                "kind": "full",
+                "sessionId": None,
+                "deviceId": str(device_id),
+                "payload": {
+                    "lifecycle": {
+                        "phase": "Offline",
+                        "isHeating": False,
+                        "hasActiveJob": False,
+                        "isShutdown": False,
+                        "reason": "Graceful shutdown",
+                    },
+                    "cadence": {
+                        "heartbeatSeconds": self._config.telemetry_cadence.status_heartbeat_seconds,
+                        "watchWindowActive": False,
+                    },
+                    "lastUpdated": now,
+                },
+            }
+            status_topic = constants.MQTTTopics.for_device(str(device_id)).status
+            mqtt_client.publish(
+                status_topic,
+                json.dumps(payload).encode("utf-8"),
+                qos=1,
+                retain=True,
+            )
+            LOGGER.info("Published graceful-offline status to %s", status_topic)
+        except Exception as exc:  # pragma: no cover - best-effort shutdown path
+            LOGGER.debug("Failed to publish graceful-offline status: %s", exc)
+
     def _on_mqtt_disconnect(self, rc: int) -> None:
         """Handle MQTT disconnect event from paho-mqtt.
 
@@ -1285,8 +1430,10 @@ class MoonrakerOwlApp:
         if mqtt is None or self._base_topic is None:
             return
 
-        broadcast_topic = "owl/broadcasts/config-update"
-        device_topic = f"{self._base_topic}/config/notify"
+        broadcast_topic = constants.MQTTTopics.BROADCAST_CONFIG_UPDATE
+        device_topic = constants.MQTTTopics.for_device(
+            str(self._device_id)
+        ).config_notify
 
         try:
             mqtt.subscribe_with_handler(
@@ -1351,6 +1498,14 @@ class MoonrakerOwlApp:
                 pass
             self._startup_retry_task = None
 
+        # Cancel any tracked fire-and-forget background tasks
+        if self._background_tasks:
+            pending = list(self._background_tasks)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            self._background_tasks.clear()
+
         # Stop connection coordinator first
         try:
             if self._connection_coordinator is not None:
@@ -1379,6 +1534,11 @@ class MoonrakerOwlApp:
             LOGGER.warning("Error stopping metadata reporter: %s", exc)
 
         try:
+            await self._stop_health_publisher()
+        except Exception as exc:
+            LOGGER.warning("Error stopping health publisher: %s", exc)
+
+        try:
             if self._cloud_config_manager is not None:
                 await self._cloud_config_manager.stop()
                 self._cloud_config_manager = None
@@ -1394,6 +1554,7 @@ class MoonrakerOwlApp:
 
         try:
             if self._mqtt_client is not None:
+                self._publish_graceful_offline()
                 await self._mqtt_client.disconnect()
                 self._mqtt_client = None
                 await self._health.update("mqtt", False, "shutdown")

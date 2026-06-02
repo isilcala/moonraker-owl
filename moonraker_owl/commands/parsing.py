@@ -8,6 +8,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from ..config import OwlConfig
+from ..constants import MQTTTopics
 from .types import CommandConfigurationError, CommandMessage, CommandProcessingError
 
 
@@ -65,7 +66,7 @@ def _parse_command(raw_payload: bytes, command_name: str) -> CommandMessage:
 
 def _build_ack_topic(device_id: str, command_name: str) -> str:
     safe_command_name = quote(command_name, safe="")
-    return f"owl/printers/{device_id}/acks/{safe_command_name}"
+    return MQTTTopics.for_device(device_id).ack(safe_command_name)
 
 
 def _parse_iso8601(value: Any) -> Optional[datetime]:

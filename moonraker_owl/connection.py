@@ -94,10 +94,18 @@ class ConnectionCoordinator:
         self._on_disconnected_callbacks: list = []
         self._on_reconnected_callbacks: list = []
 
+        # Cumulative count of successful reconnections (health reporting).
+        self._reconnects_total = 0
+
     @property
     def state(self) -> ConnectionState:
         """Current connection state."""
         return self._state
+
+    @property
+    def reconnects_total(self) -> int:
+        """Cumulative number of successful reconnections since process start."""
+        return self._reconnects_total
 
     @property
     def is_connected(self) -> bool:
@@ -169,7 +177,7 @@ class ConnectionCoordinator:
         try:
             # clean_start=False: resume existing broker session (subscriptions +
             # queued QoS 1/2 messages) across reconnects.  Session expires after
-            # session_expiry seconds of inactivity (default 24h).
+            # session_expiry seconds of inactivity (default 1h).
             await self._mqtt_client.connect(
                 clean_start=False,
                 session_expiry=self._session_expiry,
@@ -281,6 +289,7 @@ class ConnectionCoordinator:
 
         if connected:
             self._state = ConnectionState.CONNECTED
+            self._reconnects_total += 1
 
             # Notify reconnection handlers
             for callback in self._on_reconnected_callbacks:
@@ -332,11 +341,11 @@ class ConnectionCoordinator:
                 # this the agent loops forever with a stale token because the
                 # auth-retry inside MQTTClient.connect() is bypassed when
                 # _connect_with_backoff() catches the exception.
-                if self._mqtt_client._last_connect_rc in (5, 134, 135):
+                if self._mqtt_client.last_connect_rc in (5, 134, 135):
                     try:
                         LOGGER.info(
                             "Auth failure during reconnection (rc=%d), refreshing JWT token",
-                            self._mqtt_client._last_connect_rc,
+                            self._mqtt_client.last_connect_rc,
                         )
                         await self._token_manager.refresh_token_now()
                     except Exception as refresh_exc:
@@ -347,6 +356,12 @@ class ConnectionCoordinator:
 
                 if in_perpetual:
                     sleep_for = perpetual_delay
+                    if jitter_ratio > 0.0:
+                        floor = min(
+                            perpetual_delay,
+                            max(0.1, perpetual_delay * (1.0 - jitter_ratio)),
+                        )
+                        sleep_for = random.uniform(floor, perpetual_delay)
                     LOGGER.warning(
                         "Connection attempt %d failed: %s, perpetual retry in %.0fs",
                         attempt,
@@ -361,13 +376,16 @@ class ConnectionCoordinator:
                         delay,
                     )
 
-                    # Apply jitter to delay
+                    # Apply "full jitter" (AWS recommended) to de-synchronise
+                    # large fleets reconnecting after a broker restart:
+                    # sleep ~ U(floor, current_backoff). Picking from the full
+                    # [0, delay] range (rather than symmetric +/- around delay)
+                    # spreads retries far more evenly than narrow symmetric
+                    # jitter, avoiding thundering-herd reconnect storms.
                     sleep_for = delay
                     if jitter_ratio > 0.0:
-                        jitter = delay * jitter_ratio
-                        lower = max(0.1, delay - jitter)
-                        upper = delay + jitter
-                        sleep_for = random.uniform(lower, upper)
+                        floor = min(delay, max(0.1, delay * (1.0 - jitter_ratio)))
+                        sleep_for = random.uniform(floor, delay)
 
                 try:
                     await asyncio.wait_for(

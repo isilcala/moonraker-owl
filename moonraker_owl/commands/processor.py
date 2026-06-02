@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Union
 from ..printer_command_names import PrinterCommandNames
 from ..identifiers import uuid7
 from ..config import OwlConfig
-from ..constants import DEFAULT_IDEMPOTENCY_PATH
+from ..constants import DEFAULT_IDEMPOTENCY_PATH, MQTTTopics
 from ..version import __version__
 from ..telemetry import TelemetryPublisher
 from ..adapters.s3_upload import S3UploadClient
@@ -93,7 +93,9 @@ class CommandProcessor(
             self._printer_id,
         ) = _resolve_identity(config)
 
-        self._command_topic_prefix = f"owl/printers/{self._device_id}/commands"
+        self._command_topic_prefix = MQTTTopics.resolve(
+            MQTTTopics.COMMANDS_PREFIX, self._device_id
+        )
         self._command_subscription = f"{self._command_topic_prefix}/#"
         self._handler_registered = False
         self._inflight: Dict[str, _InflightCommand] = {}
@@ -114,6 +116,13 @@ class CommandProcessor(
         self._pending_state_commands: Dict[str, _PendingStateCommand] = {}
         self._command_timeout_seconds = 30.0
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        # Periodic sweep of expired pending-state commands. Without this,
+        # `check_expired_commands` only ran opportunistically and a command
+        # whose expected state never arrives would pin its message in memory
+        # indefinitely on a low-traffic printer.
+        self._cleanup_task: Optional[asyncio.Task[Any]] = None
+        self._cleanup_interval_seconds = 10.0
 
         # Capture concurrency control: prevent overlapping captures (C-01)
         self._capture_semaphore = asyncio.Semaphore(1)
@@ -182,6 +191,33 @@ class CommandProcessor(
             PrinterCommandNames.CANCEL: lambda m: self._execute_print_action(m, "cancel"),
         }
 
+    def register_command(
+        self,
+        command_name: str,
+        handler: Callable[
+            [CommandMessage],
+            Union[Optional[Dict[str, Any]], Awaitable[Optional[Dict[str, Any]]]],
+        ],
+        *,
+        override: bool = False,
+    ) -> None:
+        """Register a handler for *command_name* (plugin extension point).
+
+        Lets out-of-tree code add commands without editing the built-in
+        dispatch table. ``handler`` may be sync or async and is normalised by
+        ``_execute``. Registering a name that already exists raises
+        ``ValueError`` unless ``override=True``, preventing accidental shadowing
+        of built-in commands.
+        """
+        if not command_name:
+            raise ValueError("command_name must be a non-empty string")
+        if command_name in self._dispatch and not override:
+            raise ValueError(
+                f"Command '{command_name}' is already registered; "
+                "pass override=True to replace it"
+            )
+        self._dispatch[command_name] = handler
+
     async def start(self) -> None:
         if self._handler_registered:
             raise RuntimeError("CommandProcessor already started")
@@ -190,11 +226,21 @@ class CommandProcessor(
         self._mqtt.set_message_handler(self._handle_message)
         self._mqtt.subscribe(self._command_subscription, qos=1)
         self._handler_registered = True
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = self._loop.create_task(self._cleanup_loop())
         LOGGER.info("Command processor subscribed to %s", self._command_subscription)
 
     async def stop(self) -> None:
         if not self._handler_registered:
             return
+
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
 
         try:
             self._mqtt.unsubscribe(self._command_subscription)
@@ -203,6 +249,18 @@ class CommandProcessor(
         finally:
             self._mqtt.set_message_handler(None)
             self._handler_registered = False
+
+    async def _cleanup_loop(self) -> None:
+        """Periodically expire stuck pending-state commands."""
+        try:
+            while True:
+                await asyncio.sleep(self._cleanup_interval_seconds)
+                try:
+                    self.check_expired_commands()
+                except Exception:  # pragma: no cover - defensive logging
+                    LOGGER.exception("Pending-command cleanup sweep failed")
+        except asyncio.CancelledError:
+            raise
 
     async def _handle_message(self, topic: str, payload: bytes) -> None:
         command_name = _extract_command_name(topic, self._device_id)

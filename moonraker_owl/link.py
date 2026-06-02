@@ -159,7 +159,7 @@ def _resolve_credentials_path(path: Optional[Path]) -> Path:
 
 def _persist_credentials(path: Path, credentials: DeviceCredentials) -> None:
     import os
-    
+
     payload = {
         "printerId": credentials.printer_id,
         "deviceId": credentials.device_id,
@@ -170,10 +170,17 @@ def _persist_credentials(path: Path, credentials: DeviceCredentials) -> None:
     if credentials.tenant_id:
         payload["tenantId"] = credentials.tenant_id
 
-    with path.open("w", encoding="utf-8") as stream:
+    # Create the file with restrictive permissions BEFORE writing the private
+    # key, closing the TOCTOU window where a freshly created file could be
+    # readable by other users between write and chmod. O_CREAT's mode only
+    # applies on creation, so we still chmod afterwards to tighten a
+    # pre-existing (possibly looser) file.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
         json.dump(payload, stream, indent=2)
-    
-    # Secure file permissions (Unix only)
+
+    # Tighten permissions on Unix (also fixes any pre-existing looser file).
     if hasattr(os, "chmod"):
         os.chmod(path, 0o600)  # rw-------
         LOGGER.info("Set credentials file permissions to 0600")

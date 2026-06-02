@@ -42,13 +42,15 @@ log_network = false
 reconnect_initial_seconds = 1.0
 reconnect_max_seconds = 30.0
 reconnect_jitter_ratio = 0.5
-session_expiry_seconds = 86400
+session_expiry_seconds = 3600
 buffer_window_seconds = 60.0
 moonraker_breaker_threshold = 5
 heartbeat_interval_seconds = 30
 health_enabled = true
 health_host = "127.0.0.1"
 health_port = 3333
+health_report_enabled = true
+health_report_interval_seconds = 60.0
 
 [compression]
 enabled = false

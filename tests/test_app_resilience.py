@@ -68,9 +68,19 @@ class _StubTokenManager:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.started = False
         self.stopped = False
+        self.renewal_started = False
 
     async def start(self) -> None:
         self.started = True
+
+    def start_renewal_loop(self, on_renewed: Any = None) -> None:
+        self.renewal_started = True
+
+    def is_token_valid(self) -> bool:
+        return True
+
+    async def ensure_valid_token(self) -> None:
+        return None
 
     async def stop(self) -> None:
         self.stopped = True
@@ -395,3 +405,100 @@ def test_allowed_transitions_covers_all_states() -> None:
     """Every AgentState must appear as a key in _ALLOWED_TRANSITIONS."""
     for state in AgentState:
         assert state in _ALLOWED_TRANSITIONS, f"{state.value} missing from _ALLOWED_TRANSITIONS"
+
+
+@pytest.mark.asyncio
+async def test_spawn_background_tracks_and_clears_task() -> None:
+    """A spawned background task is tracked until completion then discarded."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _work() -> None:
+        started.set()
+        await release.wait()
+
+    task = app._spawn_background(_work(), name="unit-test")
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert task in app._background_tasks
+
+    release.set()
+    await task
+    # Done callback runs via the event loop; yield once so it can fire.
+    await asyncio.sleep(0)
+    assert task not in app._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_spawn_background_logs_unhandled_exception(caplog) -> None:
+    """A crashing background task surfaces its exception via the logger."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+
+    async def _boom() -> None:
+        raise RuntimeError("boom-in-background")
+
+    with caplog.at_level("ERROR", logger="moonraker_owl.app"):
+        task = app._spawn_background(_boom(), name="boomer")
+        with contextlib.suppress(RuntimeError):
+            await task
+        await asyncio.sleep(0)
+
+    assert any("boom-in-background" in record.getMessage() for record in caplog.records)
+    assert task not in app._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_schedule_state_transition_uses_tracked_task() -> None:
+    """Scheduling a same-loop transition registers a tracked background task."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.AWAITING_MOONRAKER
+
+    app._schedule_state_transition(AgentState.ACTIVE, detail="unit-test")
+    # The transition coroutine should have been registered as a tracked task.
+    assert len(app._background_tasks) >= 1
+
+    # Drain tracked tasks so the transition completes.
+    await asyncio.gather(*list(app._background_tasks), return_exceptions=True)
+    await asyncio.sleep(0)
+    assert app._state == AgentState.ACTIVE
+
+
+
+class _FakePublishClient:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, topic, payload, qos=1, retain=False, **kwargs):
+        self.published.append(
+            {"topic": topic, "payload": payload, "qos": qos, "retain": retain}
+        )
+
+
+def test_publish_graceful_offline_emits_retained_status() -> None:
+    app = MoonrakerOwlApp(build_config())
+    client = _FakePublishClient()
+    app._mqtt_client = client
+    app._device_id = "printer-graceful"
+
+    app._publish_graceful_offline()
+
+    assert len(client.published) == 1
+    msg = client.published[0]
+    assert msg["topic"].endswith("printer-graceful/status")
+    assert msg["retain"] is True
+    assert msg["qos"] == 1
+    body = json.loads(msg["payload"].decode("utf-8"))
+    assert body["payload"]["lifecycle"]["phase"] == "Offline"
+    assert body["payload"]["lifecycle"]["reason"] == "Graceful shutdown"
+
+
+def test_publish_graceful_offline_is_noop_without_client() -> None:
+    app = MoonrakerOwlApp(build_config())
+    app._mqtt_client = None
+    app._device_id = "printer-x"
+    # Must not raise.
+    app._publish_graceful_offline()

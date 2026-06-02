@@ -120,6 +120,7 @@ class FakeMQTTClient:
         retain: bool = False,
         *,
         properties=None,
+        **kwargs: Any,
     ) -> None:
         self.messages.append(
             {
@@ -1332,6 +1333,25 @@ def test_telemetry_configuration_requires_device_id():
         TelemetryPublisher(
             config, FakeMoonrakerClient({}), FakeMQTTClient(), poll_specs=()
         )
+
+
+@pytest.mark.asyncio
+async def test_enqueue_counts_dropped_snapshots_when_saturated() -> None:
+    moonraker = FakeMoonrakerClient({})
+    mqtt = FakeMQTTClient()
+    config = build_config()
+
+    publisher = TelemetryPublisher(
+        config, moonraker, mqtt, poll_specs=(), queue_size=2
+    )
+    # Worker is not started, so the queue stays saturated and sheds load.
+    for i in range(5):
+        await publisher._enqueue({"result": {"status": {"n": i}}})
+
+    stats = publisher.queue_stats()
+    assert stats["maxsize"] == 2
+    assert stats["depth"] == 2
+    assert stats["dropped_total"] == 3
 
 
 def test_telemetry_configuration_requires_device_id_v2():
@@ -3399,3 +3419,41 @@ async def test_fetch_output_pin_pwm_config_empty_list() -> None:
     source = FakeMoonrakerClient(initial_state={})
     result = await fetch_output_pin_pwm_config(source, [])
     assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_discover_and_subscribe_auto_resubscribes_on_change() -> None:
+    """Newly-discovered sensors trigger an automatic WebSocket resubscribe (P1-13)."""
+    sample = _load_sample("moonraker-sample-printing.json")
+    moonraker = FakeMoonrakerClient(sample)
+    # Advertise a brand-new heater so discovery adds an object.
+    moonraker.set_available_heaters(["heater_bed", "extruder1"], [])
+    mqtt = FakeMQTTClient()
+    config = build_config(sensors_interval_seconds=0.1)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    changed = await publisher._discover_and_subscribe_sensors()
+
+    assert changed is True
+    assert moonraker.resubscribe_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_discover_and_subscribe_no_resubscribe_when_unchanged() -> None:
+    """No resubscribe churn when discovery finds nothing new (P1-13)."""
+    sample = _load_sample("moonraker-sample-printing.json")
+    moonraker = FakeMoonrakerClient(sample)
+    moonraker.set_available_heaters([], [])
+    mqtt = FakeMQTTClient()
+    config = build_config(sensors_interval_seconds=0.1)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    # First call establishes the baseline; second call must be a no-op.
+    await publisher._discover_and_subscribe_sensors()
+    before = moonraker.resubscribe_calls
+    changed = await publisher._discover_and_subscribe_sensors()
+
+    assert changed is False
+    assert moonraker.resubscribe_calls == before

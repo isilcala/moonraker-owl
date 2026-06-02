@@ -47,6 +47,14 @@ class _PollGroup:
     objects: Dict[str, Optional[list[str]]]
     interval: float
     initial_delay: float
+    consecutive_failures: int = 0
+    last_failure_log: float = 0.0
+
+
+# Upper bound for exponential poll backoff when Moonraker is unhealthy.
+_MAX_POLL_BACKOFF_SECONDS = 120.0
+# Minimum seconds between poll-failure WARNING logs per group (rate limiting).
+_POLL_FAILURE_LOG_INTERVAL = 30.0
 
 
 # Default polling specs for common Moonraker objects
@@ -198,19 +206,52 @@ class PollingScheduler:
 
         while not self._stop_event.is_set():
             # Fetch state
+            failed = False
             try:
                 payload = await self._fetch_state(group.objects)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass  # Polling failure handled by circuit breaker
+            except Exception as exc:
+                failed = True
+                group.consecutive_failures += 1
+                self._log_poll_failure(group, exc)
             else:
+                if group.consecutive_failures:
+                    LOGGER.info(
+                        "Polling group '%s' recovered after %d failure(s)",
+                        group.name,
+                        group.consecutive_failures,
+                    )
+                    group.consecutive_failures = 0
                 await self._enqueue(payload)
 
-            # Wait for next interval
-            interval = max(group.interval, 0.1)
+            # On failure, back off (exponential, capped) instead of hammering
+            # an unhealthy Moonraker at full poll cadence; otherwise use the
+            # group's normal interval.
+            if failed:
+                wait_for = min(
+                    group.interval * (2 ** min(group.consecutive_failures, 6)),
+                    _MAX_POLL_BACKOFF_SECONDS,
+                )
+            else:
+                wait_for = max(group.interval, 0.1)
+
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                await asyncio.wait_for(self._stop_event.wait(), timeout=wait_for)
                 break  # Stop event was set
             except asyncio.TimeoutError:
                 continue
+
+    def _log_poll_failure(self, group: _PollGroup, exc: BaseException) -> None:
+        """Rate-limit poll-failure logs so an outage doesn't flood the log."""
+        now = asyncio.get_event_loop().time()
+        if now - group.last_failure_log >= _POLL_FAILURE_LOG_INTERVAL:
+            group.last_failure_log = now
+            LOGGER.warning(
+                "Polling group '%s' failed (%d consecutive): %s",
+                group.name,
+                group.consecutive_failures,
+                exc,
+            )
+        else:
+            LOGGER.debug("Polling group '%s' failed: %s", group.name, exc)

@@ -303,3 +303,175 @@ async def test_fetch_thumbnail_without_filename_uses_relative_path_only(moonrake
     assert result == b"FAKE_IMAGE_DATA"
     assert len(moonraker_thumbnail_server.paths) == 1
     assert moonraker_thumbnail_server.paths[0] == "/server/files/gcodes/.thumbs/model-300x300.png"
+
+
+class _FakeWS:
+    """Minimal fake aiohttp websocket for subscription unit tests."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.sent: list[dict] = []
+        self.closed = False
+        self._fail = fail
+
+    async def send_json(self, payload: dict) -> None:
+        if self._fail:
+            raise ConnectionResetError("socket closed")
+        self.sent.append(payload)
+
+
+@pytest.mark.asyncio
+async def test_send_subscription_warns_when_no_objects(caplog):
+    config = MoonrakerConfig(url="http://127.0.0.1:7125", api_key="")
+    client = MoonrakerClient(config)
+    ws = _FakeWS()
+
+    with caplog.at_level("WARNING", logger="moonraker_owl.adapters.moonraker"):
+        await client._send_subscription(ws)  # type: ignore[arg-type]
+
+    assert ws.sent == []
+    assert any("No Moonraker subscription objects" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_send_subscription_replays_last_known_objects():
+    config = MoonrakerConfig(url="http://127.0.0.1:7125", api_key="")
+    client = MoonrakerClient(config)
+    client.set_subscription_objects({"toolhead": None, "extruder": ["temperature"]})
+    ws = _FakeWS()
+
+    await client._send_subscription(ws)  # type: ignore[arg-type]
+
+    assert len(ws.sent) == 1
+    params = ws.sent[0]["params"]["objects"]
+    assert params["toolhead"] is None
+    assert params["extruder"] == ["temperature"]
+
+
+@pytest.mark.asyncio
+async def test_send_subscription_reraises_on_send_failure():
+    config = MoonrakerConfig(url="http://127.0.0.1:7125", api_key="")
+    client = MoonrakerClient(config)
+    client.set_subscription_objects({"toolhead": None})
+    ws = _FakeWS(fail=True)
+
+    with pytest.raises(ConnectionResetError):
+        await client._send_subscription(ws)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_ws_failure_counter_escalates_to_critical(caplog):
+    config = MoonrakerConfig(url="http://127.0.0.1:7125", api_key="")
+    client = MoonrakerClient(config, outage_alert_after=3)
+
+    with caplog.at_level("WARNING", logger="moonraker_owl.adapters.moonraker"):
+        client._note_ws_failure(RuntimeError("boom"))
+        client._note_ws_failure(RuntimeError("boom"))
+        assert client.consecutive_failures == 2
+        assert client.is_connected is False
+        # Third failure crosses the threshold and escalates once.
+        client._note_ws_failure(RuntimeError("boom"))
+
+    assert client.consecutive_failures == 3
+    critical = [r for r in caplog.records if r.levelname == "CRITICAL"]
+    assert len(critical) == 1
+    assert "unreachable" in critical[0].getMessage()
+
+    # Further failures do not spam additional CRITICAL alerts.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="moonraker_owl.adapters.moonraker"):
+        client._note_ws_failure(RuntimeError("boom"))
+    assert not any(r.levelname == "CRITICAL" for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_ws_recovery_resets_failure_state(caplog):
+    config = MoonrakerConfig(url="http://127.0.0.1:7125", api_key="")
+    client = MoonrakerClient(config, outage_alert_after=2)
+
+    client._note_ws_failure(RuntimeError("boom"))
+    client._note_ws_failure(RuntimeError("boom"))
+    assert client.consecutive_failures == 2
+
+    with caplog.at_level("INFO", logger="moonraker_owl.adapters.moonraker"):
+        client._note_ws_connected()
+
+    assert client.is_connected is True
+    assert client.consecutive_failures == 0
+    assert any("recovered" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_times_out_slow_callback():
+    """A slow async callback is bounded so it cannot stall the message pump."""
+    config = MoonrakerConfig(url="http://localhost:7125/", api_key="")
+    client = MoonrakerClient(config, dispatch_timeout=0.05)
+
+    fast_called = {"n": 0}
+
+    async def slow_callback(payload):
+        await asyncio.sleep(5)  # would block the pump without the timeout
+
+    async def fast_callback(payload):
+        fast_called["n"] += 1
+
+    client._callbacks.append(slow_callback)
+    client._callbacks.append(fast_callback)
+
+    import time as _time
+    start = _time.monotonic()
+    await client._dispatch('{"method": "notify_status_update"}')
+    elapsed = _time.monotonic() - start
+
+    # The slow callback must have been abandoned near the timeout, not 5s.
+    assert elapsed < 1.0
+    # Subsequent callbacks still run after the slow one times out.
+    assert fast_called["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_print_action_redacts_api_key_in_error(unused_tcp_port_factory):
+    """A reflected API key in an error body must be redacted (P2 security)."""
+    secret = "super-secret-key-123"
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        # Simulate Moonraker/proxy echoing the key back in an error body.
+        return web.Response(status=403, text=f"forbidden: key {secret} rejected")
+
+    app = web.Application()
+    app.router.add_post("/printer/print/pause", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = unused_tcp_port_factory()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+
+    try:
+        config = MoonrakerConfig(url=f"http://127.0.0.1:{port}/", api_key=secret)
+        client = MoonrakerClient(config)
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                await client.execute_print_action("pause")
+        finally:
+            await client.aclose()
+    finally:
+        await runner.cleanup()
+
+    message = str(exc_info.value)
+    assert secret not in message
+    assert "***REDACTED***" in message
+
+
+def test_redact_is_noop_without_api_key():
+    config = MoonrakerConfig(url="http://localhost:7125/", api_key="")
+    client = MoonrakerClient(config)
+    assert client._redact("nothing to hide") == "nothing to hide"
+
+
+@pytest.mark.asyncio
+async def test_next_rpc_id_is_monotonic_and_locked():
+    """_next_rpc_id must allocate unique, monotonically increasing ids."""
+    config = MoonrakerConfig(url="http://localhost:7125/", api_key="")
+    client = MoonrakerClient(config)
+    ids = await asyncio.gather(*[client._next_rpc_id() for _ in range(50)])
+    assert ids == list(range(1, 51))
+    assert len(set(ids)) == 50
