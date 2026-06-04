@@ -25,6 +25,9 @@ from moonraker_owl.config import OwlConfig, load_config
 # ---------------------------------------------------------------------------
 
 SAMPLE_CLOUD_RESPONSE: Dict[str, Any] = {
+    "cloud": {
+        "allowedStorageHosts": ["uploads.owl.example.com", "oss-cn-shanghai.aliyuncs.com"],
+    },
     "telemetry": {
         "sensorsIntervalSeconds": 5,
         "includeFields": ["print_stats", "extruder"],
@@ -105,6 +108,11 @@ def test_apply_cloud_config_updates_all_sections(tmp_path: Path):
     config = _make_config(tmp_path)
     snake = _snake_dict(SAMPLE_CLOUD_RESPONSE)
     apply_cloud_config(config, snake)
+
+    assert config.cloud.allowed_storage_hosts == [
+        "uploads.owl.example.com",
+        "oss-cn-shanghai.aliyuncs.com",
+    ]
 
     # Telemetry: sensorsIntervalSeconds=5 → sensors_interval_seconds=5.0
     assert config.telemetry.sensors_interval_seconds == 5.0
@@ -201,6 +209,10 @@ def test_load_lkg_populates_config(tmp_path: Path):
 
     assert mgr.load_lkg() is True
     assert mgr._state.etag == "sha256-abc"
+    assert config.cloud.allowed_storage_hosts == [
+        "uploads.owl.example.com",
+        "oss-cn-shanghai.aliyuncs.com",
+    ]
     assert config.camera.snapshot_url == "http://cam:8080/snap"
     assert config.commands.ack_timeout_seconds == 60
 

@@ -145,6 +145,15 @@ def apply_cloud_config(config: OwlConfig, cloud_data: Dict[str, Any]) -> None:
         if "min_size_bytes" in comp:
             cc.min_size_bytes = int(comp["min_size_bytes"])
 
+    cloud = cloud_data.get("cloud")
+    if isinstance(cloud, dict):
+        if "allowed_storage_hosts" in cloud:
+            config.cloud.allowed_storage_hosts = [
+                str(host)
+                for host in cloud["allowed_storage_hosts"]
+                if isinstance(host, str)
+            ]
+
     cmds = cloud_data.get("commands")
     if isinstance(cmds, dict):
         if "ack_timeout_seconds" in cmds:
