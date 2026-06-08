@@ -23,6 +23,40 @@ from ._url_validation import (
 
 LOGGER = logging.getLogger(__name__)
 
+_MIN_GCODE_TRANSFER_BANDWIDTH_BPS = 20 * 1024  # 20 KB/s conservative floor
+_BASE_GCODE_DOWNLOAD_TIMEOUT_SECONDS = 60.0
+_MIN_GCODE_DOWNLOAD_TIMEOUT_SECONDS = 120.0
+_MAX_GCODE_DOWNLOAD_TIMEOUT_SECONDS = 1800.0
+_BASE_GCODE_UPLOAD_TIMEOUT_SECONDS = 30.0
+_MIN_GCODE_UPLOAD_TIMEOUT_SECONDS = 60.0
+
+
+def _calculate_download_timeout(file_size_bytes: int) -> float:
+    """Estimate a bounded end-to-end timeout for cloud GCode downloads.
+
+    Staging transfers on SBCs routinely land below 100 KB/s once TLS, CDN,
+    and device-side I/O are factored in. Use a more conservative bandwidth
+    floor and clamp the result so slow but healthy downloads succeed without
+    letting a hostile peer hold the handler forever.
+    """
+    estimated_transfer_seconds = (
+        file_size_bytes / _MIN_GCODE_TRANSFER_BANDWIDTH_BPS
+        if file_size_bytes > 0
+        else 60.0
+    )
+    timeout_seconds = _BASE_GCODE_DOWNLOAD_TIMEOUT_SECONDS + estimated_transfer_seconds
+    return min(
+        _MAX_GCODE_DOWNLOAD_TIMEOUT_SECONDS,
+        max(_MIN_GCODE_DOWNLOAD_TIMEOUT_SECONDS, timeout_seconds),
+    )
+
+
+def _calculate_upload_timeout(file_size_bytes: int) -> float:
+    """Estimate a bounded timeout for uploading the downloaded file to Moonraker."""
+    estimated_transfer_seconds = max(file_size_bytes, 0) / _MIN_GCODE_TRANSFER_BANDWIDTH_BPS
+    timeout_seconds = _BASE_GCODE_UPLOAD_TIMEOUT_SECONDS + estimated_transfer_seconds
+    return max(_MIN_GCODE_UPLOAD_TIMEOUT_SECONDS, timeout_seconds)
+
 
 class TaskCommandsMixin:
     """Mixin providing system task command handlers."""
@@ -316,9 +350,9 @@ class TaskCommandsMixin:
                 ),
             }
 
-        # Dynamic timeout: base 30s + file_size / 100KB/s (conservative)
-        min_bandwidth_bps = 100 * 1024  # 100 KB/s minimum
-        download_timeout = 30.0 + (file_size / min_bandwidth_bps if file_size > 0 else 60.0)
+        # Dynamic timeout uses a conservative throughput floor so normal
+        # WAN downloads on SBCs do not get killed as false positives.
+        download_timeout = _calculate_download_timeout(file_size)
 
         LOGGER.info(
             "Downloading GCode file for transfer %s from host=%s: %s (%d bytes, timeout=%.0fs)",
@@ -411,7 +445,7 @@ class TaskCommandsMixin:
                 checksum_verified = True
 
             # Upload to Moonraker
-            upload_timeout = 30.0 + (total_bytes / min_bandwidth_bps)
+            upload_timeout = _calculate_upload_timeout(total_bytes)
             local_path = await self._moonraker.upload_gcode_file(
                 filename=file_name,
                 file_path=tmp_path,

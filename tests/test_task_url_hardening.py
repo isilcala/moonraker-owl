@@ -22,6 +22,10 @@ from moonraker_owl.commands.handlers._url_validation import (
     validate_external_url,
     validate_gcode_content_type,
 )
+from moonraker_owl.commands.handlers.task_commands import (
+    _calculate_download_timeout,
+    _calculate_upload_timeout,
+)
 from moonraker_owl.commands.types import CommandMessage, CommandProcessingError
 
 from helpers import build_config
@@ -177,6 +181,23 @@ class TestValidateContentType:
         with pytest.raises(CommandProcessingError) as exc:
             validate_gcode_content_type("application/json", command_id="c-1")
         assert exc.value.code == "invalid_content_type"
+
+
+class TestGcodeTransferTimeouts:
+    def test_download_timeout_uses_conservative_floor_for_large_files(self) -> None:
+        # 7_087_673 bytes at the 20 KB/s conservative floor is ~346s of
+        # transfer time, plus the 60s base = ~406s. Bounds are tight around
+        # the expected value so the test catches drift in either the
+        # bandwidth floor or the base constant.
+        timeout_seconds = _calculate_download_timeout(7_087_673)
+        assert timeout_seconds > 400.0
+        assert timeout_seconds < 410.0
+
+    def test_download_timeout_has_reasonable_minimum_when_size_unknown(self) -> None:
+        assert _calculate_download_timeout(0) == 120.0
+
+    def test_upload_timeout_has_minimum_floor(self) -> None:
+        assert _calculate_upload_timeout(1) == 60.0
 
 
 # ────────────────────────────────────────────────────────────────────
