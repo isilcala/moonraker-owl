@@ -32,6 +32,7 @@ class FakeMqttClient:
         self._rc_disconnect = rc_disconnect
         self._publish_rc = publish_rc
         self._subscribe_rc = subscribe_rc
+        self._events.setdefault("client_ctor_kwargs", []).append(dict(unused))
 
         self.on_connect = None
         self.on_disconnect = None
@@ -155,6 +156,7 @@ async def test_connect_configures_client(mqtt_client):
     # JWT authentication: username=device_id, password=jwt_token
     assert events["auth"] == ("device-test", "mock-jwt-token")
     assert events.get("connect_kwargs", {}) == {}
+    assert events["client_ctor_kwargs"][0]["reconnect_on_failure"] is False
     assert events["loop_start"] == 1
 
 

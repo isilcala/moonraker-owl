@@ -8,6 +8,7 @@ Tests the unified reconnection mechanism that handles:
 """
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -555,3 +556,246 @@ async def test_auth_failure_during_backoff_refreshes_token(coordinator_setup):
     # Token should have been refreshed on each auth-failure attempt
     assert token_manager.refresh_call_count >= 1
     await stop_task
+
+
+@pytest.mark.asyncio
+async def test_supervisor_exception_restarts_supervisor(
+    coordinator_setup, caplog, monkeypatch
+):
+    # Tiny backoff so the test does not sleep a full second.
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS", 0.01
+    )
+
+    coordinator, _, _ = coordinator_setup()
+
+    async def boom():
+        raise RuntimeError("supervisor boom")
+
+    task = asyncio.create_task(boom())
+    await asyncio.sleep(0)
+
+    coordinator._supervisor_task = task
+
+    with caplog.at_level(logging.WARNING):
+        coordinator._handle_supervisor_exit(task)
+
+    assert "Connection supervisor crashed" in caplog.text
+    # Restart is scheduled, not synchronous — task is None until the timer fires.
+    assert coordinator._supervisor_task is None
+    assert coordinator._supervisor_restart_handle is not None
+    assert coordinator._supervisor_restart_attempts == 1
+
+    # Let the scheduled restart fire.
+    await asyncio.sleep(0.05)
+    assert coordinator._supervisor_task is not None
+    assert not coordinator._supervisor_task.done()
+
+    await coordinator.stop_supervisor()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_normal_return_restarts_and_logs(
+    coordinator_setup, caplog, monkeypatch
+):
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS", 0.01
+    )
+
+    coordinator, _, _ = coordinator_setup()
+
+    async def noop():
+        return None
+
+    task = asyncio.create_task(noop())
+    await asyncio.sleep(0)
+
+    coordinator._supervisor_task = task
+
+    with caplog.at_level(logging.WARNING):
+        coordinator._handle_supervisor_exit(task)
+
+    assert "Connection supervisor exited unexpectedly without raising an exception" in caplog.text
+    assert coordinator._supervisor_task is None
+    assert coordinator._supervisor_restart_handle is not None
+
+    await asyncio.sleep(0.05)
+    assert coordinator._supervisor_task is not None
+    assert not coordinator._supervisor_task.done()
+
+    await coordinator.stop_supervisor()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restart_backoff_is_exponential(
+    coordinator_setup, caplog, monkeypatch
+):
+    """Each rapid crash should double the scheduled delay, capped at the max."""
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS", 1.0
+    )
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_BACKOFF_MAX_SECONDS", 5.0
+    )
+
+    coordinator, _, _ = coordinator_setup()
+    loop = asyncio.get_running_loop()
+
+    expected_delays = [1.0, 2.0, 4.0, 5.0]  # 1, 2, 4, 8→capped at 5
+    for attempt_index, expected in enumerate(expected_delays, start=1):
+        async def boom():
+            raise RuntimeError(f"boom-{attempt_index}")
+
+        task = asyncio.create_task(boom())
+        await asyncio.sleep(0)
+        coordinator._supervisor_task = task
+        # Stamp a fresh start time so the liveness reset does not trigger.
+        coordinator._supervisor_started_at = loop.time()
+
+        coordinator._handle_supervisor_exit(task)
+
+        assert coordinator._supervisor_restart_attempts == attempt_index
+        handle = coordinator._supervisor_restart_handle
+        assert handle is not None
+        actual_delay = handle.when() - loop.time()
+        # Allow a small slop for scheduler timing.
+        assert abs(actual_delay - expected) < 0.05, (
+            f"attempt {attempt_index}: expected ~{expected}s, got {actual_delay:.3f}s"
+        )
+        handle.cancel()
+        coordinator._supervisor_restart_handle = None
+
+
+@pytest.mark.asyncio
+async def test_supervisor_gives_up_after_max_attempts(
+    coordinator_setup, caplog, monkeypatch
+):
+    """Once MAX_ATTEMPTS rapid restarts are exhausted, no further restart is scheduled."""
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_MAX_ATTEMPTS", 2
+    )
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS", 0.01
+    )
+
+    coordinator, _, _ = coordinator_setup()
+    loop = asyncio.get_running_loop()
+    fatal_attempts: list[int] = []
+    coordinator.register_fatal_supervisor_failure_callback(fatal_attempts.append)
+
+    for i in range(3):  # 2 allowed restarts, third call should give up
+        async def boom():
+            raise RuntimeError(f"boom-{i}")
+
+        task = asyncio.create_task(boom())
+        await asyncio.sleep(0)
+        coordinator._supervisor_task = task
+        coordinator._supervisor_started_at = loop.time()
+
+        with caplog.at_level(logging.CRITICAL):
+            coordinator._handle_supervisor_exit(task)
+
+        # Cancel any scheduled restart so a fired call_later does not race the
+        # next iteration's manual injection.
+        if coordinator._supervisor_restart_handle is not None:
+            coordinator._supervisor_restart_handle.cancel()
+            coordinator._supervisor_restart_handle = None
+
+    assert coordinator._supervisor_restart_attempts == 3
+    assert coordinator._supervisor_restart_handle is None
+    assert coordinator._supervisor_task is None
+    assert coordinator._stop_event.is_set()
+    assert fatal_attempts == [3]
+    assert "requesting full agent restart" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_supervisor_long_lifetime_resets_restart_counter(
+    coordinator_setup, monkeypatch
+):
+    """A supervisor that lived past the liveness threshold should not count toward rapid restarts."""
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_LIVENESS_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS", 0.01
+    )
+
+    coordinator, _, _ = coordinator_setup()
+    loop = asyncio.get_running_loop()
+
+    # First crash bumps the counter to 1.
+    async def boom1():
+        raise RuntimeError("first")
+
+    t1 = asyncio.create_task(boom1())
+    await asyncio.sleep(0)
+    coordinator._supervisor_task = t1
+    coordinator._supervisor_started_at = loop.time()
+    coordinator._handle_supervisor_exit(t1)
+    assert coordinator._supervisor_restart_attempts == 1
+    if coordinator._supervisor_restart_handle is not None:
+        coordinator._supervisor_restart_handle.cancel()
+        coordinator._supervisor_restart_handle = None
+
+    # Simulate a supervisor that ran long enough to clear the threshold.
+    async def boom2():
+        raise RuntimeError("second")
+
+    t2 = asyncio.create_task(boom2())
+    await asyncio.sleep(0)
+    coordinator._supervisor_task = t2
+    coordinator._supervisor_started_at = loop.time() - 1.0  # well past 0.1s threshold
+
+    coordinator._handle_supervisor_exit(t2)
+    assert coordinator._supervisor_restart_attempts == 1, (
+        "long-lived supervisor death should reset the counter before incrementing"
+    )
+    if coordinator._supervisor_restart_handle is not None:
+        coordinator._supervisor_restart_handle.cancel()
+        coordinator._supervisor_restart_handle = None
+
+
+@pytest.mark.asyncio
+async def test_stop_supervisor_cancels_pending_restart(
+    coordinator_setup, monkeypatch
+):
+    """stop_supervisor must cancel a scheduled restart so it does not fire after shutdown."""
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS", 1.0
+    )
+
+    coordinator, _, _ = coordinator_setup()
+    loop = asyncio.get_running_loop()
+
+    async def boom():
+        raise RuntimeError("boom")
+
+    task = asyncio.create_task(boom())
+    await asyncio.sleep(0)
+    coordinator._supervisor_task = task
+    coordinator._supervisor_started_at = loop.time()
+    coordinator._handle_supervisor_exit(task)
+
+    handle = coordinator._supervisor_restart_handle
+    assert handle is not None
+
+    await coordinator.stop_supervisor()
+
+    assert handle.cancelled()
+    assert coordinator._supervisor_restart_handle is None
+    assert coordinator._supervisor_restart_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_start_supervisor_ignores_requests_after_stop_signaled(
+    coordinator_setup, caplog
+):
+    coordinator, _, _ = coordinator_setup()
+    coordinator._stop_event.set()
+
+    with caplog.at_level(logging.WARNING):
+        coordinator.start_supervisor()
+
+    assert coordinator._supervisor_task is None
+    assert "shutdown was signaled; ignoring" in caplog.text

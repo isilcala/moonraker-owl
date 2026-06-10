@@ -195,6 +195,10 @@ class MQTTClient:
         client_kwargs: dict[str, Any] = {
             "client_id": actual_client_id,
             "protocol": mqtt.MQTTv5,
+            # Reconnect policy is owned by ConnectionCoordinator. Leaving paho's
+            # internal reconnect loop enabled would let it retry with stale JWT
+            # credentials after broker-side token expiry, bypassing token refresh.
+            "reconnect_on_failure": False,
         }
 
         callback_api_version = getattr(mqtt, "CallbackAPIVersion", None)

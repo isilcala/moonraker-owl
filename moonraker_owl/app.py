@@ -135,6 +135,7 @@ class MoonrakerOwlApp:
         self._shutdown_event: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stopping = False
+        self._fatal_exit_code: Optional[int] = None
         self._last_disconnect_rc: Optional[int] = None
         self._health = HealthReporter()
         self._health_server: Optional[HealthServer] = None
@@ -381,6 +382,9 @@ class MoonrakerOwlApp:
         except KeyboardInterrupt:
             LOGGER.info("moonraker-owl received shutdown signal")
 
+        if instance._fatal_exit_code is not None:
+            raise SystemExit(instance._fatal_exit_code)
+
     async def _teardown_partially_started_services(self) -> None:
         """Clean up partially-started services before retrying startup.
 
@@ -595,6 +599,9 @@ class MoonrakerOwlApp:
         # Register callbacks with coordinator
         self._connection_coordinator.register_disconnected_callback(
             self._on_connection_lost
+        )
+        self._connection_coordinator.register_fatal_supervisor_failure_callback(
+            self._on_unrecoverable_connection_supervisor_failure
         )
         self._connection_coordinator.register_reconnected_callback(
             self._on_connection_restored
@@ -1401,6 +1408,25 @@ class MoonrakerOwlApp:
             return
         self._mqtt_ready = True
         self._schedule_health_update("mqtt", True, None)
+
+    def _on_unrecoverable_connection_supervisor_failure(
+        self, restart_attempts: int
+    ) -> None:
+        """Request full agent restart after reconnect control becomes unrecoverable."""
+        if self._fatal_exit_code is not None:
+            return
+
+        reason = (
+            "connection supervisor exhausted restart attempts "
+            f"({restart_attempts} rapid failures)"
+        )
+        LOGGER.critical("Requesting full agent restart because %s", reason)
+        self._fatal_exit_code = 1
+        self._stopping = True
+        self._schedule_state_transition(AgentState.STOPPING, detail=reason)
+        if self._shutdown_event is None:
+            self._shutdown_event = asyncio.Event()
+        self._shutdown_event.set()
 
     async def _on_token_renewed(self) -> None:
         """Callback invoked when TokenManager renews JWT token.

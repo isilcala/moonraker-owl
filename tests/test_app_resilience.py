@@ -502,3 +502,33 @@ def test_publish_graceful_offline_is_noop_without_client() -> None:
     app._device_id = "printer-x"
     # Must not raise.
     app._publish_graceful_offline()
+
+
+@pytest.mark.asyncio
+async def test_unrecoverable_connection_supervisor_failure_requests_shutdown() -> None:
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._shutdown_event = asyncio.Event()
+
+    app._on_unrecoverable_connection_supervisor_failure(6)
+
+    assert app._fatal_exit_code == 1
+    assert app._stopping is True
+    assert app._shutdown_event.is_set()
+
+    await asyncio.gather(*list(app._background_tasks), return_exceptions=True)
+    await asyncio.sleep(0)
+    assert app._state == AgentState.STOPPING
+
+
+def test_start_exits_nonzero_after_fatal_runtime(monkeypatch) -> None:
+    async def _fatal_run(self: MoonrakerOwlApp) -> None:
+        self._fatal_exit_code = 1
+
+    monkeypatch.setattr(MoonrakerOwlApp, "run", _fatal_run)
+    monkeypatch.setattr("moonraker_owl.app.configure_logging", lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit) as exc:
+        MoonrakerOwlApp.start(build_config())
+
+    assert exc.value.code == 1

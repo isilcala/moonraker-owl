@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from contextlib import suppress
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from .adapters.mqtt import MQTTClient
@@ -22,6 +23,20 @@ LOGGER = logging.getLogger(__name__)
 
 _BACKOFF_MAX_ATTEMPTS = 10
 """Number of exponential-backoff retries before switching to perpetual fixed-interval."""
+
+_SUPERVISOR_RESTART_LIVENESS_SECONDS = 30.0
+"""How long a supervisor must stay alive before its eventual death is treated as
+an isolated failure (resets the rapid-restart counter)."""
+
+_SUPERVISOR_RESTART_MAX_ATTEMPTS = 5
+"""Maximum consecutive rapid restarts before the coordinator gives up. Stops a
+deterministic crash from spinning the event loop and flooding the log forever."""
+
+_SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS = 1.0
+"""Initial delay before the first restart attempt."""
+
+_SUPERVISOR_RESTART_BACKOFF_MAX_SECONDS = 30.0
+"""Cap on the exponential restart backoff."""
 
 
 class ReconnectReason(str, Enum):
@@ -89,9 +104,17 @@ class ConnectionCoordinator:
         self._stop_event = asyncio.Event()
         self._supervisor_task: Optional[asyncio.Task[None]] = None
 
+        # Supervisor restart bookkeeping. A deterministic crash inside
+        # _supervision_loop would otherwise let _handle_supervisor_exit
+        # re-spawn it instantly forever, burning CPU and drowning the log.
+        self._supervisor_started_at: Optional[float] = None
+        self._supervisor_restart_attempts = 0
+        self._supervisor_restart_handle: Optional[asyncio.TimerHandle] = None
+
         # Callbacks
         self._on_connected: Optional[asyncio.Future[None]] = None
         self._on_disconnected_callbacks: list = []
+        self._on_fatal_supervisor_failure_callbacks: list[Callable[[int], None]] = []
         self._on_reconnected_callbacks: list = []
 
         # Cumulative count of successful reconnections (health reporting).
@@ -204,13 +227,32 @@ class ConnectionCoordinator:
             LOGGER.warning("Supervisor already running")
             return
 
-        self._stop_event.clear()
+        if self._stop_event.is_set():
+            LOGGER.warning(
+                "Supervisor start requested after shutdown was signaled; ignoring"
+            )
+            return
+
+        # Cancel any pending restart so we don't end up with two supervisor
+        # tasks if start_supervisor is called manually while a backoff timer
+        # is in flight.
+        if self._supervisor_restart_handle is not None:
+            self._supervisor_restart_handle.cancel()
+            self._supervisor_restart_handle = None
+
+        loop = asyncio.get_running_loop()
+        self._supervisor_started_at = loop.time()
         self._supervisor_task = asyncio.create_task(self._supervision_loop())
+        self._supervisor_task.add_done_callback(self._handle_supervisor_exit)
 
     async def stop_supervisor(self) -> None:
         """Stop the connection supervision task."""
         self._stop_event.set()
         self._reconnect_event.set()  # Wake up the loop
+
+        if self._supervisor_restart_handle is not None:
+            self._supervisor_restart_handle.cancel()
+            self._supervisor_restart_handle = None
 
         if self._supervisor_task is not None:
             self._supervisor_task.cancel()
@@ -220,13 +262,114 @@ class ConnectionCoordinator:
                 pass
             self._supervisor_task = None
 
+        self._supervisor_restart_attempts = 0
+        self._supervisor_started_at = None
+
+    def _handle_supervisor_exit(self, task: asyncio.Task[None]) -> None:
+        """Restart the supervisor when it exits unexpectedly, with bounded backoff.
+
+        The coordinator is the single owner of reconnect policy. If its task dies,
+        the agent must not remain alive in a permanently non-reconnecting state.
+        A deterministic crash, however, must not be allowed to spin the loop —
+        rapid restarts are exponentially backed off and capped at
+        ``_SUPERVISOR_RESTART_MAX_ATTEMPTS``, after which the coordinator stops
+        trying and lets the operator (or the process supervisor) intervene.
+        """
+        self._supervisor_task = None
+
+        if self._stop_event.is_set():
+            self._supervisor_restart_attempts = 0
+            self._supervisor_started_at = None
+            return
+
+        exc: BaseException | None = None
+        with suppress(asyncio.CancelledError):
+            exc = task.exception()
+
+        if task.cancelled():
+            LOGGER.error(
+                "Connection supervisor exited unexpectedly via cancellation while the coordinator is still running"
+            )
+        else:
+            if exc is not None:
+                LOGGER.error("Connection supervisor crashed", exc_info=exc)
+            else:
+                LOGGER.error(
+                    "Connection supervisor exited unexpectedly without raising an exception"
+                )
+
+        loop = asyncio.get_running_loop()
+
+        # A supervisor that lived past the liveness threshold is treated as a
+        # one-off failure, not part of a rapid-restart cluster.
+        started_at = self._supervisor_started_at
+        if started_at is not None and (loop.time() - started_at) >= _SUPERVISOR_RESTART_LIVENESS_SECONDS:
+            self._supervisor_restart_attempts = 0
+        self._supervisor_started_at = None
+
+        self._supervisor_restart_attempts += 1
+
+        if self._supervisor_restart_attempts > _SUPERVISOR_RESTART_MAX_ATTEMPTS:
+            LOGGER.critical(
+                "Connection supervisor has crashed %d times in rapid succession; "
+                "stopping reconnect control and requesting full agent restart.",
+                self._supervisor_restart_attempts,
+            )
+            # Defensive: ensure no stale handle from a prior iteration lingers.
+            if self._supervisor_restart_handle is not None:
+                self._supervisor_restart_handle.cancel()
+                self._supervisor_restart_handle = None
+            self._pending_reason = None
+            self._stop_event.set()
+            self._notify_fatal_supervisor_failure(self._supervisor_restart_attempts)
+            return
+
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s.
+        backoff = min(
+            _SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS
+            * (2 ** (self._supervisor_restart_attempts - 1)),
+            _SUPERVISOR_RESTART_BACKOFF_MAX_SECONDS,
+        )
+
+        # Re-arm the event so any pending reconnect reason is not stranded.
+        self._reconnect_event.set()
+        LOGGER.warning(
+            "Restarting connection supervisor in %.1fs (attempt %d/%d after unexpected exit)",
+            backoff,
+            self._supervisor_restart_attempts,
+            _SUPERVISOR_RESTART_MAX_ATTEMPTS,
+        )
+        self._supervisor_restart_handle = loop.call_later(
+            backoff, self._restart_supervisor
+        )
+
+    def _restart_supervisor(self) -> None:
+        """Fire the scheduled supervisor restart, unless stop was requested in the meantime."""
+        self._supervisor_restart_handle = None
+        if self._stop_event.is_set():
+            return
+        self.start_supervisor()
+
     def register_reconnected_callback(self, callback) -> None:
         """Register callback to be invoked after successful reconnection."""
         self._on_reconnected_callbacks.append(callback)
 
+    def register_fatal_supervisor_failure_callback(
+        self, callback: Callable[[int], None]
+    ) -> None:
+        """Register callback to be invoked when supervisor restart is exhausted."""
+        self._on_fatal_supervisor_failure_callbacks.append(callback)
+
     def register_disconnected_callback(self, callback) -> None:
         """Register callback to be invoked on disconnection."""
         self._on_disconnected_callbacks.append(callback)
+
+    def _notify_fatal_supervisor_failure(self, attempts: int) -> None:
+        for callback in self._on_fatal_supervisor_failure_callbacks:
+            try:
+                callback(attempts)
+            except Exception:
+                LOGGER.exception("Fatal supervisor failure callback failed")
 
     async def _supervision_loop(self) -> None:
         """Main supervision loop that handles reconnection requests."""
