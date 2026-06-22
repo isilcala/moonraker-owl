@@ -24,9 +24,9 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-from . import constants
+from . import constants, host_metrics
 from .identifiers import uuid7
 from .version import __version__
 
@@ -34,6 +34,15 @@ LOGGER = logging.getLogger(__name__)
 
 # Suppress repeated publish-failure logs to one line per this many seconds.
 _PUBLISH_WARN_INTERVAL_SECONDS = 60.0
+
+# Floor for the publish cadence: a misconfigured or hostile interval can never drive the health
+# loop faster than this. Shared with the tests so the clamp contract has a single source of truth.
+_MIN_INTERVAL_SECONDS = 5.0
+
+HEALTH_SCHEMA_VERSION = 2
+"""Health payload schema version. v2 (ADR-0045) adds by-cause counters, network
+RSSI, host throttling, moonraker.pollFailures, and the recent-disconnect fallback
+list. ``mqtt.reconnectsTotal`` is retained as an alias of ``counters.reconnects.total``."""
 
 
 class HealthPublisher:
@@ -55,6 +64,8 @@ class HealthPublisher:
         coordinator: Any = None,
         interval_seconds: float = 60.0,
         clock: Any = time.monotonic,
+        network_sampler: Callable[[], host_metrics.NetworkSample] = host_metrics.sample_network,
+        host_sampler: Callable[[], host_metrics.HostSample] = host_metrics.sample_host,
     ) -> None:
         self._mqtt_client = mqtt_client
         self._device_id = device_id
@@ -62,8 +73,10 @@ class HealthPublisher:
         self._publisher = publisher
         self._token_manager = token_manager
         self._coordinator = coordinator
-        self._interval_seconds = max(5.0, float(interval_seconds))
+        self._interval_seconds = max(_MIN_INTERVAL_SECONDS, float(interval_seconds))
         self._clock = clock
+        self._network_sampler = network_sampler
+        self._host_sampler = host_sampler
 
         self._topic = constants.MQTTTopics.for_device(str(device_id)).health
         self._started_at = self._clock()
@@ -134,7 +147,7 @@ class HealthPublisher:
     def build_envelope(self) -> dict:
         """Assemble the full telemetry.health envelope from current sources."""
         envelope = {
-            "$v": 1,
+            "$v": HEALTH_SCHEMA_VERSION,
             "$type": "telemetry.health",
             "$id": str(uuid7()),
             "$ts": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -153,9 +166,13 @@ class HealthPublisher:
             "uptimeSeconds": max(0.0, self._clock() - self._started_at),
             "agentVersion": __version__,
             "mqtt": self._mqtt_metrics(),
+            "counters": self._counter_metrics(),
+            "network": self._network_metrics(),
+            "host": self._host_metrics(),
             "publishQueue": self._publish_queue_metrics(),
             "moonraker": self._moonraker_metrics(),
             "token": self._token_metrics(),
+            "recentDisconnects": self._recent_disconnect_metrics(),
         }
 
     def _mqtt_metrics(self) -> dict:
@@ -180,6 +197,68 @@ class HealthPublisher:
             },
         }
 
+    def _counter_metrics(self) -> dict:
+        """By-cause reconnect/disconnect ledgers (ADR-0045).
+
+        ``reconnects.byCause`` is the complete ledger (includes planned token
+        refresh); ``disconnects`` counts only *unexpected* drops — the user-facing
+        churn signal that structurally excludes the ~1.2/h token-refresh cycle.
+        ``offlineBufferLost`` is the renamed offline-buffer overflow count: telemetry
+        shed locally while disconnected, NOT network packet loss.
+        """
+        reconnects_by_cause = _safe_get(self._coordinator, "reconnects_by_cause", None) or {}
+        disconnects_by_cause = _safe_get(self._coordinator, "disconnects_by_cause", None) or {}
+        buffer = _safe_invoke(self._mqtt_client, "offline_buffer_stats") or {}
+        return {
+            "reconnects": {
+                "total": int(_safe_get(self._coordinator, "reconnects_total", 0) or 0),
+                "byCause": {str(k): int(v) for k, v in reconnects_by_cause.items()},
+            },
+            "disconnects": {
+                "total": int(
+                    _safe_get(self._coordinator, "churn_disconnects_total", 0) or 0
+                ),
+                "byCause": {str(k): int(v) for k, v in disconnects_by_cause.items()},
+            },
+            "offlineBufferLost": int(buffer.get("dropped_total", 0)),
+        }
+
+    def _network_metrics(self) -> dict:
+        """Local-network signal (RSSI + uplink classification). Null RSSI on a wired/unknown host."""
+        sample = None
+        try:
+            sample = self._network_sampler()
+        except Exception:  # pragma: no cover - defensive
+            sample = None
+        if sample is None:
+            return {"wifiRssiDbm": None, "interface": None, "linkType": None}
+        return {
+            "wifiRssiDbm": sample.wifi_rssi_dbm,
+            "interface": sample.interface,
+            "linkType": sample.link_type,
+        }
+
+    def _host_metrics(self) -> dict:
+        """Host hardware health (Pi throttling/under-voltage/temp). Null when unknown."""
+        sample = None
+        try:
+            sample = self._host_sampler()
+        except Exception:  # pragma: no cover - defensive
+            sample = None
+        if sample is None:
+            return {
+                "throttled": None,
+                "throttledFlags": None,
+                "underVoltage": None,
+                "tempC": None,
+            }
+        return {
+            "throttled": sample.throttled,
+            "throttledFlags": sample.throttled_flags,
+            "underVoltage": sample.under_voltage,
+            "tempC": sample.temp_c,
+        }
+
     def _publish_queue_metrics(self) -> dict:
         stats = _safe_invoke(self._publisher, "queue_stats") or {}
         return {
@@ -194,10 +273,28 @@ class HealthPublisher:
             "consecutiveFailures": int(
                 _safe_get(self._moonraker, "consecutive_failures", 0) or 0
             ),
+            "pollFailures": int(
+                _safe_get(self._moonraker, "poll_failures_total", 0) or 0
+            ),
             "outageSeconds": float(
                 _safe_get(self._moonraker, "outage_seconds", 0.0) or 0.0
             ),
         }
+
+    def _recent_disconnect_metrics(self) -> list:
+        """Last-60s unexpected-disconnect list — the fallback for a missed event."""
+        records = _safe_invoke(self._coordinator, "recent_disconnects_snapshot") or []
+        out: list = []
+        try:
+            iterator = iter(records)
+        except TypeError:  # pragma: no cover - defensive
+            return out
+        for record in iterator:
+            try:
+                out.append(record.as_event_dict())
+            except Exception:  # pragma: no cover - defensive
+                continue
+        return out
 
     def _token_metrics(self) -> dict:
         seconds_until_expiry = _safe_invoke(

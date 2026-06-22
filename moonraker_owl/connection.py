@@ -10,9 +10,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections import deque
 from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Deque, List, Optional, Union
 
 if TYPE_CHECKING:
     from .adapters.mqtt import MQTTClient
@@ -20,6 +23,12 @@ if TYPE_CHECKING:
     from .token_manager import TokenManager
 
 LOGGER = logging.getLogger(__name__)
+
+_RECENT_DISCONNECT_WINDOW_SECONDS = 60.0
+"""How long an unexpected disconnect stays in the health-channel fallback list."""
+
+_RECENT_DISCONNECT_MAX = 64
+"""Hard cap on the in-memory recent-disconnect list, bounding memory under a reconnect storm."""
 
 _BACKOFF_MAX_ATTEMPTS = 10
 """Number of exponential-backoff retries before switching to perpetual fixed-interval."""
@@ -53,6 +62,32 @@ class ReconnectReason(str, Enum):
 
     BROKER_DISCONNECT = "broker_disconnect"
     """Broker initiated the disconnect."""
+
+
+@dataclass(frozen=True)
+class DisconnectRecord:
+    """A single *unexpected* session drop, captured for the ``events/disconnect``
+    MQTT channel and the health-channel fallback list.
+
+    Planned token-refresh reconnections deliberately never produce a record — they
+    are not churn and must not pollute the user-facing connection-quality signal
+    (ADR-0045). ``reason_code`` is the MQTT 5 disconnect reason code (0 when the
+    transport could not report one).
+    """
+
+    at: datetime
+    cause: str
+    reason_code: int
+    will_reconnect: bool
+
+    def as_event_dict(self) -> dict:
+        """Serialize to the JSON shape shared by the event channel and health list."""
+        return {
+            "at": self.at.replace(microsecond=0).isoformat(),
+            "cause": self.cause,
+            "reasonCode": self.reason_code,
+            "willReconnect": self.will_reconnect,
+        }
 
 
 class ConnectionState(str, Enum):
@@ -116,9 +151,24 @@ class ConnectionCoordinator:
         self._on_disconnected_callbacks: list = []
         self._on_fatal_supervisor_failure_callbacks: list[Callable[[int], None]] = []
         self._on_reconnected_callbacks: list = []
+        # Fired (after a successful reconnect) so a publisher can emit the disconnect
+        # event over MQTT once the link is back up.
+        self._on_disconnect_event_callbacks: List[
+            Callable[[DisconnectRecord], Union[None, Awaitable[None]]]
+        ] = []
 
         # Cumulative count of successful reconnections (health reporting).
         self._reconnects_total = 0
+        # Per-cause reconnect ledger — the *complete* record, including planned
+        # TOKEN_RENEWED cycles. Diagnostic only; the cloud subtracts token refresh.
+        self._reconnects_by_cause: dict[str, int] = {r.value: 0 for r in ReconnectReason}
+        # Per-cause *unexpected* disconnect ledger (token refresh excluded). This is
+        # the user-facing churn signal — see ADR-0045's "polluted reconnect count" fix.
+        self._disconnects_by_cause: dict[str, int] = {
+            r.value: 0 for r in ReconnectReason if r is not ReconnectReason.TOKEN_RENEWED
+        }
+        # Rolling window of recent unexpected disconnects (health-channel fallback).
+        self._recent_disconnects: Deque[DisconnectRecord] = deque()
 
     @property
     def state(self) -> ConnectionState:
@@ -129,6 +179,61 @@ class ConnectionCoordinator:
     def reconnects_total(self) -> int:
         """Cumulative number of successful reconnections since process start."""
         return self._reconnects_total
+
+    @property
+    def reconnects_by_cause(self) -> dict[str, int]:
+        """Per-cause reconnect ledger (complete; includes planned token refresh)."""
+        return dict(self._reconnects_by_cause)
+
+    @property
+    def disconnects_by_cause(self) -> dict[str, int]:
+        """Per-cause *unexpected* disconnect ledger (token refresh excluded)."""
+        return dict(self._disconnects_by_cause)
+
+    @property
+    def churn_disconnects_total(self) -> int:
+        """Total unexpected disconnects — the user-facing churn count. Excludes the
+        planned ~1.2/h token-refresh reconnects that used to false-flag healthy
+        printers (ADR-0045)."""
+        return sum(self._disconnects_by_cause.values())
+
+    def recent_disconnects_snapshot(
+        self,
+        *,
+        now: Optional[datetime] = None,
+        window_seconds: float = _RECENT_DISCONNECT_WINDOW_SECONDS,
+    ) -> List[DisconnectRecord]:
+        """Return a snapshot of unexpected disconnects within the trailing window.
+
+        Side effect: prunes entries older than ``window_seconds`` from the internal
+        deque before snapshotting, so repeated reads keep the ledger bounded. The
+        returned list is a copy — callers may iterate it without holding the deque.
+        """
+        reference = now or datetime.now(timezone.utc)
+        self._prune_recent_disconnects(reference, window_seconds)
+        return list(self._recent_disconnects)
+
+    def _record_unexpected_disconnect(self, record: DisconnectRecord) -> None:
+        self._disconnects_by_cause[record.cause] = (
+            self._disconnects_by_cause.get(record.cause, 0) + 1
+        )
+        self._recent_disconnects.append(record)
+        self._prune_recent_disconnects(record.at, _RECENT_DISCONNECT_WINDOW_SECONDS)
+        while len(self._recent_disconnects) > _RECENT_DISCONNECT_MAX:
+            self._recent_disconnects.popleft()
+
+    def _prune_recent_disconnects(self, now: datetime, window_seconds: float) -> None:
+        cutoff = now - timedelta(seconds=window_seconds)
+        while self._recent_disconnects and self._recent_disconnects[0].at < cutoff:
+            self._recent_disconnects.popleft()
+
+    def _read_last_disconnect_rc(self) -> int:
+        """Best-effort read of the transport's last MQTT 5 disconnect reason code."""
+        try:
+            rc = getattr(self._mqtt_client, "last_disconnect_rc", None)
+            return int(rc) if rc is not None else 0
+        except (TypeError, ValueError):
+            return 0
 
     @property
     def is_connected(self) -> bool:
@@ -364,6 +469,15 @@ class ConnectionCoordinator:
         """Register callback to be invoked on disconnection."""
         self._on_disconnected_callbacks.append(callback)
 
+    def register_disconnect_event_callback(
+        self, callback: Callable[[DisconnectRecord], Union[None, Awaitable[None]]]
+    ) -> None:
+        """Register a callback fired after a successful reconnect to publish the
+        preceding *unexpected* disconnect over MQTT (planned token refresh excluded).
+        Invoked once the link is back up so the publish actually reaches the broker.
+        """
+        self._on_disconnect_event_callbacks.append(callback)
+
     def _notify_fatal_supervisor_failure(self, attempts: int) -> None:
         for callback in self._on_fatal_supervisor_failure_callbacks:
             try:
@@ -403,6 +517,19 @@ class ConnectionCoordinator:
         LOGGER.info("Executing reconnection (reason=%s)", reason.value)
         self._state = ConnectionState.RECONNECTING
 
+        # Capture the disconnect for churn accounting. A planned token-refresh cycle
+        # is NOT churn, so it is deliberately excluded here (ADR-0045) — it still
+        # increments the full reconnect ledger on success below.
+        disconnect_record: Optional[DisconnectRecord] = None
+        if reason is not ReconnectReason.TOKEN_RENEWED:
+            disconnect_record = DisconnectRecord(
+                at=datetime.now(timezone.utc),
+                cause=reason.value,
+                reason_code=self._read_last_disconnect_rc(),
+                will_reconnect=True,
+            )
+            self._record_unexpected_disconnect(disconnect_record)
+
         # Notify disconnection handlers
         for callback in self._on_disconnected_callbacks:
             try:
@@ -433,6 +560,22 @@ class ConnectionCoordinator:
         if connected:
             self._state = ConnectionState.CONNECTED
             self._reconnects_total += 1
+            self._reconnects_by_cause[reason.value] = (
+                self._reconnects_by_cause.get(reason.value, 0) + 1
+            )
+
+            # Now that the link is back up, publish the disconnect event (unexpected
+            # drops only — token refresh produced no record above).
+            if disconnect_record is not None:
+                for callback in self._on_disconnect_event_callbacks:
+                    try:
+                        result = callback(disconnect_record)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:
+                        LOGGER.warning(
+                            "Disconnect-event callback failed", exc_info=True
+                        )
 
             # Notify reconnection handlers
             for callback in self._on_reconnected_callbacks:

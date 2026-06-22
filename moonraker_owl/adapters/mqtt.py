@@ -84,6 +84,7 @@ class MQTTClient:
         self._disconnect_event: Optional[asyncio.Event] = None
         self._message_handler: Optional[MessageHandler] = None
         self._last_connect_rc: Optional[int] = None
+        self._last_disconnect_rc: Optional[int] = None
         self._connected: bool = False
         self._disconnect_handlers: List[Callable[[int], None]] = []
         self._connect_handlers: List[Callable[[int], None]] = []
@@ -554,6 +555,15 @@ class MQTTClient:
         """
         return self._last_connect_rc
 
+    @property
+    def last_disconnect_rc(self) -> Optional[int]:
+        """Most recent DISCONNECT reason code (MQTT 5), or None before any drop.
+
+        Read by the connection supervisor to stamp the ``events/disconnect`` channel
+        (ADR-0045). Atomic single-``Optional[int]`` read under CPython's GIL.
+        """
+        return self._last_disconnect_rc
+
     def _call_soon_on_loop(self, callback: Callable[..., Any], *args: Any) -> None:
         """Schedule a callback on the asyncio loop from a paho thread.
 
@@ -626,6 +636,7 @@ class MQTTClient:
     ) -> None:
         _ = disconnect_flags  # API compatibility placeholder
         reason = _normalise_reason_code(rc)
+        self._last_disconnect_rc = reason
         LOGGER.info("Disconnected from MQTT broker (rc=%s)", reason)
         if self._disconnect_event:
             self._disconnect_event.set()

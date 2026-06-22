@@ -44,6 +44,7 @@ class MQTTTopics:
     STATUS = "owl/printers/{device}/status"
     SENSORS = "owl/printers/{device}/sensors"
     EVENTS = "owl/printers/{device}/events"
+    EVENTS_DISCONNECT = "owl/printers/{device}/events/disconnect"
     OBJECTS = "owl/printers/{device}/objects"
     HEALTH = "owl/printers/{device}/health"
     CONFIG_NOTIFY = "owl/printers/{device}/config/notify"
@@ -84,6 +85,10 @@ class DeviceTopics:
     @property
     def events(self) -> str:
         return MQTTTopics.resolve(MQTTTopics.EVENTS, self.device_id)
+
+    @property
+    def events_disconnect(self) -> str:
+        return MQTTTopics.resolve(MQTTTopics.EVENTS_DISCONNECT, self.device_id)
 
     @property
     def objects(self) -> str:

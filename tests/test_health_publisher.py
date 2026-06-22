@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import pytest
 
 from moonraker_owl import constants
-from moonraker_owl.health_publisher import HealthPublisher
+from moonraker_owl.connection import DisconnectRecord, ReconnectReason
+from moonraker_owl.health_publisher import HealthPublisher, _MIN_INTERVAL_SECONDS
+from moonraker_owl.host_metrics import HostSample, NetworkSample
 
 DEVICE_ID = "550e8400-e29b-41d4-a716-446655440000"
 
@@ -58,6 +61,7 @@ class FakePublisher:
 class FakeMoonraker:
     is_connected = True
     consecutive_failures = 0
+    poll_failures_total = 4
     outage_seconds = 0.0
 
 
@@ -71,6 +75,43 @@ class FakeTokenManager:
 class FakeCoordinator:
     reconnects_total = 12
 
+    @property
+    def reconnects_by_cause(self) -> dict:
+        return {
+            "token_renewed": 9,
+            "connection_lost": 3,
+            "auth_failure": 0,
+            "broker_disconnect": 0,
+        }
+
+    @property
+    def disconnects_by_cause(self) -> dict:
+        return {"connection_lost": 3, "auth_failure": 0, "broker_disconnect": 0}
+
+    @property
+    def churn_disconnects_total(self) -> int:
+        return 3
+
+    def recent_disconnects_snapshot(self, **_kwargs) -> list:
+        return [
+            DisconnectRecord(
+                at=datetime(2026, 6, 21, 12, 0, 0, tzinfo=timezone.utc),
+                cause=ReconnectReason.CONNECTION_LOST.value,
+                reason_code=7,
+                will_reconnect=True,
+            )
+        ]
+
+
+def _fake_network() -> NetworkSample:
+    return NetworkSample(wifi_rssi_dbm=-58.0, interface="wlan0", link_type="wifi")
+
+
+def _fake_host() -> HostSample:
+    return HostSample(
+        throttled=False, throttled_flags="0x0", under_voltage=False, temp_c=47.2
+    )
+
 
 def _make_publisher(**overrides) -> HealthPublisher:
     kwargs = dict(
@@ -81,6 +122,8 @@ def _make_publisher(**overrides) -> HealthPublisher:
         token_manager=FakeTokenManager(),
         coordinator=FakeCoordinator(),
         interval_seconds=60.0,
+        network_sampler=_fake_network,
+        host_sampler=_fake_host,
     )
     kwargs.update(overrides)
     return HealthPublisher(**kwargs)
@@ -95,7 +138,7 @@ def test_build_envelope_has_all_catalog_fields() -> None:
     pub = _make_publisher()
     env = pub.build_envelope()
 
-    assert env["$v"] == 1
+    assert env["$v"] == 2
     assert env["$type"] == "telemetry.health"
     assert env["$id"]
     assert env["$ts"]
@@ -127,9 +170,68 @@ def test_build_envelope_has_all_catalog_fields() -> None:
     assert payload["moonraker"] == {
         "connected": True,
         "consecutiveFailures": 0,
+        "pollFailures": 4,
         "outageSeconds": 0.0,
     }
     assert payload["token"] == {"renewalFailures": 0, "secondsUntilExpiry": 3120.0}
+
+
+def test_build_envelope_v2_counters_segregate_token_refresh() -> None:
+    """The user-facing churn signal must exclude planned token-refresh reconnects."""
+    pub = _make_publisher()
+    payload = pub.build_envelope()["payload"]
+
+    counters = payload["counters"]
+    # The full reconnect ledger keeps token refresh visible for diagnostics...
+    assert counters["reconnects"]["total"] == 12
+    assert counters["reconnects"]["byCause"]["token_renewed"] == 9
+    assert counters["reconnects"]["byCause"]["connection_lost"] == 3
+    # ...but the disconnect (churn) ledger structurally excludes it.
+    assert "token_renewed" not in counters["disconnects"]["byCause"]
+    assert counters["disconnects"]["total"] == 3
+    assert counters["disconnects"]["byCause"]["connection_lost"] == 3
+    # Offline-buffer overflow is renamed (loss, not packet loss) and surfaced here.
+    assert counters["offlineBufferLost"] == 3
+
+
+def test_build_envelope_v2_network_and_host() -> None:
+    pub = _make_publisher()
+    payload = pub.build_envelope()["payload"]
+
+    assert payload["network"] == {"wifiRssiDbm": -58.0, "interface": "wlan0", "linkType": "wifi"}
+    assert payload["host"] == {
+        "throttled": False,
+        "throttledFlags": "0x0",
+        "underVoltage": False,
+        "tempC": 47.2,
+    }
+
+
+def test_build_envelope_v2_recent_disconnects() -> None:
+    pub = _make_publisher()
+    recent = pub.build_envelope()["payload"]["recentDisconnects"]
+
+    assert recent == [
+        {
+            "at": "2026-06-21T12:00:00+00:00",
+            "cause": "connection_lost",
+            "reasonCode": 7,
+            "willReconnect": True,
+        }
+    ]
+
+
+def test_build_envelope_wired_host_reports_null_rssi() -> None:
+    pub = _make_publisher(network_sampler=lambda: NetworkSample(link_type="wired"))
+    payload = pub.build_envelope()["payload"]
+    assert payload["network"] == {"wifiRssiDbm": None, "interface": None, "linkType": "wired"}
+
+
+def test_build_envelope_unknown_link_reports_null_rssi() -> None:
+    # A host whose uplink we cannot classify must report linkType 'unknown' (never a false 'wired').
+    pub = _make_publisher(network_sampler=lambda: NetworkSample(link_type="unknown"))
+    payload = pub.build_envelope()["payload"]
+    assert payload["network"] == {"wifiRssiDbm": None, "interface": None, "linkType": "unknown"}
 
 
 def test_build_envelope_increments_seq() -> None:
@@ -220,8 +322,15 @@ async def test_stop_cancels_loop() -> None:
 async def test_loop_publishes_on_interval() -> None:
     mqtt = FakeMQTT()
     pub = _make_publisher(mqtt_client=mqtt)
-    pub._interval_seconds = 0.02  # bypass the construction-time clamp for the test
+    pub._interval_seconds = 0.02  # bypass the _MIN_INTERVAL_SECONDS construction clamp for speed
     await pub.start()
     await asyncio.sleep(0.1)
     await pub.stop()
     assert len(mqtt.published) >= 1
+
+
+def test_interval_is_clamped_to_minimum() -> None:
+    # A misconfigured/hostile sub-floor interval is clamped up to the shared _MIN_INTERVAL_SECONDS,
+    # so the health loop can never be driven faster than the contract floor.
+    pub = HealthPublisher(mqtt_client=FakeMQTT(), device_id=DEVICE_ID, interval_seconds=0.001)
+    assert pub._interval_seconds == _MIN_INTERVAL_SECONDS

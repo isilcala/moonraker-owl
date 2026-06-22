@@ -30,6 +30,9 @@ class FakeMQTTClient:
         self.disconnect_call_count = 0
         self._connected = False
         self._last_connect_rc: int | None = None
+        # Declared (typed) so tests configure a real attribute rather than an ad-hoc instance-dict
+        # entry. The coordinator reads it via getattr in _read_last_disconnect_rc.
+        self.last_disconnect_rc: int | None = None
 
     @property
     def last_connect_rc(self) -> int | None:
@@ -336,6 +339,95 @@ async def test_disconnected_callback_invoked(coordinator_setup):
 
     assert callback_invoked.is_set()
     assert received_reason == ReconnectReason.TOKEN_RENEWED
+
+
+# ── Connection-health by-cause counters (ADR-0045) ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_token_renew_reconnect_excluded_from_churn(coordinator_setup):
+    """MANDATORY (ADR-0045): a token-refresh reconnect must NOT register as churn.
+
+    The old panel counted every (re)connect — including the ~1.2/h planned token
+    renewal — which pinned a perfectly healthy printer in permanent "Attention".
+    Token refresh now lives only in the full reconnect ledger; the user-facing
+    churn signal (unexpected disconnects) excludes it entirely.
+    """
+    coordinator, _mqtt, _ = coordinator_setup()
+
+    await coordinator.connect()
+    coordinator.start_supervisor()
+
+    coordinator.request_reconnect(ReconnectReason.TOKEN_RENEWED)
+    await asyncio.sleep(0.3)
+
+    await coordinator.stop_supervisor()
+
+    # Full ledger keeps the planned reconnect visible for diagnostics...
+    assert coordinator.reconnects_by_cause[ReconnectReason.TOKEN_RENEWED.value] == 1
+    # ...but it is excluded from the churn (unexpected-disconnect) signal.
+    assert ReconnectReason.TOKEN_RENEWED.value not in coordinator.disconnects_by_cause
+    assert coordinator.churn_disconnects_total == 0
+    assert coordinator.recent_disconnects_snapshot() == []
+
+
+@pytest.mark.asyncio
+async def test_connection_lost_counts_as_churn(coordinator_setup):
+    """An unexpected drop increments both the reconnect ledger and the churn signal."""
+    coordinator, mqtt_client, _ = coordinator_setup()
+    mqtt_client.last_disconnect_rc = 7  # MQTT5 "connection lost / keepalive"
+
+    await coordinator.connect()
+    coordinator.start_supervisor()
+
+    coordinator.request_reconnect(ReconnectReason.CONNECTION_LOST)
+    await asyncio.sleep(0.3)
+
+    await coordinator.stop_supervisor()
+
+    assert coordinator.reconnects_by_cause[ReconnectReason.CONNECTION_LOST.value] == 1
+    assert coordinator.disconnects_by_cause[ReconnectReason.CONNECTION_LOST.value] == 1
+    assert coordinator.churn_disconnects_total == 1
+
+    recent = coordinator.recent_disconnects_snapshot()
+    assert len(recent) == 1
+    assert recent[0].cause == ReconnectReason.CONNECTION_LOST.value
+    assert recent[0].reason_code == 7
+    assert recent[0].will_reconnect is True
+
+
+@pytest.mark.asyncio
+async def test_disconnect_event_callback_fires_for_unexpected_only(coordinator_setup):
+    """The disconnect-event publisher fires for churn, never for token refresh."""
+    coordinator, mqtt_client, _ = coordinator_setup()
+    mqtt_client.last_disconnect_rc = 142
+
+    events = []
+    coordinator.register_disconnect_event_callback(events.append)
+
+    await coordinator.connect()
+    coordinator.start_supervisor()
+
+    # Planned token refresh: no event.
+    coordinator.request_reconnect(ReconnectReason.TOKEN_RENEWED)
+    await asyncio.sleep(0.2)
+    assert events == []
+
+    # Unexpected broker disconnect: one event, after the link is back up.
+    coordinator.request_reconnect(ReconnectReason.BROKER_DISCONNECT)
+    await asyncio.sleep(0.3)
+
+    await coordinator.stop_supervisor()
+
+    assert len(events) == 1
+    record = events[0]
+    assert record.cause == ReconnectReason.BROKER_DISCONNECT.value
+    assert record.reason_code == 142
+    payload = record.as_event_dict()
+    assert payload["cause"] == "broker_disconnect"
+    assert payload["reasonCode"] == 142
+    assert payload["willReconnect"] is True
+    assert "T" in payload["at"]  # ISO-8601 timestamp
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,7 @@ class MoonrakerClient(PrinterAdapter):
         self._active_ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._ws_connected = False
         self._consecutive_failures = 0
+        self._poll_failures_total = 0
         self._outage_started_at: Optional[float] = None
         self._outage_alerted = False
 
@@ -73,6 +74,17 @@ class MoonrakerClient(PrinterAdapter):
         """Number of consecutive websocket connection failures."""
 
         return self._consecutive_failures
+
+    @property
+    def poll_failures_total(self) -> int:
+        """Cumulative websocket/poll failures since process start (never reset).
+
+        Feeds ``moonraker.pollFailures`` on the health channel (ADR-0045); unlike
+        :attr:`consecutive_failures` it does not zero on recovery, so the cloud can
+        see a flapping local link even between outages.
+        """
+
+        return self._poll_failures_total
 
     @property
     def outage_seconds(self) -> float:
@@ -833,9 +845,9 @@ class MoonrakerClient(PrinterAdapter):
 
         self._ws_connected = False
         self._consecutive_failures += 1
+        self._poll_failures_total += 1
         if self._outage_started_at is None:
             self._outage_started_at = time.monotonic()
-
         if (
             self._consecutive_failures >= self.outage_alert_after
             and not self._outage_alerted

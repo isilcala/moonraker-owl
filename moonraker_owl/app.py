@@ -24,6 +24,7 @@ from .config import OwlConfig, load_config, merge_credentials
 from .connection import ConnectionCoordinator, ReconnectReason
 from .core import PrinterBackend, PrinterHealthAssessment
 from .core.job_registry import PrintJobRegistry
+from .disconnect_event_publisher import DisconnectEventPublisher
 from .health import HealthReporter, HealthServer
 from .health_publisher import HealthPublisher
 from .logging import configure_logging
@@ -545,35 +546,7 @@ class MoonrakerOwlApp:
         # Configure Last Will and Testament (LWT) for crash detection (D5)
         # The broker publishes this message if the agent disconnects unexpectedly.
         # Note: $ts/lastUpdated are set at registration time, not crash time.
-        from .version import __version__
-        from .identifiers import uuid7
-
-        lwt_registered_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        lwt_payload = {
-            "$v": 1,
-            "$type": "telemetry.status",
-            "$id": str(uuid7()),
-            "$ts": lwt_registered_at,
-            "$origin": f"moonraker-owl@{__version__}",
-            "$seq": 0,
-            "kind": "full",
-            "sessionId": None,
-            "deviceId": str(device_id),
-            "payload": {
-                "lifecycle": {
-                    "phase": "Offline",
-                    "isHeating": False,
-                    "hasActiveJob": False,
-                    "isShutdown": False,
-                    "reason": "Connection lost (LWT)",
-                },
-                "cadence": {
-                    "heartbeatSeconds": self._config.telemetry_cadence.status_heartbeat_seconds,
-                    "watchWindowActive": False,
-                },
-                "lastUpdated": lwt_registered_at,
-            },
-        }
+        lwt_payload = self._build_offline_status_envelope(device_id, "Connection lost (LWT)")
         lwt_topic = constants.MQTTTopics.for_device(str(device_id)).status
         self._mqtt_client.set_last_will(
             topic=lwt_topic,
@@ -605,6 +578,16 @@ class MoonrakerOwlApp:
         )
         self._connection_coordinator.register_reconnected_callback(
             self._on_connection_restored
+        )
+
+        # Publish precise per-disconnect events (ADR-0045). Planned token-refresh
+        # cycles produce no record, so this only fires for unexpected churn.
+        disconnect_event_publisher = DisconnectEventPublisher(
+            mqtt_client=self._mqtt_client,
+            device_id=device_id,
+        )
+        self._connection_coordinator.register_disconnect_event_callback(
+            disconnect_event_publisher.publish
         )
 
         await self._transition_state(
@@ -1323,6 +1306,43 @@ class MoonrakerOwlApp:
     # MQTT Client Callbacks (from paho-mqtt thread)
     # -------------------------------------------------------------------------
 
+    def _build_offline_status_envelope(self, device_id, reason: str) -> dict:
+        """Build a retained ``telemetry.status`` envelope announcing the agent is Offline.
+
+        Shared by the LWT (broker-delivered on an *unexpected* drop) and the graceful-shutdown
+        path (an explicit clean stop). The only thing that differs between the two is ``reason``;
+        ``$ts``/``lastUpdated`` are stamped at build time.
+        """
+        from .identifiers import uuid7
+        from .version import __version__
+
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        return {
+            "$v": 1,
+            "$type": "telemetry.status",
+            "$id": str(uuid7()),
+            "$ts": now,
+            "$origin": f"moonraker-owl@{__version__}",
+            "$seq": 0,
+            "kind": "full",
+            "sessionId": None,
+            "deviceId": str(device_id),
+            "payload": {
+                "lifecycle": {
+                    "phase": "Offline",
+                    "isHeating": False,
+                    "hasActiveJob": False,
+                    "isShutdown": False,
+                    "reason": reason,
+                },
+                "cadence": {
+                    "heartbeatSeconds": self._config.telemetry_cadence.status_heartbeat_seconds,
+                    "watchWindowActive": False,
+                },
+                "lastUpdated": now,
+            },
+        }
+
     def _publish_graceful_offline(self) -> None:
         """Publish a retained graceful-offline status before disconnecting.
 
@@ -1336,35 +1356,7 @@ class MoonrakerOwlApp:
         if mqtt_client is None or device_id is None:
             return
         try:
-            from .identifiers import uuid7
-            from .version import __version__
-
-            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-            payload = {
-                "$v": 1,
-                "$type": "telemetry.status",
-                "$id": str(uuid7()),
-                "$ts": now,
-                "$origin": f"moonraker-owl@{__version__}",
-                "$seq": 0,
-                "kind": "full",
-                "sessionId": None,
-                "deviceId": str(device_id),
-                "payload": {
-                    "lifecycle": {
-                        "phase": "Offline",
-                        "isHeating": False,
-                        "hasActiveJob": False,
-                        "isShutdown": False,
-                        "reason": "Graceful shutdown",
-                    },
-                    "cadence": {
-                        "heartbeatSeconds": self._config.telemetry_cadence.status_heartbeat_seconds,
-                        "watchWindowActive": False,
-                    },
-                    "lastUpdated": now,
-                },
-            }
+            payload = self._build_offline_status_envelope(device_id, "Graceful shutdown")
             status_topic = constants.MQTTTopics.for_device(str(device_id)).status
             mqtt_client.publish(
                 status_topic,
