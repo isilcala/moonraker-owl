@@ -1,6 +1,7 @@
 """Tests for the command processor."""
 
 import asyncio
+import copy
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,7 +42,12 @@ class FakeMoonraker:
         }
         self.gcode_files: list[dict] = []
         self.printer_state: str = "standby"
+        self.klippy_state: str = "ready"
         self.registered_macros: set[str] = set()  # For gcode_macro existence checks
+        self.idex: bool = False  # Surfaces a dual_carriage object in fetch_printer_state
+        self.toolchanger: bool = False  # Surfaces a toolchanger object in fetch_printer_state
+        self.dual_carriage_status: Optional[dict[str, Any]] = None
+        self.configfile_settings: dict[str, Any] = {}
 
     async def execute_print_action(self, action: str) -> None:
         if action not in {"pause", "resume", "cancel"}:
@@ -95,11 +101,22 @@ class FakeMoonraker:
         }
         # Support gcode_macro existence queries
         if objects:
+            if "webhooks" in objects:
+                status["webhooks"] = {"state": self.klippy_state}
+            if "configfile" in objects:
+                status["configfile"] = {"settings": copy.deepcopy(self.configfile_settings)}
             for key in objects:
                 if key.startswith("gcode_macro "):
                     macro_name = key[len("gcode_macro "):]
                     if macro_name in self.registered_macros:
                         status[key] = {}
+            # Multi-toolhead capability probes (Phase 3): present only when configured.
+            if "dual_carriage" in objects and self.idex:
+                status["dual_carriage"] = copy.deepcopy(
+                    self.dual_carriage_status or {"carriage_0": "PRIMARY", "carriage_1": "PRIMARY"}
+                )
+            if "toolchanger" in objects and self.toolchanger:
+                status["toolchanger"] = {"tool_number": 0}
         return {"result": {"status": status}}
 
 

@@ -14,6 +14,7 @@ from moonraker_owl.metadata import (
     MetadataReporter,
     MetadataReporterConfig,
     MoonrakerProvider,
+    MotionProvider,
     SensorInventoryProvider,
     SystemInfoProvider,
 )
@@ -213,6 +214,101 @@ class TestKlipperProvider:
         # Should include hostname in system info
         assert "system" in result
         assert result["system"]["klipperHostname"] == "voron350"
+
+
+async def _run_motion_detect(
+    provider: MotionProvider,
+    objects: list[str],
+    settings: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Drive MotionProvider.detect() with mocked objects-list + configfile responses."""
+    objects_response = {"result": {"objects": objects}}
+    configfile_response = {
+        "result": {"status": {"configfile": {"settings": settings}}}
+    }
+    call_count = 0
+
+    async def mock_get_impl(*args, **kwargs):
+        nonlocal call_count
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        payload = objects_response if call_count == 0 else configfile_response
+        mock_resp.json = AsyncMock(return_value=payload)
+        call_count += 1
+        return mock_resp
+
+    with patch.object(provider, "_ensure_session") as mock_session:
+        mock_session_obj = MagicMock()
+        mock_context = AsyncMock()
+        mock_context.__aenter__ = mock_get_impl
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+        mock_session_obj.get = MagicMock(return_value=mock_context)
+        mock_session.return_value = mock_session_obj
+        return await provider.detect()
+
+
+class TestMotionProvider:
+    """Tests for MotionProvider (multi-toolhead capability detection)."""
+
+    @pytest.fixture
+    def provider(self):
+        return MotionProvider("http://127.0.0.1:7125")
+
+    def test_provider_name(self, provider):
+        assert provider.name == "motion"
+
+    @pytest.mark.asyncio
+    async def test_detect_idex(self, provider):
+        """IDEX machine: dual_carriage present, two extruders, kinematics surfaced."""
+        objects = ["toolhead", "extruder", "extruder1", "dual_carriage", "heater_bed"]
+        result = await _run_motion_detect(
+            provider, objects, {"printer": {"kinematics": "cartesian"}}
+        )
+        motion = result["components"]["motion"]
+        assert motion["domain"] == "motion"
+        assert motion["extruderCount"] == 2
+        assert motion["idex"] is True
+        assert motion["toolchanger"] is False
+        assert motion["mmu"] is False
+        assert motion["kinematics"] == "cartesian"
+        assert motion["tools"] == [
+            {"id": "extruder", "index": 0},
+            {"id": "extruder1", "index": 1},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_detect_single_extruder(self, provider):
+        """Plain single-nozzle printer: one extruder, no IDEX/toolchanger/MMU."""
+        objects = ["toolhead", "extruder", "heater_bed", "fan"]
+        result = await _run_motion_detect(
+            provider, objects, {"printer": {"kinematics": "corexy"}}
+        )
+        motion = result["components"]["motion"]
+        assert motion["extruderCount"] == 1
+        assert motion["idex"] is False
+        assert motion["toolchanger"] is False
+        assert motion["mmu"] is False
+
+    @pytest.mark.asyncio
+    async def test_detect_toolchanger_with_four_tools(self, provider):
+        """Toolchanger with 4 tools: detected via toolchanger/tool objects."""
+        objects = [
+            "toolhead", "toolchanger",
+            "extruder", "extruder1", "extruder2", "extruder3",
+            "tool T0", "tool T1", "tool T2", "tool T3",
+        ]
+        result = await _run_motion_detect(provider, objects, {})
+        motion = result["components"]["motion"]
+        assert motion["toolchanger"] is True
+        assert motion["extruderCount"] == 4
+        # Empty settings -> kinematics omitted (best-effort, non-fatal)
+        assert "kinematics" not in motion
+
+    @pytest.mark.asyncio
+    async def test_detect_empty_objects_returns_empty(self, provider):
+        """Klipper not ready (no objects) -> empty result, merged as no-op."""
+        result = await _run_motion_detect(provider, [], {})
+        assert result == {}
 
 
 class TestCameraProvider:

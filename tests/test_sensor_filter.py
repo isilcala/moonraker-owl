@@ -26,6 +26,13 @@ class TestSensorFilterDefaults:
         assert not sf.is_allowed("temperature_fan exhaust")
         assert not sf.is_allowed("heater_generic chamber_heater")
 
+    def test_high_index_extruders_are_core(self):
+        """G5: every extruderN is core, not just extruder1..3 — so 4+ tool
+        changers never have nozzles dropped by tier caps."""
+        sf = SensorFilter()
+        for name in ("extruder4", "extruder5", "extruder7"):
+            assert sf.is_allowed(name), f"{name!r} should be treated as core"
+
 
 class TestSensorFilterAllowlistOnly:
     """Allowlist restricts to core + explicitly listed sensors."""

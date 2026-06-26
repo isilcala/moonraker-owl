@@ -26,6 +26,7 @@ from .providers import (
     GCodeMacroProvider,
     KlipperProvider,
     MoonrakerProvider,
+    MotionProvider,
     SensorInventoryProvider,
     SystemInfoProvider,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "SystemInfoProvider",
     "MoonrakerProvider",
     "KlipperProvider",
+    "MotionProvider",
     "CameraProvider",
     "SensorInventoryProvider",
     "GCodeMacroProvider",

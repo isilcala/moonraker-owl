@@ -137,6 +137,16 @@ class PrinterCommandNames:
     """Execute a user-defined GCode macro by name."""
 
     # -------------------------------------------------------------------------
+    # Multi-Toolhead Control Commands (Phase 3, user-triggered, idle-time only)
+    # -------------------------------------------------------------------------
+
+    TOOLHEAD_ACTIVATE_TOOL = "toolhead:activate-tool"
+    """Activate a tool/extruder (ACTIVATE_EXTRUDER / T<n>, +SET_DUAL_CARRIAGE for IDEX)."""
+
+    IDEX_SET_MODE = "idex:set-mode"
+    """Set IDEX dual-carriage mode (SET_DUAL_CARRIAGE MODE=PRIMARY|COPY|MIRROR)."""
+
+    # -------------------------------------------------------------------------
     # Command Sets
     # -------------------------------------------------------------------------
 
@@ -164,6 +174,7 @@ class PrinterCommandNames:
         SET_SPEED, SET_FLOW, SET_Z_OFFSET, RESET_Z_OFFSET,
         OBJECT_EXCLUDE, SET_TELEMETRY_RATE, METADATA_SYSTEM_REFRESH,
         GCODE_MACRO,
+        TOOLHEAD_ACTIVATE_TOOL, IDEX_SET_MODE,
     })
     """Commands dispatched via Hot Path (ADR-0039): fire-and-forget MQTT."""
 

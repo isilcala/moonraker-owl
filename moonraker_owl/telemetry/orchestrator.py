@@ -21,6 +21,13 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 
+def _normalize_active_extruder(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 @dataclass
 class ChannelPayload:
     channel: str
@@ -81,6 +88,7 @@ class TelemetryOrchestrator:
         self._last_klippy_state: Optional[str] = None
         self._last_print_state: Optional[str] = None
         self._last_filename: Optional[str] = None
+        self._last_active_extruder: Optional[str] = None  # Track active tool for toolchange events
         self._last_session_id: Optional[str] = None  # Track session for new-job detection
         self._last_job_status: Optional[str] = None  # Track job_status for terminal events
         self._terminal_event_emitted: bool = False  # Prevent duplicate terminal events
@@ -193,6 +201,14 @@ class TelemetryOrchestrator:
             self._last_klippy_state = self.store.klippy_state
             self._last_print_state = self.store.print_state
             self._last_filename = self.store.print_filename
+            # Seed the active tool from the restored store so a token renewal during a
+            # multi-tool print does not emit a spurious toolchange event.
+            _toolhead_snapshot = self.store.get("toolhead")
+            self._last_active_extruder = (
+                _normalize_active_extruder(_toolhead_snapshot.data.get("extruder"))
+                if _toolhead_snapshot is not None
+                else None
+            )
             # Compute session to get session_id and job_status
             session = self.session_tracker.compute(self.store)
             self._last_session_id = session.session_id
@@ -223,6 +239,7 @@ class TelemetryOrchestrator:
             self._last_klippy_state = None
             self._last_print_state = None
             self._last_filename = None
+            self._last_active_extruder = None
             self._last_session_id = None
             self._last_job_status = None
             self._terminal_event_emitted = False
@@ -410,6 +427,7 @@ class TelemetryOrchestrator:
         """
         self._detect_klippy_state_change()
         self._detect_print_state_change()
+        self._detect_toolchange()
         self._detect_timelapse_ready()
 
     def _detect_klippy_state_change(self) -> None:
@@ -473,6 +491,48 @@ class TelemetryOrchestrator:
 
         if event:
             self.events.record(event)
+
+    def _detect_toolchange(self) -> None:
+        """Detect active-tool transitions and record a P1 toolchange event.
+
+        Fires when ``toolhead.extruder`` changes between two known tools (e.g.
+        ``extruder`` -> ``extruder1``) so the cloud timeline reflects tool changes
+        on multi-toolhead machines. This is intentionally scoped to an *active*
+        print session: idle-time manual tool selection and Klippy recovery/shutdown
+        are not timeline-worthy print events and are a common source of false
+        positives. The initial discovery (None -> first tool) is suppressed, and
+        single-nozzle printers never transition, so this stays silent on
+        conventional machines. See proposal multi-toolhead-klipper-support.md.
+        """
+        toolhead_snapshot = self.store.get("toolhead")
+        if toolhead_snapshot is None:
+            return
+        active = _normalize_active_extruder(toolhead_snapshot.data.get("extruder"))
+        if active is None:
+            return
+
+        previous = self._last_active_extruder
+        self._last_active_extruder = active
+
+        # Suppress the initial discovery (None -> first tool) and no-op repeats.
+        if previous is None or previous == active:
+            return
+
+        # Only emit a print:toolchange when Klippy is healthy *and* the print is active.
+        # Recovery / shutdown often rewrites toolhead.extruder, which is not a user-visible
+        # toolchange in the print timeline.
+        if self.store.klippy_state != "ready":
+            return
+        if self.store.print_state not in ("printing", "paused"):
+            return
+
+        self.events.record(
+            Event(
+                event_name=EventName.PRINT_TOOLCHANGE,
+                message=f"Tool changed: {previous} \u2192 {active}",
+                data={"from": previous, "to": active},
+            )
+        )
 
     def _detect_print_state_change(self) -> None:
         """Detect print state transitions and record P1 events.

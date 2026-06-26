@@ -387,6 +387,163 @@ class TestOrchestratorEventDetection:
         assert "MCU protocol error" in events[0].message
         assert events[0].data["stateMessage"] == "MCU protocol error"
 
+    def test_detect_toolchange(self) -> None:
+        """Active extruder transition generates a print:toolchange event."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        # Initial tool discovery — must be suppressed (None -> first tool).
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "ready"},
+                        "print_stats": {"state": "printing"},
+                        "toolhead": {"extruder": "extruder"},
+                    }
+                }
+            }
+        )
+        orchestrator.events.harvest()
+
+        # Tool change extruder -> extruder1.
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {"state": "printing"},
+                        "toolhead": {"extruder": "extruder1"},
+                    }
+                }
+            }
+        )
+        events = [
+            e
+            for e in orchestrator.events.harvest()
+            if e.event_name == EventName.PRINT_TOOLCHANGE
+        ]
+
+        assert len(events) == 1
+        assert events[0].data == {"from": "extruder", "to": "extruder1"}
+
+    def test_toolchange_suppressed_on_initial_and_repeat(self) -> None:
+        """Initial discovery and unchanged-tool updates emit no toolchange event."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "ready"},
+                        "print_stats": {"state": "printing"},
+                        "toolhead": {"extruder": "extruder"},
+                    }
+                }
+            }
+        )
+        initial = [
+            e
+            for e in orchestrator.events.harvest()
+            if e.event_name == EventName.PRINT_TOOLCHANGE
+        ]
+        assert initial == []
+
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "print_stats": {"state": "printing"},
+                        "toolhead": {"extruder": "extruder"},
+                    }
+                }
+            }
+        )
+        repeat = [
+            e
+            for e in orchestrator.events.harvest()
+            if e.event_name == EventName.PRINT_TOOLCHANGE
+        ]
+        assert repeat == []
+
+    def test_toolchange_suppressed_when_klippy_is_not_ready(self) -> None:
+        """Shutdown/error state changes must not emit timeline toolchange events."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "ready"},
+                        "print_stats": {"state": "printing"},
+                        "toolhead": {"extruder": "extruder"},
+                    }
+                }
+            }
+        )
+        orchestrator.events.harvest()
+
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "shutdown"},
+                        "print_stats": {"state": "printing"},
+                        "toolhead": {"extruder": "extruder1"},
+                    }
+                }
+            }
+        )
+
+        events = [
+            e
+            for e in orchestrator.events.harvest()
+            if e.event_name == EventName.PRINT_TOOLCHANGE
+        ]
+        assert events == []
+
+    def test_reset_with_invalid_snapshot_toolhead_does_not_emit_spurious_toolchange(self) -> None:
+        """Token-renewal snapshot restore must ignore non-string toolhead.extruder values."""
+        clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))
+        orchestrator = TelemetryOrchestrator(clock=clock)
+
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "ready"},
+                        "print_stats": {"state": "printing"},
+                        "toolhead": {"extruder": "extruder1"},
+                    }
+                }
+            }
+        )
+        orchestrator.events.harvest()
+
+        snapshot = orchestrator.store.export_state()
+        snapshot.sections["toolhead"].data["extruder"] = None
+        orchestrator.reset(snapshot=snapshot)
+
+        orchestrator.ingest(
+            {
+                "result": {
+                    "status": {
+                        "webhooks": {"state": "ready"},
+                        "print_stats": {"state": "printing"},
+                        "toolhead": {"extruder": "extruder1"},
+                    }
+                }
+            }
+        )
+
+        events = [
+            e
+            for e in orchestrator.events.harvest()
+            if e.event_name == EventName.PRINT_TOOLCHANGE
+        ]
+        assert events == []
+
     def test_detect_klippy_shutdown(self) -> None:
         """Klippy shutdown state generates klippyShutdown event."""
         clock = FakeClock(datetime(2025, 11, 30, 10, 0, 0, tzinfo=timezone.utc))

@@ -11,6 +11,7 @@ from .print_commands import PrintCommandsMixin
 from .print_param_commands import PrintParamCommandsMixin
 from .query_commands import QueryCommandsMixin
 from .task_commands import TaskCommandsMixin
+from .toolhead_commands import ToolheadCommandsMixin
 
 __all__ = [
     "ControlCommandsMixin",
@@ -24,4 +25,5 @@ __all__ = [
     "PrintParamCommandsMixin",
     "QueryCommandsMixin",
     "TaskCommandsMixin",
+    "ToolheadCommandsMixin",
 ]

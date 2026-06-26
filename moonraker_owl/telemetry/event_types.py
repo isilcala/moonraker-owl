@@ -73,6 +73,7 @@ class EventName(str, Enum):
     PRINT_CANCELLED = "print:cancelled"
     PRINT_PAUSED = "print:paused"
     PRINT_RESUMED = "print:resumed"
+    PRINT_TOOLCHANGE = "print:toolchange"
 
 
 # Event metadata registry - maps event names to their properties
@@ -125,6 +126,11 @@ EVENT_METADATA: Dict[EventName, Dict[str, Any]] = {
         "qos": 1,
     },
     EventName.PRINT_RESUMED: {
+        "priority": EventPriority.P1_IMPORTANT,
+        "severity": EventSeverity.INFO,
+        "qos": 1,
+    },
+    EventName.PRINT_TOOLCHANGE: {
         "priority": EventPriority.P1_IMPORTANT,
         "severity": EventSeverity.INFO,
         "qos": 1,

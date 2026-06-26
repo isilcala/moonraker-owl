@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Protocol
 import aiohttp
 
 from ..version import __version__
+from ..config import extruder_index, is_extruder_object
 
 LOGGER = logging.getLogger(__name__)
 
@@ -361,6 +362,141 @@ class KlipperProvider(BaseProvider):
                 features.append(feature_name)
 
         return features
+
+
+class MotionProvider(BaseProvider):
+    """Detects the printer's toolhead / motion profile (multi-toolhead support).
+
+    Classifies the machine into a toolhead archetype using **standard Moonraker
+    printer objects** (vendor-agnostic — see proposal
+    ``multi-toolhead-klipper-support.md``):
+
+    - ``extruderCount``: number of ``extruder`` / ``extruderN`` objects
+    - ``idex``: presence of ``dual_carriage``
+    - ``toolchanger``: presence of ``toolchanger`` or ``tool <name>`` objects
+    - ``mmu``: presence of ``mmu`` (Happy Hare / ERCF / Box Turtle)
+    - ``kinematics``: best-effort from the ``configfile`` settings
+
+    The result is merged under ``components.motion`` of the ADR-0032 metadata
+    document and consumed by PrinterService to derive ``ToolheadKind`` /
+    ``ExtruderCount`` on the printer.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        session: Optional[aiohttp.ClientSession] = None,
+        timeout: float = 5.0,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._session = session
+        self._owns_session = session is None
+        self._timeout = timeout
+
+    @property
+    def name(self) -> str:
+        return "motion"
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is None:
+            timeout = aiohttp.ClientTimeout(total=self._timeout)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._owns_session = True
+        return self._session
+
+    async def close(self) -> None:
+        if self._owns_session and self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def detect(self) -> Dict[str, Any]:
+        """Detect the toolhead/motion profile.
+
+        Returns:
+            Dictionary with a ``components.motion`` entry, or ``{}`` if the
+            printer objects could not be queried (Klipper not ready).
+        """
+        session = await self._ensure_session()
+        objects = await self._fetch_objects(session)
+        if not objects:
+            return {}
+
+        extruders = sorted(
+            (obj for obj in objects if is_extruder_object(obj)),
+            key=extruder_index,
+        )
+        idex = "dual_carriage" in objects
+        toolchanger = "toolchanger" in objects or any(
+            obj == "tool" or obj.startswith("tool ") for obj in objects
+        )
+        mmu = "mmu" in objects
+
+        motion: Dict[str, Any] = {
+            "domain": "motion",
+            "extruderCount": len(extruders),
+            "idex": idex,
+            "toolchanger": toolchanger,
+            "mmu": mmu,
+            "tools": [
+                {"id": name, "index": extruder_index(name)} for name in extruders
+            ],
+        }
+
+        kinematics = await self._fetch_kinematics(session)
+        if kinematics:
+            motion["kinematics"] = kinematics
+
+        return {"components": {"motion": motion}}
+
+    async def _fetch_objects(self, session: aiohttp.ClientSession) -> List[str]:
+        """Query the Moonraker printer objects list."""
+        url = f"{self._base_url}/printer/objects/list"
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        LOGGER.warning(
+                            "Moonraker objects query returned HTTP %d — "
+                            "Klipper may not be ready yet",
+                            response.status,
+                        )
+                        return []
+                    data = await response.json()
+                    return data.get("result", {}).get("objects", [])
+        except Exception as exc:
+            LOGGER.warning("Failed to query objects for motion profile: %s", exc)
+            return []
+
+    async def _fetch_kinematics(
+        self, session: aiohttp.ClientSession
+    ) -> Optional[str]:
+        """Best-effort fetch of ``[printer] kinematics`` from the configfile.
+
+        Kinematics is display-only metadata, so any failure here is non-fatal
+        and simply omits the field.
+        """
+        url = f"{self._base_url}/printer/objects/query?configfile=settings"
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        return None
+                    data = await response.json()
+        except Exception as exc:
+            LOGGER.debug("Failed to query configfile for kinematics: %s", exc)
+            return None
+
+        settings = (
+            data.get("result", {})
+            .get("status", {})
+            .get("configfile", {})
+            .get("settings", {})
+        )
+        kinematics = settings.get("printer", {}).get("kinematics")
+        if isinstance(kinematics, str) and kinematics.strip():
+            return kinematics.strip()
+        return None
 
 
 class CameraProvider(BaseProvider):

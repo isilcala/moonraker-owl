@@ -45,6 +45,7 @@ from .handlers import (
     PrintParamCommandsMixin,
     QueryCommandsMixin,
     TaskCommandsMixin,
+    ToolheadCommandsMixin,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class CommandProcessor(
     QueryCommandsMixin,
     MetadataCommandsMixin,
     GCodeCommandsMixin,
+    ToolheadCommandsMixin,
 ):
     """Consumes MQTT command messages and forwards them to Moonraker."""
 
@@ -166,6 +168,10 @@ class CommandProcessor(
 
             # GCode macro
             PrinterCommandNames.GCODE_MACRO: self._execute_gcode_macro,
+
+            # Multi-toolhead control (Phase 3, idle-time only)
+            PrinterCommandNames.TOOLHEAD_ACTIVATE_TOOL: self._execute_toolhead_activate_tool,
+            PrinterCommandNames.IDEX_SET_MODE: self._execute_idex_set_mode,
 
             # System task commands
             PrinterCommandNames.CAPTURE_IMAGE: self._execute_capture_image,

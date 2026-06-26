@@ -338,6 +338,216 @@ def test_cancelled_print_drops_redundant_printing_message() -> None:
     assert session.has_active_job is False
 
 
+def test_status_reports_active_tool_for_multi_extruder() -> None:
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "toolhead": {"extruder": "extruder1"},
+                    "virtual_sdcard": {"is_active": True, "progress": 0.1},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert status["toolhead"]["activeExtruder"] == "extruder1"
+    assert status["toolhead"]["activeToolIndex"] == 1
+
+
+def test_status_omits_toolhead_when_absent() -> None:
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert "toolhead" not in status
+
+
+def test_status_reports_dual_carriage_mode_for_idex() -> None:
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "toolhead": {"extruder": "extruder"},
+                    "dual_carriage": {"carriage_0": "PRIMARY", "carriage_1": "COPY"},
+                    "virtual_sdcard": {"is_active": True, "progress": 0.1},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert status["toolhead"]["activeExtruder"] == "extruder"
+    assert status["toolhead"]["dualCarriageMode"] == "COPY"
+
+
+def test_status_dual_carriage_mode_supports_generic_cartesian_map() -> None:
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "toolhead": {"extruder": "extruder1"},
+                    "dual_carriage": {
+                        "carriages": {"carriage_x": "PRIMARY", "carriage_u": "MIRROR"}
+                    },
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert status["toolhead"]["dualCarriageMode"] == "MIRROR"
+
+
+def test_status_dual_carriage_mode_reports_inactive_for_generic_cartesian_base_tool() -> None:
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "toolhead": {"extruder": "extruder"},
+                    "dual_carriage": {
+                        "carriages": {"carriage_x": "PRIMARY", "carriage_u": "INACTIVE"}
+                    },
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert status["toolhead"]["dualCarriageMode"] == "INACTIVE"
+
+
+def test_status_dual_carriage_mode_reports_primary_for_generic_cartesian_dual_tool() -> None:
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "toolhead": {"extruder": "extruder1"},
+                    "dual_carriage": {
+                        "carriages": {"carriage_x": "INACTIVE", "carriage_u": "PRIMARY"}
+                    },
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert status["toolhead"]["dualCarriageMode"] == "PRIMARY"
+
+
+def test_status_omits_dual_carriage_mode_when_object_absent() -> None:
+    store = MoonrakerStateStore()
+    tracker = PrintSessionTracker()
+    heater = HeaterMonitor()
+    selector = StatusSelector()
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest(
+        {
+            "jsonrpc": "2.0",
+            "method": "notify_status_update",
+            "params": [
+                {
+                    "print_stats": {"state": "printing"},
+                    "toolhead": {"extruder": "extruder"},
+                    "idle_timeout": {"state": "Printing"},
+                }
+            ],
+        }
+    )
+    heater.refresh(store)
+
+    session = tracker.compute(store)
+    status = selector.build(store, session, heater, observed_at)
+    assert status is not None
+    assert "toolhead" in status
+    assert "dualCarriageMode" not in status["toolhead"]
+
+
 def test_pause_then_cancel_clears_paused_state() -> None:
     store = MoonrakerStateStore()
     tracker = PrintSessionTracker()
@@ -3196,6 +3406,50 @@ def test_sensors_output_pin_includes_pwm_flag() -> None:
     assert relay["type"] == "outputPin"
     assert relay["pwm"] is False
     assert relay["value"] == pytest.approx(100.0, rel=1e-3)
+
+
+def test_sensors_heater_includes_per_tool_is_heating() -> None:
+    """Heater sensors carry a per-tool isHeating flag; read-only sensors do not (G8)."""
+    store = MoonrakerStateStore()
+    sensor_filter = SensorFilter(
+        allowlist=["temperature_sensor chamber"],
+        max_custom_sensors=10,
+        max_sensor_count=20,
+    )
+    selector = SensorsSelector(sensor_filter=sensor_filter)
+    observed_at = datetime.now(timezone.utc)
+
+    store.ingest({
+        "result": {
+            "status": {
+                "extruder": {"temperature": 100.0, "target": 200.0},
+                "extruder1": {"temperature": 199.5, "target": 200.0},
+                "heater_bed": {"temperature": 25.0, "target": 0.0},
+                "temperature_sensor chamber": {"temperature": 30.0},
+            }
+        }
+    })
+
+    payload = selector.build(
+        store,
+        mode="idle",
+        interval_seconds=30.0,
+        watch_window_expires=None,
+        observed_at=observed_at,
+        force_emit=True,
+    )
+
+    assert payload is not None
+    by_source = {s["sourceObject"]: s for s in payload["sensors"]}
+
+    # Actively warming toward a real target -> heating.
+    assert by_source["extruder"]["isHeating"] is True
+    # Within 5C of target -> settled, not heating.
+    assert by_source["extruder1"]["isHeating"] is False
+    # Target at/below 40C (off) -> not heating.
+    assert by_source["heater_bed"]["isHeating"] is False
+    # Read-only temperature sensors carry no heating flag.
+    assert "isHeating" not in by_source["temperature_sensor chamber"]
 
 
 def test_sensors_output_pin_defaults_pwm_false() -> None:

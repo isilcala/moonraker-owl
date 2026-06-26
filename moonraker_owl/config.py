@@ -38,6 +38,7 @@ DEFAULT_TELEMETRY_FIELDS = [
     "gcode_macro _OBICO_LAYER_CHANGE",
     "fan.speed",
     "toolhead",
+    "dual_carriage",
     "virtual_sdcard",
     "display_status",
     "idle_timeout",
@@ -117,6 +118,32 @@ CORE_SENSORS: frozenset[str] = frozenset({
     "heater_bed",
     "fan",
 })
+
+
+def is_extruder_object(name: str) -> bool:
+    """Return True if ``name`` is a Klipper extruder object (``extruder``/``extruderN``)."""
+    if name == "extruder":
+        return True
+    if name.startswith("extruder"):
+        return name[len("extruder"):].isdigit()
+    return False
+
+
+def extruder_index(name: str) -> int:
+    """Numeric index of an extruder object: ``extruder`` -> 0, ``extruder1`` -> 1, ..."""
+    suffix = name[len("extruder"):]
+    return int(suffix) if suffix.isdigit() else 0
+
+
+def is_core_sensor(name: str) -> bool:
+    """Return True if a sensor is *core* (always reported, tier-exempt).
+
+    Core = bed/part-cooling fan plus **any** extruder (``extruderN``). Treating
+    every extruder as core — not just ``extruder1..3`` — ensures multi-toolhead
+    machines (IDEX / toolchangers with 4+ tools) never have nozzles silently
+    dropped by tier sensor caps (proposal: multi-toolhead-klipper-support.md, G5).
+    """
+    return name in CORE_SENSORS or is_extruder_object(name)
 
 
 @dataclass(slots=True)

@@ -9,14 +9,116 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
-from ..config import CORE_SENSORS
+from ..config import extruder_index, is_core_sensor, is_extruder_object
 
 from .state_engine import PrinterContext, resolve_printer_state
 from .state_store import MoonrakerStateStore, SectionSnapshot
-from .trackers import HeaterMonitor, SessionInfo
+from .trackers import HeaterMonitor, SessionInfo, heater_is_heating
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _normalize_dual_carriage_mode(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    return normalized or None
+
+
+def _build_toolhead_payload(
+    store: MoonrakerStateStore,
+) -> Optional[Dict[str, Any]]:
+    """Build the optional ``toolhead`` status block (active tool).
+
+    Reports which extruder is currently selected (``toolhead.extruder``) so the
+    cloud can highlight the active tool on multi-toolhead machines (IDEX,
+    multi-extruder, toolchangers). Single-nozzle printers simply report
+    ``activeExtruder: "extruder"`` / ``activeToolIndex: 0``. On IDEX machines a
+    ``dualCarriageMode`` (PRIMARY/COPY/MIRROR/INACTIVE) is added from the Klipper
+    ``dual_carriage`` object. See proposal multi-toolhead-klipper-support.md.
+
+    Only ``toolhead.extruder`` is consumed, so high-frequency toolhead position
+    updates do not alter the status contract hash (no status spam).
+    """
+    toolhead_snapshot = store.get("toolhead")
+    if toolhead_snapshot is None:
+        return None
+    active_extruder = toolhead_snapshot.data.get("extruder")
+    if not isinstance(active_extruder, str) or not active_extruder:
+        return None
+
+    payload: Dict[str, Any] = {"activeExtruder": active_extruder}
+    if is_extruder_object(active_extruder):
+        payload["activeToolIndex"] = extruder_index(active_extruder)
+
+    dual_carriage_mode = _resolve_dual_carriage_mode(store)
+    if dual_carriage_mode is not None:
+        payload["dualCarriageMode"] = dual_carriage_mode
+
+    return payload
+
+
+def _resolve_dual_carriage_mode(
+    store: MoonrakerStateStore,
+) -> Optional[str]:
+    """Resolve the IDEX dual-carriage duplication mode, if any.
+
+    Reads the Klipper ``dual_carriage`` status object. Standard IDEX kinematics
+    (cartesian / hybrid_corexy / hybrid_corexz) expose ``carriage_0`` and
+    ``carriage_1`` mode strings; ``generic_cartesian`` exposes a ``carriages``
+    map. The dual carriage (carriage 1) is the one that can enter COPY/MIRROR
+    duplication, so we report its mode. Values are PRIMARY | COPY | MIRROR |
+    INACTIVE (Klipper Status Reference). Returns ``None`` when the machine has
+    no dual carriage — graceful degradation for non-IDEX printers.
+    """
+    snapshot = store.get("dual_carriage")
+    if snapshot is None:
+        return None
+    data = snapshot.data
+
+    # Standard IDEX kinematics: carriage_1 is the dual carriage.
+    mode = data.get("carriage_1")
+    if isinstance(mode, str) and mode:
+        return mode.upper()
+
+    # generic_cartesian: a {carriage_name: mode} map. COPY / MIRROR are explicit,
+    # but PRIMARY / INACTIVE are ambiguous without knowing which carriage is the
+    # dual carriage. Use the active extruder as a tie-breaker for the common two-
+    # carriage IDEX case; otherwise prefer omission over a false PRIMARY.
+    carriages = data.get("carriages")
+    if isinstance(carriages, dict):
+        modes_by_name = {
+            name: normalized
+            for name, value in carriages.items()
+            if isinstance(name, str)
+            for normalized in [_normalize_dual_carriage_mode(value)]
+            if normalized is not None
+        }
+        modes = set(modes_by_name.values())
+        for special in ("COPY", "MIRROR"):
+            if special in modes:
+                return special
+
+        if modes == {"PRIMARY"}:
+            return "PRIMARY"
+        if modes == {"INACTIVE"}:
+            return "INACTIVE"
+
+        if modes == {"PRIMARY", "INACTIVE"}:
+            toolhead_snapshot = store.get("toolhead")
+            active_extruder = (
+                toolhead_snapshot.data.get("extruder")
+                if toolhead_snapshot is not None
+                else None
+            )
+            if isinstance(active_extruder, str):
+                normalized_extruder = active_extruder.strip().lower()
+                if normalized_extruder == "extruder":
+                    return "INACTIVE"
+                if normalized_extruder == "extruder1":
+                    return "PRIMARY"
+    return None
 
 
 class StatusSelector:
@@ -98,6 +200,10 @@ class StatusSelector:
         status: Dict[str, Any] = {
             "lifecycle": lifecycle,
         }
+
+        toolhead_payload = _build_toolhead_payload(store)
+        if toolhead_payload:
+            status["toolhead"] = toolhead_payload
 
         estimated_remaining = session.remaining_seconds
         if estimated_remaining is None and print_stats_snapshot is not None:
@@ -215,7 +321,7 @@ class SensorFilter:
         """Return True if the sensor should be reported."""
         if sensor_name in self._denylist:
             return False
-        if sensor_name in CORE_SENSORS:
+        if is_core_sensor(sensor_name):
             return True
         if self._use_allowlist:
             return sensor_name in self._allowlist
@@ -239,7 +345,7 @@ class SensorFilter:
         custom: List[Dict[str, Any]] = []
         for sensor in sensors:
             source_object = sensor.get("sourceObject", "")
-            if source_object in CORE_SENSORS:
+            if is_core_sensor(source_object):
                 core.append(sensor)
             else:
                 custom.append(sensor)
@@ -414,6 +520,11 @@ class SensorsSelector:
             "status": status,
             "lastUpdated": last_updated.replace(microsecond=0).isoformat(),
         }
+
+        if sensor_type == "heater":
+            # Per-tool heating flag (proposal G8): lets the UI show which
+            # specific nozzle/bed is warming up, not just an aggregate.
+            payload["isHeating"] = heater_is_heating(value, target)
 
         if sensor_type == "outputPin":
             payload["pwm"] = is_pwm  # noqa: F821 — assigned in outputPin branch above

@@ -21,6 +21,7 @@ from .providers import (
     GCodeMacroProvider,
     KlipperProvider,
     MoonrakerProvider,
+    MotionProvider,
     SensorInventoryProvider,
     SystemInfoProvider,
 )
@@ -157,6 +158,7 @@ class MetadataReporter:
             SystemInfoProvider(),
             MoonrakerProvider(moonraker_url),
             KlipperProvider(moonraker_url),
+            MotionProvider(moonraker_url),
             CameraProvider(moonraker_url),
             SensorInventoryProvider(moonraker_url),
             GCodeMacroProvider(moonraker_url),

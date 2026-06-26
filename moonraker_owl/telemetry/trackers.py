@@ -301,6 +301,24 @@ class HeaterSnapshot:
     target: Optional[float]
 
 
+def heater_is_heating(
+    temperature: Optional[float], target: Optional[float]
+) -> bool:
+    """Return True when a heater is actively warming toward a real target.
+
+    A heater counts as "heating" when it has a target above 40 °C and is still
+    at least 5 °C below it. Shared by the aggregate ``lifecycle.isHeating`` and
+    the per-tool ``isHeating`` flag emitted on each heater sensor so multi-
+    toolhead machines can show which specific nozzle is warming up (proposal
+    multi-toolhead-klipper-support.md, G8).
+    """
+    if temperature is None or target is None:
+        return False
+    if target <= 40:
+        return False
+    return target - temperature >= 5
+
+
 @dataclass
 class HeaterMonitor:
     """Tracks heater readiness and warming state."""
@@ -332,11 +350,7 @@ class HeaterMonitor:
             within 5°C of that target.
         """
         for snapshot in self.heaters.values():
-            if snapshot.target is None or snapshot.temperature is None:
-                continue
-            if snapshot.target <= 40:
-                continue
-            if snapshot.target - snapshot.temperature >= 5:
+            if heater_is_heating(snapshot.temperature, snapshot.target):
                 return True
         return False
 
