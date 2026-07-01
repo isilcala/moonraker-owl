@@ -11,6 +11,7 @@ dictionaries that are merged by MetadataReporter.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import platform
 import socket
@@ -952,3 +953,164 @@ class GCodeMacroProvider(BaseProvider):
             if macro_info.get("rename_existing"):
                 wrappers.add(name)
         return wrappers
+
+
+class InstanceFingerprintProvider(BaseProvider):
+    """Derives a stable, salted **instance fingerprint** for anti-abuse (Owl proposal §3.11).
+
+    The fingerprint gives the platform the physical-device identity that cloud-minted device IDs
+    lack, so the backend can tell when one printer is re-linked across many accounts. It is only an
+    advisory risk signal (shared printers / makerspaces are legitimate), never a hard gate.
+
+    Only a **one-way salted hash** is ever emitted — no raw hardware identifier leaves the agent.
+    Identifier preference (most board-bound first):
+
+    1. **Klipper MCU serial / CAN UUID** from ``[mcu*]`` config sections — tied to the printer
+       mainboard, so it survives an SBC reflash. Only globally-unique values are used
+       (``canbus_uuid`` and ``/dev/serial/by-id/...`` paths); ambiguous bus positions such as
+       ``/dev/ttyAMA0`` are ignored.
+    2. **/etc/machine-id** — host-level fallback. Weaker (changes on OS reflash) but better than
+       nothing for USB printers whose serial is a bare tty path.
+
+    Returns ``{}`` when neither is available, so downstream treats the printer as simply
+    un-fingerprinted rather than sharing a bogus constant.
+    """
+
+    # Domain-separation salt. NOT a secret — the agent is open source, so any client-side value is
+    # forgeable. Its only job is to namespace the hash and avoid persisting raw hardware IDs; the
+    # real anti-fraud backstops are payment-gating + caps + review (proposal §3.9).
+    _SALT = "owl.device.fingerprint.v1"
+    _ALGORITHM = "sha256-v1"
+    _MACHINE_ID_PATH = "/etc/machine-id"
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        session: Optional[aiohttp.ClientSession] = None,
+        timeout: float = 5.0,
+        machine_id_path: Optional[str] = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._session = session
+        self._owns_session = session is None
+        self._timeout = timeout
+        self._machine_id_path = machine_id_path or self._MACHINE_ID_PATH
+
+    @property
+    def name(self) -> str:
+        return "fingerprint"
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is None:
+            timeout = aiohttp.ClientTimeout(total=self._timeout)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._owns_session = True
+        return self._session
+
+    async def close(self) -> None:
+        if self._owns_session and self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def detect(self) -> Dict[str, Any]:
+        """Collect identifiers, hash them, and emit ``system.instanceFingerprint``.
+
+        Best-effort: any failure yields ``{}`` rather than raising, so an un-fingerprintable host
+        is never logged as a failed provider.
+        """
+        try:
+            identifiers = await self._collect_mcu_identifiers()
+            kind = "mcu"
+
+            if not identifiers:
+                machine_id = self._read_machine_id()
+                if machine_id:
+                    identifiers = [f"machine-id:{machine_id}"]
+                    kind = "machine-id"
+
+            if not identifiers:
+                LOGGER.info(
+                    "No stable hardware identifier found; skipping instance fingerprint"
+                )
+                return {}
+
+            composite = "|".join(sorted(identifiers))
+            digest = hashlib.sha256(
+                f"{self._SALT}|{composite}".encode("utf-8")
+            ).hexdigest()
+
+            LOGGER.info("Computed instance fingerprint (kind=%s)", kind)
+            return {
+                "system": {
+                    "instanceFingerprint": digest,
+                    "instanceFingerprintKind": kind,
+                    "instanceFingerprintAlgorithm": self._ALGORITHM,
+                }
+            }
+        except Exception as exc:  # best-effort — never fail metadata over a fingerprint
+            LOGGER.debug("Instance fingerprint detection failed: %s", exc)
+            return {}
+
+    async def _collect_mcu_identifiers(self) -> List[str]:
+        """Read globally-unique MCU identifiers from the Klipper ``[mcu*]`` config sections."""
+        session = await self._ensure_session()
+        url = f"{self._base_url}/printer/objects/query?configfile=settings"
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        return []
+                    data = await response.json()
+        except Exception as exc:
+            LOGGER.debug("Failed to query configfile for fingerprint: %s", exc)
+            return []
+
+        settings = (
+            data.get("result", {})
+            .get("status", {})
+            .get("configfile", {})
+            .get("settings", {})
+        )
+        if not isinstance(settings, dict):
+            return []
+
+        identifiers: List[str] = []
+        for section, config in settings.items():
+            if not isinstance(config, dict):
+                continue
+            if section != "mcu" and not section.startswith("mcu "):
+                continue
+
+            canbus_uuid = config.get("canbus_uuid")
+            if isinstance(canbus_uuid, str) and canbus_uuid.strip():
+                # A CAN MCU is identified by its UUID, not a serial path.
+                identifiers.append(f"canbus:{canbus_uuid.strip()}")
+                continue
+
+            serial = config.get("serial")
+            if isinstance(serial, str) and self._is_unique_serial(serial):
+                identifiers.append(f"serial:{serial.strip()}")
+
+        return identifiers
+
+    @staticmethod
+    def _is_unique_serial(serial: str) -> bool:
+        """True only for serial paths that encode a per-board chip id (``/dev/serial/by-id/...``).
+
+        Bare kernel device nodes (``/dev/ttyAMA0``, ``/dev/ttyACM0``, ``/dev/serial0`` …) are bus
+        positions shared by every host and must never be used as a fingerprint.
+        """
+        value = serial.strip().lower()
+        if not value:
+            return False
+        return "by-id" in value or "usb-" in value
+
+    def _read_machine_id(self) -> Optional[str]:
+        """Read ``/etc/machine-id`` (host-level fallback), or None if unavailable."""
+        try:
+            with open(self._machine_id_path, "r", encoding="utf-8") as stream:
+                value = stream.read().strip()
+                return value or None
+        except OSError:
+            return None

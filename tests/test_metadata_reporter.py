@@ -1,6 +1,7 @@
 """Tests for device metadata reporter (ADR-0032)."""
 
 import asyncio
+import hashlib
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,6 +11,7 @@ import pytest
 from moonraker_owl.metadata import (
     CameraProvider,
     GCodeMacroProvider,
+    InstanceFingerprintProvider,
     KlipperProvider,
     MetadataReporter,
     MetadataReporterConfig,
@@ -309,6 +311,133 @@ class TestMotionProvider:
         """Klipper not ready (no objects) -> empty result, merged as no-op."""
         result = await _run_motion_detect(provider, [], {})
         assert result == {}
+
+
+async def _run_fingerprint_detect(
+    provider: InstanceFingerprintProvider,
+    settings: Dict[str, Any],
+    *,
+    status: int = 200,
+) -> Dict[str, Any]:
+    """Drive InstanceFingerprintProvider.detect() with a mocked configfile response."""
+    configfile_response = {
+        "result": {"status": {"configfile": {"settings": settings}}}
+    }
+
+    async def mock_get_impl(*args, **kwargs):
+        mock_resp = AsyncMock()
+        mock_resp.status = status
+        mock_resp.json = AsyncMock(return_value=configfile_response)
+        return mock_resp
+
+    with patch.object(provider, "_ensure_session") as mock_session:
+        mock_session_obj = MagicMock()
+        mock_context = AsyncMock()
+        mock_context.__aenter__ = mock_get_impl
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+        mock_session_obj.get = MagicMock(return_value=mock_context)
+        mock_session.return_value = mock_session_obj
+        return await provider.detect()
+
+
+class TestInstanceFingerprintProvider:
+    """Tests for InstanceFingerprintProvider (anti-abuse device fingerprint, proposal §3.11)."""
+
+    @pytest.fixture
+    def provider(self):
+        # machine-id path forced to a nonexistent file so MCU tests never fall back to the host.
+        return InstanceFingerprintProvider(
+            "http://127.0.0.1:7125", machine_id_path="/nonexistent/machine-id"
+        )
+
+    def test_provider_name(self, provider):
+        assert provider.name == "fingerprint"
+
+    @pytest.mark.asyncio
+    async def test_detect_uses_canbus_uuid(self, provider):
+        """A CAN MCU is fingerprinted by its canbus_uuid, kind=mcu, hash deterministic."""
+        settings = {"mcu": {"canbus_uuid": "1a2b3c4d5e6f"}}
+        result = await _run_fingerprint_detect(provider, settings)
+
+        system = result["system"]
+        assert system["instanceFingerprintKind"] == "mcu"
+        assert system["instanceFingerprintAlgorithm"] == "sha256-v1"
+
+        expected = hashlib.sha256(
+            f"{InstanceFingerprintProvider._SALT}|canbus:1a2b3c4d5e6f".encode("utf-8")
+        ).hexdigest()
+        assert system["instanceFingerprint"] == expected
+
+    @pytest.mark.asyncio
+    async def test_detect_uses_by_id_serial(self, provider):
+        """A USB serial with a by-id chip path is accepted (kind=mcu)."""
+        serial = "/dev/serial/by-id/usb-Klipper_stm32f407xx_360029000-if00"
+        settings = {"mcu": {"serial": serial}}
+        result = await _run_fingerprint_detect(provider, settings)
+
+        assert result["system"]["instanceFingerprintKind"] == "mcu"
+        assert len(result["system"]["instanceFingerprint"]) == 64
+
+    @pytest.mark.asyncio
+    async def test_detect_ignores_bare_tty_serial(self, provider):
+        """A bare /dev/ttyAMA0 is a shared bus position, not a fingerprint -> empty."""
+        settings = {"mcu": {"serial": "/dev/ttyAMA0"}}
+        result = await _run_fingerprint_detect(provider, settings)
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_detect_combines_multiple_mcus(self, provider):
+        """Main board serial + toolhead CAN UUID are both folded into a stable hash."""
+        settings = {
+            "mcu": {"serial": "/dev/serial/by-id/usb-Klipper_rp2040_ABC-if00"},
+            "mcu toolhead": {"canbus_uuid": "deadbeef00"},
+            "printer": {"kinematics": "corexy"},  # non-mcu section ignored
+        }
+        result = await _run_fingerprint_detect(provider, settings)
+
+        expected = hashlib.sha256(
+            (
+                f"{InstanceFingerprintProvider._SALT}|"
+                "canbus:deadbeef00|serial:/dev/serial/by-id/usb-Klipper_rp2040_ABC-if00"
+            ).encode("utf-8")
+        ).hexdigest()
+        assert result["system"]["instanceFingerprint"] == expected
+        assert result["system"]["instanceFingerprintKind"] == "mcu"
+
+    @pytest.mark.asyncio
+    async def test_detect_falls_back_to_machine_id(self, tmp_path):
+        """No usable MCU id -> host /etc/machine-id fallback (kind=machine-id)."""
+        machine_id_file = tmp_path / "machine-id"
+        machine_id_file.write_text("0123456789abcdef0123456789abcdef\n")
+        provider = InstanceFingerprintProvider(
+            "http://127.0.0.1:7125", machine_id_path=str(machine_id_file)
+        )
+
+        result = await _run_fingerprint_detect(provider, {})
+
+        system = result["system"]
+        assert system["instanceFingerprintKind"] == "machine-id"
+        expected = hashlib.sha256(
+            f"{InstanceFingerprintProvider._SALT}|machine-id:0123456789abcdef0123456789abcdef".encode("utf-8")
+        ).hexdigest()
+        assert system["instanceFingerprint"] == expected
+
+    @pytest.mark.asyncio
+    async def test_detect_no_identifier_returns_empty(self, provider):
+        """No MCU id and no machine-id -> {} (printer simply un-fingerprinted)."""
+        result = await _run_fingerprint_detect(provider, {})
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_detect_handles_query_failure_gracefully(self, tmp_path):
+        """A failed configfile query still allows the machine-id fallback."""
+        machine_id_file = tmp_path / "machine-id"
+        machine_id_file.write_text("feedface")
+        provider = InstanceFingerprintProvider(
+            "http://127.0.0.1:7125", machine_id_path=str(machine_id_file)
+        )
+        result = await _run_fingerprint_detect(provider, {}, status=500)
+        assert result["system"]["instanceFingerprintKind"] == "machine-id"
 
 
 class TestCameraProvider:

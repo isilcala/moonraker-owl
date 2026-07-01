@@ -24,6 +24,7 @@ from .providers import (
     CameraProvider,
     CapabilityProvider,
     GCodeMacroProvider,
+    InstanceFingerprintProvider,
     KlipperProvider,
     MoonrakerProvider,
     MotionProvider,
@@ -44,4 +45,5 @@ __all__ = [
     "CameraProvider",
     "SensorInventoryProvider",
     "GCodeMacroProvider",
+    "InstanceFingerprintProvider",
 ]

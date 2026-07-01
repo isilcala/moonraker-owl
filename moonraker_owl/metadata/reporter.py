@@ -19,6 +19,7 @@ from .providers import (
     BaseProvider,
     CameraProvider,
     GCodeMacroProvider,
+    InstanceFingerprintProvider,
     KlipperProvider,
     MoonrakerProvider,
     MotionProvider,
@@ -162,6 +163,7 @@ class MetadataReporter:
             CameraProvider(moonraker_url),
             SensorInventoryProvider(moonraker_url),
             GCodeMacroProvider(moonraker_url),
+            InstanceFingerprintProvider(moonraker_url),
         ]
 
     async def _cleanup_providers(self) -> None:
