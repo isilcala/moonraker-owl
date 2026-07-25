@@ -1428,14 +1428,19 @@ class MoonrakerOwlApp:
         because a fresh token might allow us to reconnect after the cloud service
         comes back online.
         """
-        # TTL-aware cloud config refresh (skips if within 30 min of last fetch)
-        if self._cloud_config_manager is not None:
-            await self._cloud_config_manager.fetch()
-
         if self._connection_coordinator is not None:
             LOGGER.debug("Requesting MQTT reconnect after token renewal")
             self._connection_coordinator.request_reconnect(
                 ReconnectReason.TOKEN_RENEWED
+            )
+
+        # TTL-aware cloud config refresh (skips if within 30 min of last fetch).
+        # This is useful but not part of credential rotation, so it must never
+        # delay the MQTT reconnect that applies the renewed JWT.
+        if self._cloud_config_manager is not None:
+            self._spawn_background(
+                self._cloud_config_manager.fetch(),
+                name="cloud-config-fetch:token-renewed",
             )
 
     # ------------------------------------------------------------------

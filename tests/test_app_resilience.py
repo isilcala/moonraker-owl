@@ -11,6 +11,7 @@ from typing import Any, Optional
 import pytest
 
 from moonraker_owl.app import AgentState, MoonrakerOwlApp, _ALLOWED_TRANSITIONS
+from moonraker_owl.connection import ReconnectReason
 from helpers import build_config
 
 
@@ -117,6 +118,25 @@ class _StubMqttClient:
         self.last_will = kwargs
 
 
+class _RecordingConnectionCoordinator:
+    def __init__(self) -> None:
+        self.requests: list[ReconnectReason] = []
+
+    def request_reconnect(self, reason: ReconnectReason) -> None:
+        self.requests.append(reason)
+
+
+class _BlockingCloudConfigManager:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def fetch(self, *args: Any, **kwargs: Any) -> bool:
+        self.started.set()
+        await self.release.wait()
+        return False
+
+
 @pytest.mark.asyncio
 async def test_moonraker_breaker_trips_after_failures() -> None:
     config = build_config(breaker_threshold=2)
@@ -193,6 +213,25 @@ async def test_start_services_registers_contract_compliant_lwt(
     assert document["payload"]["lifecycle"]["phase"] == "Offline"
     assert document["payload"]["lifecycle"]["isShutdown"] is False
     assert document["payload"]["cadence"]["heartbeatSeconds"] == config.telemetry_cadence.status_heartbeat_seconds
+
+
+@pytest.mark.asyncio
+async def test_token_renewal_reconnect_is_not_blocked_by_config_fetch() -> None:
+    app = MoonrakerOwlApp(build_config())
+    coordinator = _RecordingConnectionCoordinator()
+    cloud_config = _BlockingCloudConfigManager()
+    app._connection_coordinator = coordinator  # type: ignore[assignment]
+    app._cloud_config_manager = cloud_config  # type: ignore[assignment]
+
+    await asyncio.wait_for(app._on_token_renewed(), timeout=0.1)
+
+    assert coordinator.requests == [ReconnectReason.TOKEN_RENEWED]
+    await asyncio.wait_for(cloud_config.started.wait(), timeout=0.1)
+
+    cloud_config.release.set()
+    pending = list(app._background_tasks)
+    if pending:
+        await asyncio.gather(*pending)
 
 
 @pytest.mark.asyncio
