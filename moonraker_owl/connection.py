@@ -8,6 +8,7 @@ coordination to avoid race conditions.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import random
 from collections import deque
@@ -46,6 +47,9 @@ _SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS = 1.0
 
 _SUPERVISOR_RESTART_BACKOFF_MAX_SECONDS = 30.0
 """Cap on the exponential restart backoff."""
+
+_CALLBACK_TIMEOUT_SECONDS = 30.0
+"""Maximum time a pre-reconnect callback may occupy the reconnect supervisor."""
 
 
 class ReconnectReason(str, Enum):
@@ -106,6 +110,11 @@ class ConnectionState(str, Enum):
     """Attempting to reconnect after connection loss."""
 
 
+AsyncDisconnectedCallback = Callable[[ReconnectReason], Awaitable[None]]
+AsyncReconnectedCallback = Callable[[], Awaitable[None]]
+AsyncDisconnectEventCallback = Callable[[DisconnectRecord], Awaitable[None]]
+
+
 class ConnectionCoordinator:
     """Coordinates MQTT connection lifecycle and reconnection.
 
@@ -145,17 +154,16 @@ class ConnectionCoordinator:
         self._supervisor_started_at: Optional[float] = None
         self._supervisor_restart_attempts = 0
         self._supervisor_restart_handle: Optional[asyncio.TimerHandle] = None
+        self._background_callback_tasks: set[asyncio.Task[None]] = set()
 
         # Callbacks
         self._on_connected: Optional[asyncio.Future[None]] = None
-        self._on_disconnected_callbacks: list = []
+        self._on_disconnected_callbacks: list[AsyncDisconnectedCallback] = []
         self._on_fatal_supervisor_failure_callbacks: list[Callable[[int], None]] = []
-        self._on_reconnected_callbacks: list = []
+        self._on_reconnected_callbacks: list[AsyncReconnectedCallback] = []
         # Fired (after a successful reconnect) so a publisher can emit the disconnect
         # event over MQTT once the link is back up.
-        self._on_disconnect_event_callbacks: List[
-            Callable[[DisconnectRecord], Union[None, Awaitable[None]]]
-        ] = []
+        self._on_disconnect_event_callbacks: List[AsyncDisconnectEventCallback] = []
 
         # Cumulative count of successful reconnections (health reporting).
         self._reconnects_total = 0
@@ -367,6 +375,13 @@ class ConnectionCoordinator:
                 pass
             self._supervisor_task = None
 
+        if self._background_callback_tasks:
+            pending = list(self._background_callback_tasks)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            self._background_callback_tasks.clear()
+
         self._supervisor_restart_attempts = 0
         self._supervisor_started_at = None
 
@@ -455,8 +470,23 @@ class ConnectionCoordinator:
             return
         self.start_supervisor()
 
-    def register_reconnected_callback(self, callback) -> None:
-        """Register callback to be invoked after successful reconnection."""
+    @staticmethod
+    def _ensure_async_callback(callback, *, kind: str) -> None:
+        callback_impl = getattr(callback, "__call__", None)
+        if inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(
+            callback_impl
+        ):
+            return
+        callback_name = getattr(callback, "__qualname__", repr(callback))
+        raise TypeError(
+            f"{kind} callback {callback_name} must be declared with async def so reconnect supervision can dispatch it without blocking the event loop"
+        )
+
+    def register_reconnected_callback(
+        self, callback: AsyncReconnectedCallback
+    ) -> None:
+        """Register an async callback to be invoked after successful reconnection."""
+        self._ensure_async_callback(callback, kind="Reconnected")
         self._on_reconnected_callbacks.append(callback)
 
     def register_fatal_supervisor_failure_callback(
@@ -465,17 +495,21 @@ class ConnectionCoordinator:
         """Register callback to be invoked when supervisor restart is exhausted."""
         self._on_fatal_supervisor_failure_callbacks.append(callback)
 
-    def register_disconnected_callback(self, callback) -> None:
-        """Register callback to be invoked on disconnection."""
+    def register_disconnected_callback(
+        self, callback: AsyncDisconnectedCallback
+    ) -> None:
+        """Register an async callback to be invoked on disconnection."""
+        self._ensure_async_callback(callback, kind="Disconnected")
         self._on_disconnected_callbacks.append(callback)
 
     def register_disconnect_event_callback(
-        self, callback: Callable[[DisconnectRecord], Union[None, Awaitable[None]]]
+        self, callback: AsyncDisconnectEventCallback
     ) -> None:
-        """Register a callback fired after a successful reconnect to publish the
+        """Register an async callback fired after a successful reconnect to publish the
         preceding *unexpected* disconnect over MQTT (planned token refresh excluded).
         Invoked once the link is back up so the publish actually reaches the broker.
         """
+        self._ensure_async_callback(callback, kind="Disconnect-event")
         self._on_disconnect_event_callbacks.append(callback)
 
     def _notify_fatal_supervisor_failure(self, attempts: int) -> None:
@@ -484,6 +518,69 @@ class ConnectionCoordinator:
                 callback(attempts)
             except Exception:
                 LOGGER.exception("Fatal supervisor failure callback failed")
+
+    def _track_background_callback(self, callback, *args, kind: str) -> None:
+        callback_name = getattr(callback, "__qualname__", repr(callback))
+        try:
+            result = callback(*args)
+            if not inspect.isawaitable(result):
+                raise TypeError(
+                    f"{kind} callback {callback_name} returned a non-awaitable result"
+                )
+        except Exception:
+            LOGGER.warning("%s callback %s failed", kind, callback_name, exc_info=True)
+            return
+
+        task = asyncio.create_task(
+            self._run_background_callback(
+                result,
+                kind=kind,
+                callback_name=callback_name,
+            )
+        )
+        self._background_callback_tasks.add(task)
+        task.add_done_callback(self._background_callback_tasks.discard)
+
+    async def _run_background_callback(
+        self,
+        result: Awaitable[None],
+        *,
+        kind: str,
+        callback_name: str,
+    ) -> None:
+        try:
+            await asyncio.wait_for(result, timeout=_CALLBACK_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            LOGGER.debug("%s callback %s cancelled", kind, callback_name)
+            raise
+        except asyncio.TimeoutError:
+            LOGGER.error(
+                "%s callback %s timed out after %.1fs; cancelling background task",
+                kind,
+                callback_name,
+                _CALLBACK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            LOGGER.warning("%s callback %s failed", kind, callback_name, exc_info=True)
+
+    async def _invoke_callback(self, callback, *args, kind: str) -> None:
+        callback_name = getattr(callback, "__qualname__", repr(callback))
+        try:
+            result = callback(*args)
+            if not inspect.isawaitable(result):
+                raise TypeError(
+                    f"{kind} callback {callback_name} returned a non-awaitable result"
+                )
+            await asyncio.wait_for(result, timeout=_CALLBACK_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            LOGGER.error(
+                "%s callback %s timed out after %.1fs; reconnect supervisor will continue",
+                kind,
+                callback_name,
+                _CALLBACK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            LOGGER.warning("%s callback %s failed", kind, callback_name, exc_info=True)
 
     async def _supervision_loop(self) -> None:
         """Main supervision loop that handles reconnection requests."""
@@ -532,12 +629,7 @@ class ConnectionCoordinator:
 
         # Notify disconnection handlers
         for callback in self._on_disconnected_callbacks:
-            try:
-                result = callback(reason)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                LOGGER.warning("Disconnected callback failed", exc_info=True)
+            await self._invoke_callback(callback, reason, kind="Disconnected")
 
         # Disconnect cleanly if still connected
         try:
@@ -568,23 +660,15 @@ class ConnectionCoordinator:
             # drops only — token refresh produced no record above).
             if disconnect_record is not None:
                 for callback in self._on_disconnect_event_callbacks:
-                    try:
-                        result = callback(disconnect_record)
-                        if asyncio.iscoroutine(result):
-                            await result
-                    except Exception:
-                        LOGGER.warning(
-                            "Disconnect-event callback failed", exc_info=True
-                        )
+                    self._track_background_callback(
+                        callback,
+                        disconnect_record,
+                        kind="Disconnect-event",
+                    )
 
             # Notify reconnection handlers
             for callback in self._on_reconnected_callbacks:
-                try:
-                    result = callback()
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception:
-                    LOGGER.exception("Reconnected callback failed")
+                self._track_background_callback(callback, kind="Reconnected")
         else:
             self._state = ConnectionState.DISCONNECTED
             LOGGER.warning("Reconnection abandoned (coordinator stopping)")

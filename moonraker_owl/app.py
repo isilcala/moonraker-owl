@@ -159,6 +159,11 @@ class MoonrakerOwlApp:
         self._moonraker_recovery_lock: Optional[asyncio.Lock] = None
         self._component_restart_lock: Optional[asyncio.Lock] = None
         self._component_restart_in_progress = False
+        self._connection_recovery_epoch = 0
+        self._connection_restore_requested_epoch = 0
+        self._connection_restore_completed_epoch = 0
+        self._connection_restore_reason: Optional[ReconnectReason] = None
+        self._connection_restore_task: Optional[asyncio.Task[None]] = None
         # Track last reconnection reason for state preservation decisions
         self._last_reconnect_reason: Optional[ReconnectReason] = None
         # Shared registry for PrintJob ID mapping (populated by job:registered commands)
@@ -1206,7 +1211,8 @@ class MoonrakerOwlApp:
         before reconnection is attempted.
         """
         LOGGER.info("MQTT connection lost: %s", reason.value)
-        
+
+        self._connection_recovery_epoch += 1
         # Save reason for use in _on_connection_restored
         self._last_reconnect_reason = reason
 
@@ -1224,33 +1230,92 @@ class MoonrakerOwlApp:
         await self._deactivate_components("waiting for mqtt reconnect")
         self._mqtt_ready = False
 
+    def _clear_connection_restore_task(self, completed: asyncio.Task[Any]) -> None:
+        if self._connection_restore_task is completed:
+            self._connection_restore_task = None
+
+    def _is_connection_restore_stale(self, recovery_epoch: int) -> bool:
+        return (
+            self._stopping
+            or recovery_epoch != self._connection_recovery_epoch
+            or not self._mqtt_ready
+        )
+
+    async def _drain_connection_restored(self) -> None:
+        lock = self._component_restart_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._component_restart_lock = lock
+
+        while not self._stopping:
+            recovery_epoch = self._connection_restore_requested_epoch
+            if recovery_epoch <= self._connection_restore_completed_epoch:
+                return
+
+            async with lock:
+                recovery_epoch = self._connection_restore_requested_epoch
+                if recovery_epoch <= self._connection_restore_completed_epoch:
+                    continue
+
+                restore_reason = self._connection_restore_reason
+                self._component_restart_in_progress = True
+                try:
+                    try:
+                        await self._do_connection_restored(
+                            recovery_epoch,
+                            restore_reason,
+                        )
+                    except Exception:
+                        LOGGER.exception(
+                            "Connection restore failed for epoch %s",
+                            recovery_epoch,
+                        )
+                finally:
+                    self._component_restart_in_progress = False
+                    self._connection_restore_completed_epoch = max(
+                        self._connection_restore_completed_epoch,
+                        recovery_epoch,
+                    )
+
     async def _on_connection_restored(self) -> None:
         """Called by ConnectionCoordinator when connection is restored.
 
         This callback handles component reactivation and state transitions
         after successful reconnection.
         """
-        # Prevent concurrent component restarts
-        if self._component_restart_in_progress:
+        if self._stopping:
             return
 
-        lock = self._component_restart_lock
-        if lock is None:
-            lock = asyncio.Lock()
-            self._component_restart_lock = lock
+        recovery_epoch = self._connection_recovery_epoch
+        if recovery_epoch > self._connection_restore_requested_epoch:
+            self._connection_restore_requested_epoch = recovery_epoch
+        self._connection_restore_reason = self._last_reconnect_reason
 
-        if lock.locked():
+        task = self._connection_restore_task
+        if task is not None and not task.done():
             return
 
-        async with lock:
-            self._component_restart_in_progress = True
-            try:
-                await self._do_connection_restored()
-            finally:
-                self._component_restart_in_progress = False
+        task = self._spawn_background(
+            self._drain_connection_restored(),
+            name="connection-restored",
+        )
+        self._connection_restore_task = task
+        task.add_done_callback(self._clear_connection_restore_task)
 
-    async def _do_connection_restored(self) -> None:
+    async def _do_connection_restored(
+        self,
+        recovery_epoch: int,
+        reason: Optional[ReconnectReason],
+    ) -> None:
         """Internal implementation of connection restored handling."""
+        if self._stopping or recovery_epoch != self._connection_recovery_epoch:
+            LOGGER.info(
+                "Skipping stale connection restore (epoch=%s, current=%s)",
+                recovery_epoch,
+                self._connection_recovery_epoch,
+            )
+            return
+
         LOGGER.info("Connection restored, restarting components")
 
         self._mqtt_ready = True
@@ -1263,27 +1328,48 @@ class MoonrakerOwlApp:
         if self._cloud_config_manager is not None:
             await self._cloud_config_manager.fetch(force=True)
 
+        if self._is_connection_restore_stale(recovery_epoch):
+            LOGGER.info(
+                "Abandoning stale connection restore after config refresh (epoch=%s, current=%s)",
+                recovery_epoch,
+                self._connection_recovery_epoch,
+            )
+            return
+
         # Determine if we should preserve print state based on reconnect reason
         # Token renewal is a planned reconnection - preserve state to avoid
         # spurious print:started events while a print is still in progress
-        reason = self._last_reconnect_reason
         preserve_print_state = reason == ReconnectReason.TOKEN_RENEWED
         if preserve_print_state:
             LOGGER.debug(
                 "Preserving print state across reconnection (reason=%s)",
                 reason.value if reason else "unknown",
             )
-        self._last_reconnect_reason = None  # Clear after use
 
         try:
             runtime_ready = await self._restart_components(
                 preserve_print_state=preserve_print_state
             )
         except Exception as exc:
+            if self._is_connection_restore_stale(recovery_epoch):
+                LOGGER.info(
+                    "Ignoring restart failure for stale connection restore (epoch=%s, current=%s)",
+                    recovery_epoch,
+                    self._connection_recovery_epoch,
+                )
+                return
             LOGGER.exception("Failed to restart components after reconnect: %s", exc)
             await self._transition_state(
                 AgentState.DEGRADED,
                 detail="runtime restart failed",
+            )
+            return
+
+        if self._is_connection_restore_stale(recovery_epoch):
+            LOGGER.info(
+                "Discarding stale runtime restore result (epoch=%s, current=%s)",
+                recovery_epoch,
+                self._connection_recovery_epoch,
             )
             return
 

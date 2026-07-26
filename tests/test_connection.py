@@ -292,7 +292,7 @@ async def test_reconnected_callback_invoked(coordinator_setup):
 
     callback_invoked = asyncio.Event()
 
-    def on_reconnected():
+    async def on_reconnected() -> None:
         callback_invoked.set()
 
     coordinator.register_reconnected_callback(on_reconnected)
@@ -312,6 +312,87 @@ async def test_reconnected_callback_invoked(coordinator_setup):
 
 
 @pytest.mark.asyncio
+async def test_blocked_reconnected_callback_does_not_strand_reconnect_requests(
+    coordinator_setup,
+):
+    """A stuck application callback must not permanently occupy the supervisor.
+
+    The coordinator is the only owner of MQTT reconnect control. If an app-level
+    reconnected callback hangs after a successful reconnect, later token-renewal
+    reconnect requests must still be consumed before the old MQTT session expires.
+    """
+    coordinator, mqtt_client, _ = coordinator_setup()
+
+    callback_started = asyncio.Event()
+    callback_release = asyncio.Event()
+    callback_finished = asyncio.Event()
+    callback_cancelled = False
+
+    async def on_reconnected() -> None:
+        nonlocal callback_cancelled
+        callback_started.set()
+        try:
+            await callback_release.wait()
+        except asyncio.CancelledError:
+            callback_cancelled = True
+            raise
+        finally:
+            callback_finished.set()
+
+    coordinator.register_reconnected_callback(on_reconnected)
+
+    await coordinator.connect()
+    coordinator.start_supervisor()
+
+    try:
+        coordinator.request_reconnect(ReconnectReason.TOKEN_RENEWED)
+        await asyncio.wait_for(callback_started.wait(), timeout=0.3)
+        connect_count_after_first_reconnect = mqtt_client.connect_call_count
+
+        coordinator.request_reconnect(ReconnectReason.TOKEN_RENEWED)
+        await asyncio.sleep(0.2)
+
+        assert callback_cancelled is False
+        assert callback_finished.is_set() is False
+        assert mqtt_client.connect_call_count >= connect_count_after_first_reconnect + 1
+    finally:
+        callback_release.set()
+        await asyncio.wait_for(callback_finished.wait(), timeout=0.3)
+        await coordinator.stop_supervisor()
+
+
+@pytest.mark.asyncio
+async def test_stop_supervisor_cancels_background_reconnected_callbacks(
+    coordinator_setup,
+) -> None:
+    """Background reconnected callbacks are cancelled during coordinator shutdown."""
+    coordinator, _, _ = coordinator_setup()
+
+    callback_started = asyncio.Event()
+    callback_cancelled = asyncio.Event()
+
+    async def on_reconnected() -> None:
+        callback_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            callback_cancelled.set()
+            raise
+
+    coordinator.register_reconnected_callback(on_reconnected)
+
+    await coordinator.connect()
+    coordinator.start_supervisor()
+    coordinator.request_reconnect(ReconnectReason.TOKEN_RENEWED)
+
+    await asyncio.wait_for(callback_started.wait(), timeout=0.3)
+    await coordinator.stop_supervisor()
+
+    assert callback_cancelled.is_set()
+    assert coordinator._background_callback_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_disconnected_callback_invoked(coordinator_setup):
     """Test that disconnected callbacks are invoked during reconnection."""
     coordinator, mqtt_client, _ = coordinator_setup()
@@ -319,7 +400,7 @@ async def test_disconnected_callback_invoked(coordinator_setup):
     callback_invoked = asyncio.Event()
     received_reason = None
 
-    def on_disconnected(reason):
+    async def on_disconnected(reason) -> None:
         nonlocal received_reason
         received_reason = reason
         callback_invoked.set()
@@ -403,7 +484,11 @@ async def test_disconnect_event_callback_fires_for_unexpected_only(coordinator_s
     mqtt_client.last_disconnect_rc = 142
 
     events = []
-    coordinator.register_disconnect_event_callback(events.append)
+
+    async def on_disconnect_event(record) -> None:
+        events.append(record)
+
+    coordinator.register_disconnect_event_callback(on_disconnect_event)
 
     await coordinator.connect()
     coordinator.start_supervisor()
@@ -428,6 +513,30 @@ async def test_disconnect_event_callback_fires_for_unexpected_only(coordinator_s
     assert payload["reasonCode"] == 142
     assert payload["willReconnect"] is True
     assert "T" in payload["at"]  # ISO-8601 timestamp
+
+
+@pytest.mark.asyncio
+async def test_sync_reconnect_callbacks_are_rejected(coordinator_setup):
+    """Sync callbacks are rejected because they can block the event loop before timeout."""
+    coordinator, _, _ = coordinator_setup()
+
+    def sync_reconnected() -> None:
+        return None
+
+    def sync_disconnected(_reason) -> None:
+        return None
+
+    def sync_disconnect_event(_record) -> None:
+        return None
+
+    with pytest.raises(TypeError, match="Reconnected callback"):
+        coordinator.register_reconnected_callback(sync_reconnected)
+
+    with pytest.raises(TypeError, match="Disconnected callback"):
+        coordinator.register_disconnected_callback(sync_disconnected)
+
+    with pytest.raises(TypeError, match="Disconnect-event callback"):
+        coordinator.register_disconnect_event_callback(sync_disconnect_event)
 
 
 @pytest.mark.asyncio

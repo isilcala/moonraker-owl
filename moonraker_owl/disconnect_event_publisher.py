@@ -38,7 +38,7 @@ class DisconnectEventPublisher:
         self._device_id = str(device_id)
         self._topic = constants.MQTTTopics.for_device(self._device_id).events_disconnect
 
-    def publish(self, record: DisconnectRecord) -> None:
+    async def publish(self, record: DisconnectRecord) -> None:
         """Build and publish a disconnect event (best-effort; never raises)."""
         try:
             payload = self.build_envelope(record)

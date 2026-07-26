@@ -506,6 +506,128 @@ async def test_schedule_state_transition_uses_tracked_task() -> None:
     assert app._state == AgentState.ACTIVE
 
 
+@pytest.mark.asyncio
+async def test_connection_restored_retries_when_reconnect_happens_mid_restore() -> None:
+    """A later reconnect must queue another restore instead of being dropped."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.ACTIVE
+    app._mqtt_ready = True
+    app._component_restart_lock = asyncio.Lock()
+
+    restore_started = asyncio.Event()
+    release_first_restore = asyncio.Event()
+    restore_runs: list[ReconnectReason | None] = []
+
+    async def _fake_do_connection_restored(
+        self: MoonrakerOwlApp,
+        recovery_epoch: int,
+        reason: ReconnectReason | None,
+    ) -> None:
+        restore_runs.append(reason)
+        restore_started.set()
+        if len(restore_runs) == 1:
+            await release_first_restore.wait()
+
+    app._do_connection_restored = types.MethodType(  # type: ignore[method-assign]
+        _fake_do_connection_restored,
+        app,
+    )
+
+    await app._on_connection_lost(ReconnectReason.CONNECTION_LOST)
+    await app._on_connection_restored()
+    await asyncio.wait_for(restore_started.wait(), timeout=0.2)
+
+    await app._on_connection_lost(ReconnectReason.TOKEN_RENEWED)
+    await app._on_connection_restored()
+
+    await asyncio.sleep(0)
+    release_first_restore.set()
+    await asyncio.gather(*list(app._background_tasks), return_exceptions=True)
+
+    assert restore_runs == [
+        ReconnectReason.CONNECTION_LOST,
+        ReconnectReason.TOKEN_RENEWED,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stale_connection_restore_does_not_mark_agent_active() -> None:
+    """A restore for an old reconnect epoch must not reactivate the agent."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.RECOVERING
+    app._mqtt_ready = False
+    app._connection_recovery_epoch = 1
+
+    async def _fake_restart_components(
+        self: MoonrakerOwlApp,
+        *,
+        preserve_print_state: bool = False,
+    ) -> bool:
+        self._connection_recovery_epoch = 2
+        self._mqtt_ready = False
+        return True
+
+    app._restart_components = types.MethodType(  # type: ignore[method-assign]
+        _fake_restart_components,
+        app,
+    )
+
+    await app._do_connection_restored(
+        1,
+        ReconnectReason.CONNECTION_LOST,
+    )
+
+    assert app._state == AgentState.RECOVERING
+    assert app._mqtt_ready is False
+
+
+@pytest.mark.asyncio
+async def test_connection_restored_continues_to_new_epoch_after_restore_exception() -> None:
+    """A crashing stale restore must not drop a newer queued restore request."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.ACTIVE
+    app._mqtt_ready = True
+    app._component_restart_lock = asyncio.Lock()
+
+    restore_started = asyncio.Event()
+    release_first_restore = asyncio.Event()
+    restore_runs: list[ReconnectReason | None] = []
+
+    async def _fake_do_connection_restored(
+        self: MoonrakerOwlApp,
+        recovery_epoch: int,
+        reason: ReconnectReason | None,
+    ) -> None:
+        restore_runs.append(reason)
+        if len(restore_runs) == 1:
+            restore_started.set()
+            await release_first_restore.wait()
+            raise RuntimeError("boom-first-restore")
+
+    app._do_connection_restored = types.MethodType(  # type: ignore[method-assign]
+        _fake_do_connection_restored,
+        app,
+    )
+
+    await app._on_connection_lost(ReconnectReason.CONNECTION_LOST)
+    await app._on_connection_restored()
+    await asyncio.wait_for(restore_started.wait(), timeout=0.2)
+
+    await app._on_connection_lost(ReconnectReason.TOKEN_RENEWED)
+    await app._on_connection_restored()
+
+    release_first_restore.set()
+    await asyncio.gather(*list(app._background_tasks), return_exceptions=True)
+
+    assert restore_runs == [
+        ReconnectReason.CONNECTION_LOST,
+        ReconnectReason.TOKEN_RENEWED,
+    ]
+
+
 
 class _FakePublishClient:
     def __init__(self):

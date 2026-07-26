@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from moonraker_owl import constants
 from moonraker_owl.connection import DisconnectRecord, ReconnectReason
 from moonraker_owl.disconnect_event_publisher import DisconnectEventPublisher
@@ -40,11 +42,12 @@ def _record() -> DisconnectRecord:
     )
 
 
-def test_publish_uses_disconnect_topic_qos1_not_retained() -> None:
+@pytest.mark.asyncio
+async def test_publish_uses_disconnect_topic_qos1_not_retained() -> None:
     mqtt = FakeMQTT()
     pub = DisconnectEventPublisher(mqtt_client=mqtt, device_id=DEVICE_ID)
 
-    pub.publish(_record())
+    await pub.publish(_record())
 
     assert len(mqtt.published) == 1
     msg = mqtt.published[0]
@@ -73,24 +76,26 @@ def test_envelope_shape() -> None:
     }
 
 
-def test_published_payload_round_trips() -> None:
+@pytest.mark.asyncio
+async def test_published_payload_round_trips() -> None:
     mqtt = FakeMQTT()
     pub = DisconnectEventPublisher(mqtt_client=mqtt, device_id=DEVICE_ID)
 
-    pub.publish(_record())
+    await pub.publish(_record())
 
     decoded = json.loads(mqtt.published[0]["payload"].decode("utf-8"))
     assert decoded["$type"] == "telemetry.event.disconnect"
     assert decoded["payload"]["cause"] == "connection_lost"
 
 
-def test_publish_failure_is_swallowed() -> None:
+@pytest.mark.asyncio
+async def test_publish_failure_is_swallowed() -> None:
     mqtt = FakeMQTT()
     mqtt.raise_on_publish = True
     pub = DisconnectEventPublisher(mqtt_client=mqtt, device_id=DEVICE_ID)
 
     # Must not raise even though the underlying publish raises.
-    pub.publish(_record())
+    await pub.publish(_record())
 
     assert mqtt.published == []
 
