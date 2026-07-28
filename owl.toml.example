@@ -26,13 +26,14 @@
 # Official Owl plugin releases may overwrite this bootstrap key during
 # install/update so all managed printers move to the current public cloud
 # target before they reconnect.
-base_url = ""
+base_url = "https://staging.mewcon.net"
+allowed_storage_hosts = ["uploads.staging.mewcon.net"]
 
 # MQTT broker for real-time communication. REQUIRED.
 # Uses TLS on port 8883 by default.
 # Official Owl plugin releases may also overwrite this bootstrap key and its
 # companion broker_port / broker_use_tls values during install/update.
-broker_host = ""
+broker_host = "mqtt.staging.mewcon.net"
 broker_port = 8883
 broker_use_tls = true
 
