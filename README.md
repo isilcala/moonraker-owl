@@ -110,9 +110,13 @@ The agent uses a three-tier configuration model:
 | **B** (Credentials) | `~/.moonraker-owl/credentials.json` | Per-device secrets | `device_id`, `device_secret` |
 | **C** (Cloud) | Cloud API + LKG cache | Fleet-managed | Telemetry cadence, camera settings, compression |
 
-- **Tier A** — edited by the user in the TOML file. Infrastructure settings that vary per physical installation.
+- **Tier A** — edited by the user in the TOML file. Infrastructure settings that vary per physical installation. The package owns a small managed bootstrap subset of `[cloud]` (`base_url`, `broker_host`, `broker_port`, `broker_use_tls`) and may overwrite those keys during plugin updates before the agent tries to connect to Owl Cloud.
 - **Tier B** — written automatically during the `link` command. Stored separately from the config file so TOML remains safe to share. Legacy `~/.owl/device.json` is auto-migrated.
 - **Tier C** — fetched from the cloud API on startup and periodically refreshed. A last-known-good (LKG) cache at `~/.moonraker-owl/cloud-config.json` is used when the cloud is unreachable. Changes pushed via MQTT notifications are applied immediately without restart.
+
+For rare mandatory domain cutovers, the reliable path is Tier A migration in the plugin release. `scripts/install.sh` runs `moonraker-owl migrate-config` on every install/update and force-aligns the package-managed `[cloud]` bootstrap keys to the current official Owl target. A backup is written next to the TOML file before any rewrite. Developers who intentionally point the plugin at a custom backend need to re-edit those keys after the update.
+
+For the full release, rollout, rollback, and validation workflow, see [docs/guides/moonraker-staging-domain-cutover.md](../docs/guides/moonraker-staging-domain-cutover.md).
 
 ### Key Settings
 
@@ -129,7 +133,7 @@ See `owl.toml.example` for all available options with descriptions.
 
 ### Default Environment
 
-The agent is pre-configured to connect to the **Staging environment**:
+The current Owl-managed staging environment is:
 
 | Setting | Default Value |
 |---------|---------------|

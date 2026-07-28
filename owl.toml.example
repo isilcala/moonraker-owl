@@ -22,12 +22,19 @@
 # refuses to start if this is missing so it cannot silently target a
 # developer environment. Ask your operator for the correct value, e.g.:
 #   base_url = "https://owl.example.com"
+#
+# Official Owl plugin releases may overwrite this bootstrap key during
+# install/update so all managed printers move to the current public cloud
+# target before they reconnect.
 base_url = ""
 
 # MQTT broker for real-time communication. REQUIRED.
 # Uses TLS on port 8883 by default.
+# Official Owl plugin releases may also overwrite this bootstrap key and its
+# companion broker_port / broker_use_tls values during install/update.
 broker_host = ""
 broker_port = 8883
+broker_use_tls = true
 
 # Audit A-02 / A-03 (Sprint 2): allowlist of additional hosts the cloud
 # is allowed to send the agent to via `task:download-gcode` (downloadUrl)

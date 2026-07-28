@@ -190,6 +190,30 @@ create_config() {
     fi
 }
 
+migrate_config() {
+    if [[ ! -f "${CONFIG_FILE}" ]]; then
+        return
+    fi
+
+    print_info "Checking configuration migrations..."
+
+    local migration_output
+    if migration_output=$("${VENV_DIR}/bin/moonraker-owl" --config "${CONFIG_FILE}" migrate-config 2>&1); then
+        if [[ -n "${migration_output}" ]]; then
+            while IFS= read -r line; do
+                print_info "${line}"
+            done <<< "${migration_output}"
+        fi
+    else
+        print_warn "Configuration migration failed; keeping existing configuration."
+        if [[ -n "${migration_output}" ]]; then
+            while IFS= read -r line; do
+                print_warn "${line}"
+            done <<< "${migration_output}"
+        fi
+    fi
+}
+
 install_service() {
     print_info "Installing systemd service..."
 
@@ -311,6 +335,7 @@ main() {
     create_virtualenv
     install_package
     create_config
+    migrate_config
     install_service
     print_next_steps
 }

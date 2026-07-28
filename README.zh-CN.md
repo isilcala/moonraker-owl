@@ -101,6 +101,10 @@ sudo systemctl restart moonraker
 
 配置文件位于 `~/printer_data/config/moonraker-owl.toml`。
 
+`base_url` / `broker_host` 属于设备本地引导配置。对于极少发生但必须覆盖所有打印机的域名迁移，可靠路径是随插件版本发布本地配置迁移，而不是只依赖旧云端下发热更新。`scripts/install.sh` 每次安装/升级都会执行 `moonraker-owl migrate-config`，并把 `[cloud]` 中由插件版本托管的引导键（`base_url`、`broker_host`、`broker_port`、`broker_use_tls`）强制对齐到当前官方 Owl 目标。迁移前会在 TOML 文件旁创建备份。开发者如果故意改成本地/自托管端点，需要在升级后自行改回。
+
+完整的发布、执行、回滚和验证流程，见 [docs/guides/moonraker-staging-domain-cutover.md](../docs/guides/moonraker-staging-domain-cutover.md)。
+
 ### 主要设置
 
 | 配置节 | 设置项 | 说明 |
@@ -116,7 +120,7 @@ sudo systemctl restart moonraker
 
 ### 默认环境
 
-Agent 默认配置连接到**测试环境（Staging）**：
+当前 Owl 托管 staging 环境为：
 
 | 设置项 | 默认值 |
 |--------|--------|
