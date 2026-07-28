@@ -133,9 +133,9 @@ The agent is pre-configured to connect to the **Staging environment**:
 
 | Setting | Default Value |
 |---------|---------------|
-| API Endpoint | `https://owl.elencala.com` |
-| MQTT Broker | `mqtt.owl.elencala.com:8883` (TLS) |
-| Web Interface | `https://owl.elencala.com` |
+| API Endpoint | `https://staging.mewcon.net` |
+| MQTT Broker | `mqtt.staging.mewcon.net:8883` (TLS) |
+| Web Interface | `https://staging.mewcon.net` |
 
 ### Camera Setup
 

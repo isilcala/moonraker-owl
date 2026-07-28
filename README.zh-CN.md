@@ -120,9 +120,9 @@ Agent 默认配置连接到**测试环境（Staging）**：
 
 | 设置项 | 默认值 |
 |--------|--------|
-| API 地址 | `https://owl.elencala.com` |
-| MQTT 服务器 | `mqtt.owl.elencala.com:8883` (TLS) |
-| Web 界面 | `https://owl.elencala.com` |
+| API 地址 | `https://staging.mewcon.net` |
+| MQTT 服务器 | `mqtt.staging.mewcon.net:8883` (TLS) |
+| Web 界面 | `https://staging.mewcon.net` |
 
 ### 摄像头设置
 
