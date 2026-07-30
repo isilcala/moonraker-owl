@@ -25,7 +25,7 @@ Owl Cloud 打印机代理程序，用于连接 Moonraker 驱动的 3D 打印机�
 
 ```bash
 cd ~
-git clone git clone https://gitee.com/isilcala/moonraker-owl.git
+git clone https://gitee.com/isilcala/moonraker-owl.git moonraker-owl
 cd moonraker-owl
 ```
 
@@ -84,9 +84,10 @@ type: git_repo
 path: ~/moonraker-owl
 origin: https://gitee.com/isilcala/moonraker-owl.git
 primary_branch: main
+# 保留以下两项：requirements.txt 变化时 Update Manager 会据此重装 Python 依赖。
+# 本插件没有 apt 系统依赖，因此无需 install_script / system_dependencies。
 virtualenv: ~/moonraker-owl/.venv
 requirements: requirements.txt
-install_script: scripts/install.sh
 is_system_service: True
 managed_services: moonraker-owl
 ```
@@ -101,7 +102,7 @@ sudo systemctl restart moonraker
 
 配置文件位于 `~/printer_data/config/moonraker-owl.toml`。
 
-`base_url` / `broker_host` 属于设备本地引导配置。对于极少发生但必须覆盖所有打印机的域名迁移，可靠路径是随插件版本发布本地配置迁移，而不是只依赖旧云端下发热更新。`scripts/install.sh` 每次安装/升级都会执行 `moonraker-owl migrate-config`，并把 `[cloud]` 中由插件版本托管的引导键（`base_url`、`broker_host`、`broker_port`、`broker_use_tls`）强制对齐到当前官方 Owl 目标。迁移前会在 TOML 文件旁创建备份。开发者如果故意改成本地/自托管端点，需要在升级后自行改回。
+Owl Cloud 端点（`base_url`、`broker_host`、`broker_port`、`broker_use_tls`）是**厂商托管默认值**，随插件发布在 `moonraker_owl/managed_defaults.py` 中（git 跟踪）。对于极少发生但必须覆盖全队的域名/broker 迁移：修改 `managed_defaults.py` 并发布新版本即可——Moonraker 通过 `git`（独立于 Owl 云）更新插件时会覆盖该文件，设备重启后连到新端点，即使旧域名已下线也能恢复。注意：Moonraker 默认**不自动安装**更新，需保留旧端点一个过渡窗口并提醒用户更新。开发者若在用户 TOML 的 `[cloud]` 中显式覆盖端点，需自行维护。
 
 完整的发布、执行、回滚和验证流程，见 [docs/guides/moonraker-staging-domain-cutover.md](../docs/guides/moonraker-staging-domain-cutover.md)。
 

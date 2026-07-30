@@ -25,7 +25,7 @@ Owl Cloud companion agent for Moonraker-powered 3D printers. This service connec
 
 ```bash
 cd ~
-git clone https://gitee.com/project-owl/agent.git moonraker-owl
+git clone https://gitee.com/isilcala/moonraker-owl.git moonraker-owl
 cd moonraker-owl
 ```
 
@@ -83,9 +83,11 @@ type: git_repo
 path: ~/moonraker-owl
 origin: https://gitee.com/isilcala/moonraker-owl.git
 primary_branch: main
+# Keep both of these set so Update Manager reinstalls Python dependencies when
+# requirements.txt changes. The plugin has no apt system packages, so no
+# install_script / system_dependencies entry is needed.
 virtualenv: ~/moonraker-owl/.venv
 requirements: requirements.txt
-install_script: scripts/install.sh
 is_system_service: True
 managed_services: moonraker-owl
 ```
@@ -106,15 +108,17 @@ The agent uses a three-tier configuration model:
 
 | Tier | Source | Scope | Example Settings |
 |------|--------|-------|------------------|
-| **A** (Infra) | `moonraker-owl.toml` | Local on-device | `base_url`, `broker_host`, `moonraker.url`, `logging.level` |
+| **A0** (Managed) | `moonraker_owl/managed_defaults.py` (git-tracked, in-tree) | Vendor-managed, updated via plugin update | `base_url`, `broker_host`, `broker_port`, `broker_use_tls` |
+| **A** (User infra) | `moonraker-owl.toml` | Local on-device, user-editable | `moonraker.url`, `logging.level`, `camera.*` |
 | **B** (Credentials) | `~/.moonraker-owl/credentials.json` | Per-device secrets | `device_id`, `device_secret` |
 | **C** (Cloud) | Cloud API + LKG cache | Fleet-managed | Telemetry cadence, camera settings, compression |
 
-- **Tier A** — edited by the user in the TOML file. Infrastructure settings that vary per physical installation. The package owns a small managed bootstrap subset of `[cloud]` (`base_url`, `broker_host`, `broker_port`, `broker_use_tls`) and may overwrite those keys during plugin updates before the agent tries to connect to Owl Cloud.
+- **Tier A0 (managed)** — the official Owl Cloud endpoints, shipped in the plugin's git tree (`managed_defaults.py`). A plugin update (Moonraker's `git reset --hard`) overwrites them, so a rare domain/broker cutover propagates by shipping a new plugin version — no local file edit. An explicit value under `[cloud]` in the user TOML overrides the managed default (developer / self-host escape hatch).
+- **Tier A (user infra)** — edited by the user in the TOML file: settings that vary per physical installation (`moonraker.url`, `logging.level`, `camera.*`). The vendor never overwrites this file.
 - **Tier B** — written automatically during the `link` command. Stored separately from the config file so TOML remains safe to share. Legacy `~/.owl/device.json` is auto-migrated.
 - **Tier C** — fetched from the cloud API on startup and periodically refreshed. A last-known-good (LKG) cache at `~/.moonraker-owl/cloud-config.json` is used when the cloud is unreachable. Changes pushed via MQTT notifications are applied immediately without restart.
 
-For rare mandatory domain cutovers, the reliable path is Tier A migration in the plugin release. `scripts/install.sh` runs `moonraker-owl migrate-config` on every install/update and force-aligns the package-managed `[cloud]` bootstrap keys to the current official Owl target. A backup is written next to the TOML file before any rewrite. Developers who intentionally point the plugin at a custom backend need to re-edit those keys after the update.
+For rare mandatory domain/broker cutovers, the reliable path is to bump the managed defaults in `managed_defaults.py` and ship a new plugin version. Because Moonraker's Update Manager updates the plugin via `git` (independent of Owl Cloud), each device picks up the new endpoints the next time its plugin is updated — even if the old domain is already gone. Note: Moonraker does **not** auto-install updates by default, so keep the old endpoint reachable during a transition window and prompt users to update. Developers who override the endpoints in their user TOML must update them manually.
 
 For the full release, rollout, rollback, and validation workflow, see [docs/guides/moonraker-staging-domain-cutover.md](../docs/guides/moonraker-staging-domain-cutover.md).
 
@@ -122,8 +126,8 @@ For the full release, rollout, rollback, and validation workflow, see [docs/guid
 
 | Section | Setting | Description |
 |---------|---------|-------------|
-| `[cloud]` | `base_url` | Owl Cloud API endpoint |
-| `[cloud]` | `broker_host` | MQTT broker address |
+| `[cloud]` | `base_url` | Owl Cloud API endpoint (vendor-managed; override optional) |
+| `[cloud]` | `broker_host` | MQTT broker address (vendor-managed; override optional) |
 | `[moonraker]` | `url` | Local Moonraker API URL |
 | `[camera]` | `enabled` | Enable camera capture for AI detection |
 | `[camera]` | `snapshot_url` | Webcam snapshot URL |

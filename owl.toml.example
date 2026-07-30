@@ -8,55 +8,33 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# [cloud] - Owl Cloud Connection (Infrastructure Only)
+# [cloud] - Owl Cloud Connection
 # -----------------------------------------------------------------------------
-# Network infrastructure settings for reaching the Owl Cloud.
+# The Owl Cloud endpoints (base_url, broker_host, broker_port, broker_use_tls)
+# are VENDOR-MANAGED and ship with the plugin (moonraker_owl/managed_defaults.py).
+# They update automatically when you update the plugin via Moonraker's Update
+# Manager, so you normally do NOT set them here.
+#
 # Device credentials are stored separately in ~/.moonraker-owl/credentials.json
-# and are populated automatically by `moonraker-owl link`.
-#
-# IMPORTANT: do NOT put `password` or `device_private_key` in this file.
-# Those keys are deprecated and will be removed in a future release; the
-# secure location is ~/.moonraker-owl/credentials.json (mode 0600).
+# (mode 0600) and are populated automatically by `moonraker-owl link`. Do NOT
+# put `password` or `device_private_key` in this file.
 [cloud]
-# Owl Cloud API endpoint. REQUIRED — there is no shipped default; the agent
-# refuses to start if this is missing so it cannot silently target a
-# developer environment. Ask your operator for the correct value, e.g.:
+# ADVANCED / developers only. To point this agent at a custom or self-hosted
+# backend, uncomment and set the endpoints below. Any value set here OVERRIDES
+# the managed default for THIS device and will not be changed by plugin updates,
+# so remember to update it yourself if your backend moves.
 #   base_url = "https://owl.example.com"
-#
-# Official Owl plugin releases may overwrite this bootstrap key during
-# install/update so all managed printers move to the current public cloud
-# target before they reconnect.
-base_url = "https://staging.mewcon.net"
-allowed_storage_hosts = ["uploads.staging.mewcon.net"]
+#   broker_host = "mqtt.owl.example.com"
+#   broker_port = 8883
+#   broker_use_tls = true
 
-# MQTT broker for real-time communication. REQUIRED.
-# Uses TLS on port 8883 by default.
-# Official Owl plugin releases may also overwrite this bootstrap key and its
-# companion broker_port / broker_use_tls values during install/update.
-broker_host = "mqtt.staging.mewcon.net"
-broker_port = 8883
-broker_use_tls = true
-
-# Audit A-02 / A-03 (Sprint 2): allowlist of additional hosts the cloud
-# is allowed to send the agent to via `task:download-gcode` (downloadUrl)
-# and `task:capture-image` (uploadUrl). The host parsed from `base_url`
-# above is always implicitly trusted, so you only need this list when
-# downloads / uploads target a different host (typically object storage).
-#
-# Entries may be:
-#   * exact hostnames     — "files.example.com"
-#   * suffix matches      — ".amazonaws.com" matches any subdomain
-#   * IP literals (dev)   — "127.0.0.1" or "192.168.1.50" are accepted
-#                           ONLY when listed verbatim here (to allow
-#                           local MinIO / dev setups). Otherwise
-#                           private/loopback IPs are rejected as SSRF.
-#
-# Example for production with Aliyun OSS:
-#   allowed_storage_hosts = [".aliyuncs.com"]
-#
-# Example for local development with MinIO:
+# Optional: extra hosts the cloud may send download/upload URLs to, used by
+# `task:download-gcode` (downloadUrl) and `task:capture-image` (uploadUrl). The
+# host from base_url is always trusted, and the cloud normally delivers this
+# list via the device-config API (Tier C), so you only need this for local/dev
+# setups (e.g. MinIO). Entries may be exact hosts ("files.example.com"), suffix
+# matches (".aliyuncs.com"), or verbatim loopback/private IPs ("127.0.0.1").
 #   allowed_storage_hosts = ["127.0.0.1"]
-allowed_storage_hosts = []
 
 # -----------------------------------------------------------------------------
 # [moonraker] - Local Moonraker Connection

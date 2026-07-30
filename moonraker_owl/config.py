@@ -15,9 +15,8 @@ try:
 except ModuleNotFoundError:  # Python < 3.11
     import tomli as tomllib  # type: ignore[no-redef]
 
-import tomli_w
-
 from . import constants
+from . import managed_defaults
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,10 +78,10 @@ class TelemetryCadenceConfig:
 
 @dataclass(slots=True)
 class CloudConfig:
-    base_url: str = constants.DEFAULT_LINK_BASE_URL
-    broker_host: str = constants.DEFAULT_BROKER_HOST
-    broker_port: int = 8883
-    broker_use_tls: bool = True  # Enable TLS for MQTT connection (default: True for port 8883)
+    base_url: str = managed_defaults.MANAGED_BASE_URL
+    broker_host: str = managed_defaults.MANAGED_BROKER_HOST
+    broker_port: int = managed_defaults.MANAGED_BROKER_PORT
+    broker_use_tls: bool = managed_defaults.MANAGED_BROKER_USE_TLS
     device_id: Optional[str] = None
     tenant_id: Optional[str] = None
     printer_id: Optional[str] = None
@@ -338,8 +337,10 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             "~/.moonraker-owl/credentials.json (run `moonraker-owl link`)."
         )
 
-    broker_host_value = str(cloud_raw.get("broker_host", constants.DEFAULT_BROKER_HOST))
-    broker_port_value = int(cloud_raw.get("broker_port", 8883))
+    # Bootstrap cloud endpoints use vendor-managed defaults (managed_defaults.py),
+    # overridable per-device by an explicit value in the user TOML.
+    broker_host_value = str(cloud_raw.get("broker_host") or managed_defaults.MANAGED_BROKER_HOST)
+    broker_port_value = int(cloud_raw.get("broker_port", managed_defaults.MANAGED_BROKER_PORT))
 
     # Support "host:port" shorthand in broker_host
     if ":" in broker_host_value:
@@ -356,7 +357,7 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
     default_use_tls = broker_port_value == 8883
 
     cloud = CloudConfig(
-        base_url=str(cloud_raw.get("base_url", constants.DEFAULT_LINK_BASE_URL)),
+        base_url=str(cloud_raw.get("base_url") or managed_defaults.MANAGED_BASE_URL),
         broker_host=broker_host_value,
         broker_port=broker_port_value,
         broker_use_tls=bool(cloud_raw.get("broker_use_tls", default_use_tls)),
@@ -370,6 +371,16 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
             str(h) for h in cloud_raw.get("allowed_storage_hosts", []) if isinstance(h, str)
         ],
     )
+
+    # Reflect the effective (managed-or-overridden) bootstrap endpoints back into
+    # raw so `show-config` and diagnostics display what the agent will actually
+    # connect to, even when these keys are omitted from the user TOML. setdefault
+    # preserves any explicit user value (including the "host:port" shorthand).
+    cloud_section = raw.setdefault("cloud", {})
+    cloud_section.setdefault("base_url", cloud.base_url)
+    cloud_section.setdefault("broker_host", cloud.broker_host)
+    cloud_section.setdefault("broker_port", cloud.broker_port)
+    cloud_section.setdefault("broker_use_tls", cloud.broker_use_tls)
 
     mr_raw = raw.get("moonraker", {})
     moonraker = MoonrakerConfig(
@@ -490,15 +501,6 @@ def load_config(path: Optional[Path] = None) -> OwlConfig:
     )
 
 
-def save_config(config: OwlConfig) -> None:
-    """Persist the current configuration to disk as TOML."""
-
-    config_path = config.path
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with config_path.open("wb") as stream:
-        tomli_w.dump(config.raw, stream)
-
-
 def load_credentials(
     path: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -556,14 +558,15 @@ class ConfigurationError(RuntimeError):
 def validate_runtime_config(config: OwlConfig) -> None:
     """Fail-fast on missing critical cloud-connection settings.
 
-    Audit A-10 / OQ-3: there is intentionally no shipped default for
-    ``cloud.base_url`` / ``cloud.broker_host``. A fresh install must explicitly
-    name its cloud target so we cannot silently route a production printer at
-    a developer endpoint.
+    Cloud bootstrap endpoints (``cloud.base_url`` / ``cloud.broker_host``) come
+    from vendor-managed defaults (``managed_defaults.py``) unless the user TOML
+    overrides them, so a normal install always has a target. This guard remains
+    as defence-in-depth for the edge case where both the managed default and the
+    user value are blank.
 
-    This is invoked at the boundary of `start` / `link` (and from the app
-    bootstrap) — `load_config` itself remains pure parsing so unit tests can
-    continue to exercise partial TOML files without tripping these checks.
+    Invoked at the boundary of `start` / `link` (and from the app bootstrap) —
+    `load_config` itself stays pure parsing so unit tests can exercise partial
+    TOML files without tripping these checks.
     """
     missing: list[str] = []
     if not config.cloud.base_url:
@@ -575,6 +578,6 @@ def validate_runtime_config(config: OwlConfig) -> None:
         joined = ", ".join(missing)
         raise ConfigurationError(
             f"Missing required configuration: {joined}. "
-            f"Set these values in {config.path} (see owl.toml.example) "
-            "before running `moonraker-owl start` or `moonraker-owl link`."
+            f"The plugin ships managed defaults; if you cleared them, set these "
+            f"under [cloud] in {config.path} or reinstall the plugin."
         )

@@ -105,24 +105,3 @@ def test_show_config_no_redaction_when_secret_absent(
     assert rc == 0
     out = capsys.readouterr().out
     assert "***redacted***" not in out
-
-
-def test_migrate_config_updates_known_staging_endpoint(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    config_path = tmp_path / "moonraker-owl.toml"
-    config_path.write_text(
-        '[cloud]\nbase_url = "https://owl.elencala.com"\n'
-        'broker_host = "mqtt.owl.elencala.com"\n',
-        encoding="utf-8",
-    )
-
-    rc = main(["-c", str(config_path), "migrate-config"])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "Configuration migration applied" in out
-    updated = config_path.read_text(encoding="utf-8")
-    assert 'base_url = "https://staging.mewcon.net"' in updated
-    assert 'broker_host = "mqtt.staging.mewcon.net"' in updated
-    assert "broker_use_tls = true" in updated

@@ -18,13 +18,11 @@ DEFAULT_LOG_PATH = Path.home() / "printer_data" / "logs" / f"{APP_NAME}.log"
 DEFAULT_MOONRAKER_HOST = "127.0.0.1"
 DEFAULT_MOONRAKER_PORT = 7125
 
-# Cloud endpoints intentionally have no shipped defaults: a fresh install
-# without an explicit cloud.base_url / cloud.broker_host MUST fail-fast
-# rather than silently connect to whatever the developer last targeted
-# (audit A-10, OQ-3). Operators must set these in
-# ~/printer_data/config/moonraker-owl.toml.
-DEFAULT_BROKER_HOST = ""
-DEFAULT_LINK_BASE_URL = ""
+# Cloud bootstrap endpoints (base_url / broker_host / broker_port / broker_use_tls)
+# are vendor-managed defaults shipped in managed_defaults.py and overwritten on
+# every plugin (git) update. A value explicitly set under [cloud] in the user
+# TOML overrides the managed default (dev / self-host escape hatch). See
+# docs/audits/moonraker-config-update-mechanism-audit-2026-07-30.md.
 
 
 class MQTTTopics:

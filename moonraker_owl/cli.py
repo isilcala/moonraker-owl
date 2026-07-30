@@ -11,7 +11,6 @@ from typing import Optional
 from . import constants
 from .app import MoonrakerOwlApp
 from .config import ConfigurationError, load_config, validate_runtime_config
-from .config_migration import ConfigMigrationError, migrate_config_file
 from .link import DeviceLinkingError, perform_linking
 
 LOGGER = logging.getLogger(__name__)
@@ -58,10 +57,6 @@ def build_parser() -> argparse.ArgumentParser:
         "show-config", help="Print the resolved configuration and exit"
     )
 
-    subparsers.add_parser(
-        "migrate-config", help="Apply safe local configuration migrations and exit"
-    )
-
     return parser
 
 
@@ -101,22 +96,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                 for key, value in values.items():
                     print(f"{key} = {_format_config_value(section, key, value)}")
                 print()
-        return 0
-
-    if args.command == "migrate-config":
-        try:
-            result = migrate_config_file(args.config)
-        except ConfigMigrationError as exc:
-            LOGGER.error("Configuration migration failed: %s", exc)
-            return 1
-
-        if result.changed:
-            joined = ", ".join(result.changes)
-            print(f"Configuration migration applied: {joined}")
-            if result.backup_path is not None:
-                print(f"Backup written to: {result.backup_path}")
-        else:
-            print(f"No configuration migration needed: {result.skipped_reason}")
         return 0
 
     LOGGER.error("Unknown command: %s", args.command)
