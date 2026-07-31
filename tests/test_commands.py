@@ -245,6 +245,39 @@ def config() -> OwlConfig:
 
 
 @pytest.mark.asyncio
+async def test_command_processor_start_is_idempotent(config):
+    """start() must be a safe no-op when already subscribed.
+
+    Recovery/restart paths (Moonraker recovery, startup retry) can re-invoke
+    start() on a reused, still-subscribed processor. Previously the second call
+    raised RuntimeError, which aborted the app's restart flow and orphaned the
+    command processor (staging telemetry-loss incident 2026-07-30). A redundant
+    start must not raise, double-subscribe, or drop the message handler.
+    """
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+    assert len(mqtt.subscriptions) == 1
+    assert mqtt.handler is not None
+
+    # Must not raise and must remain subscribed with the handler intact.
+    await processor.start()
+    assert len(mqtt.subscriptions) == 1
+    assert mqtt.handler is not None
+
+    # After a clean stop, start() subscribes again (recovery re-subscribe path).
+    await processor.stop()
+    assert mqtt.handler is None
+    await processor.start()
+    assert len(mqtt.subscriptions) == 2
+    assert mqtt.handler is not None
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
 async def test_command_processor_executes_action_and_sends_ack(config):
     """Test state-based completion for pause/resume/cancel commands.
     

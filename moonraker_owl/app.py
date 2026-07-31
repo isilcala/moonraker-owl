@@ -158,6 +158,10 @@ class MoonrakerOwlApp:
         self._status_listener_registered = False
         self._moonraker_recovery_lock: Optional[asyncio.Lock] = None
         self._component_restart_lock: Optional[asyncio.Lock] = None
+        # Serializes every runtime component (re)start path so telemetry.start()
+        # and processor.start() can never run concurrently on the shared
+        # publisher/processor instances (see _start_runtime_components).
+        self._runtime_start_lock: Optional[asyncio.Lock] = None
         self._component_restart_in_progress = False
         self._connection_recovery_epoch = 0
         self._connection_restore_requested_epoch = 0
@@ -204,6 +208,7 @@ class MoonrakerOwlApp:
         self._shutdown_event = asyncio.Event()
         self._moonraker_recovery_lock = asyncio.Lock()
         self._component_restart_lock = asyncio.Lock()
+        self._runtime_start_lock = asyncio.Lock()
 
         LOGGER.info("moonraker-owl starting with config: %s", self._config.path)
         started = await self._start_services()
@@ -241,6 +246,16 @@ class MoonrakerOwlApp:
                 return
 
             if self._stopping:
+                return
+
+            # Another recovery path (Moonraker recovery / connection restored)
+            # may have already brought the runtime up. Re-running full startup
+            # would race those paths and needlessly restart components, so defer
+            # to them once the agent is active.
+            if self._state == AgentState.ACTIVE:
+                LOGGER.info(
+                    "Runtime already active; stopping startup retry loop"
+                )
                 return
 
             LOGGER.info("Attempting to restart services...")
@@ -730,6 +745,11 @@ class MoonrakerOwlApp:
             LOGGER.warning("Cannot start HealthPublisher: MQTT client not available")
             return
 
+        # Idempotent: the startup-retry loop can call this repeatedly across
+        # degraded retries. Stop any previous publisher first so we never orphan
+        # a running task.
+        await self._stop_health_publisher()
+
         self._health_publisher = HealthPublisher(
             mqtt_client=self._mqtt_client,
             device_id=device_id,
@@ -970,6 +990,25 @@ class MoonrakerOwlApp:
         return True
 
     async def _start_runtime_components(
+        self, *, preserve_print_state: bool = False
+    ) -> bool:
+        # Serialize every runtime component (re)start path — initial startup,
+        # the startup-retry loop, connection-restored, and Moonraker recovery —
+        # through a single lock. Without it two paths can call telemetry.start()
+        # / processor.start() on the shared instances concurrently and corrupt
+        # the publisher's worker + Moonraker subscription, silently killing
+        # telemetry while the printer still appears online (staging incident
+        # 2026-07-30: printer online but no telemetry after a boot-order race).
+        lock = self._runtime_start_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._runtime_start_lock = lock
+        async with lock:
+            return await self._start_runtime_components_locked(
+                preserve_print_state=preserve_print_state
+            )
+
+    async def _start_runtime_components_locked(
         self, *, preserve_print_state: bool = False
     ) -> bool:
         if self._printer_backend is None or self._mqtt_client is None:

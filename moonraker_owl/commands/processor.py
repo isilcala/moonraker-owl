@@ -226,7 +226,12 @@ class CommandProcessor(
 
     async def start(self) -> None:
         if self._handler_registered:
-            raise RuntimeError("CommandProcessor already started")
+            # Idempotent: recovery/restart paths (Moonraker recovery, startup
+            # retry) may re-invoke start() on a reused, still-subscribed
+            # processor. The old `raise` aborted the caller's restart flow and
+            # orphaned the processor, so treat a redundant start as a no-op.
+            LOGGER.debug("CommandProcessor.start() ignored; already started")
+            return
 
         self._loop = asyncio.get_running_loop()
         self._mqtt.set_message_handler(self._handle_message)

@@ -693,3 +693,116 @@ def test_start_exits_nonzero_after_fatal_runtime(monkeypatch) -> None:
         MoonrakerOwlApp.start(build_config())
 
     assert exc.value.code == 1
+
+
+@pytest.mark.asyncio
+async def test_start_runtime_components_serializes_concurrent_restarts() -> None:
+    """All runtime-restart paths must be serialized by a single lock.
+
+    Regression for the staging telemetry-loss incident (2026-07-30): a
+    boot-order race let the startup-retry loop and the Moonraker-recovery path
+    call _start_runtime_components() concurrently, running telemetry.start() on
+    the shared publisher in parallel and corrupting its worker + Moonraker
+    subscription. Telemetry then went silent while the printer still showed
+    online. The lock must let only one (re)start run at a time.
+    """
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+
+    active = 0
+    max_active = 0
+
+    async def _fake_locked(
+        self: MoonrakerOwlApp, *, preserve_print_state: bool = False
+    ) -> bool:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return True
+
+    app._start_runtime_components_locked = types.MethodType(  # type: ignore[method-assign]
+        _fake_locked, app
+    )
+
+    results = await asyncio.gather(
+        app._start_runtime_components(),
+        app._start_runtime_components(),
+        app._start_runtime_components(),
+    )
+
+    assert results == [True, True, True]
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_retry_loop_stops_when_runtime_active(monkeypatch) -> None:
+    """The startup-retry loop must defer to other recovery paths once active.
+
+    Once any path (Moonraker recovery / connection restored) brings the runtime
+    up, the startup-retry loop must exit instead of re-running full startup and
+    racing those paths.
+    """
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.ACTIVE
+
+    start_services_calls = 0
+
+    async def _fake_start_services(self: MoonrakerOwlApp) -> bool:
+        nonlocal start_services_calls
+        start_services_calls += 1
+        return False
+
+    app._start_services = types.MethodType(  # type: ignore[method-assign]
+        _fake_start_services, app
+    )
+
+    _real_sleep = asyncio.sleep
+
+    async def _fast_sleep(_delay: float, *args: Any, **kwargs: Any) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    await asyncio.wait_for(app._startup_retry_loop(), timeout=1.0)
+
+    assert start_services_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_start_health_publisher_replaces_previous_publisher(monkeypatch) -> None:
+    """Repeated _start_health_publisher calls must not orphan the old task.
+
+    The startup-retry loop can invoke _start_health_publisher across multiple
+    degraded retries. Each call must stop the previous publisher before creating
+    a new one so we never leak a running HealthPublisher task.
+    """
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._mqtt_client = object()
+
+    created: list[Any] = []
+
+    class _StubHealthPublisher:
+        def __init__(self, **kwargs: Any) -> None:
+            self.started = False
+            self.stopped = False
+            created.append(self)
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr("moonraker_owl.app.HealthPublisher", _StubHealthPublisher)
+
+    await app._start_health_publisher("device-1")
+    await app._start_health_publisher("device-1")
+
+    assert len(created) == 2
+    assert created[0].stopped is True
+    assert created[1].started is True
+    assert app._health_publisher is created[1]
