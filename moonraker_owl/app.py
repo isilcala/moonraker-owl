@@ -262,7 +262,13 @@ class MoonrakerOwlApp:
             # Check stopping flag before and after _start_services
             # because _start_services resets _stopping to False internally
             stopping_before = self._stopping
-            started = await self._start_services()
+            try:
+                started = await self._start_services()
+            except Exception:
+                # A raising startup attempt must never kill the retry loop;
+                # back off and try again.
+                LOGGER.exception("Service startup attempt raised; will retry")
+                started = False
             if stopping_before:
                 self._stopping = True
                 return
@@ -635,12 +641,27 @@ class MoonrakerOwlApp:
             detail="mqtt connected; starting runtime",
         )
 
-        runtime_ready = await self._start_runtime_components()
+        # A transient runtime-component failure (e.g. Klipper not ready yet
+        # during a boot-order race) must not abort startup before the reconnect
+        # supervisor is running. Otherwise the agent can still reach ACTIVE via a
+        # recovery path but with no supervisor, and never reconnect after the
+        # next disconnect (staging 2026-08-01: broker kicked the client at token
+        # expiry and nothing reconnected). Recovery paths already treat this
+        # failure as non-fatal; make initial startup consistent.
+        try:
+            runtime_ready = await self._start_runtime_components()
+        except Exception:
+            LOGGER.exception(
+                "Runtime component startup failed; continuing to start resilience "
+                "infrastructure in degraded mode"
+            )
+            runtime_ready = False
 
         await self._start_health_server()
         self._start_moonraker_monitor()
 
-        # Start connection supervisor via ConnectionCoordinator
+        # Start connection supervisor via ConnectionCoordinator. This is critical
+        # reconnect infrastructure and must run even when runtime startup failed.
         self._connection_coordinator.start_supervisor()
 
         # Start periodic MQTT health-snapshot publisher (audit Q6).

@@ -101,6 +101,12 @@ class _StubCloudConfigManager:
     def load_lkg(self) -> None:
         self.loaded = True
 
+    async def fetch(self, *args: Any, **kwargs: Any) -> bool:
+        return False
+
+    async def stop(self) -> None:
+        return None
+
 
 class _StubMqttClient:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -124,6 +130,26 @@ class _RecordingConnectionCoordinator:
 
     def request_reconnect(self, reason: ReconnectReason) -> None:
         self.requests.append(reason)
+
+
+class _StubConnectionCoordinator:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.supervisor_starts = 0
+
+    def register_disconnected_callback(self, callback: Any) -> None:
+        return None
+
+    def register_fatal_supervisor_failure_callback(self, callback: Any) -> None:
+        return None
+
+    def register_reconnected_callback(self, callback: Any) -> None:
+        return None
+
+    def register_disconnect_event_callback(self, callback: Any) -> None:
+        return None
+
+    def start_supervisor(self) -> None:
+        self.supervisor_starts += 1
 
 
 class _BlockingCloudConfigManager:
@@ -806,3 +832,85 @@ async def test_start_health_publisher_replaces_previous_publisher(monkeypatch) -
     assert created[0].stopped is True
     assert created[1].started is True
     assert app._health_publisher is created[1]
+
+
+@pytest.mark.asyncio
+async def test_start_services_starts_supervisor_even_if_runtime_start_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconnect supervisor must start even when runtime startup raises.
+
+    Regression for staging 2026-08-01: during a boot-order race,
+    _start_runtime_components() raised (Klipper not ready), which skipped
+    start_supervisor(). The agent later reached ACTIVE via a recovery path with
+    no reconnect supervisor, so when the token was renewed the reconnect was
+    requested but never executed, and the broker kicked the client at token
+    expiry with no recovery.
+    """
+    config = build_config()
+    config.cloud.device_private_key = "test-private-key"
+    backend = _StubPrinterBackend()
+    app = MoonrakerOwlApp(config, printer_backend=backend)
+
+    monkeypatch.setattr("moonraker_owl.app.TokenManager", _StubTokenManager)
+    monkeypatch.setattr("moonraker_owl.app.CloudConfigManager", _StubCloudConfigManager)
+    monkeypatch.setattr("moonraker_owl.app.MQTTClient", _StubMqttClient)
+    monkeypatch.setattr(
+        "moonraker_owl.app.ConnectionCoordinator", _StubConnectionCoordinator
+    )
+
+    async def _fake_start_metadata_reporter(
+        self: MoonrakerOwlApp, device_id: str
+    ) -> None:
+        return None
+
+    async def _fake_connect_mqtt(self: MoonrakerOwlApp) -> bool:
+        self._mqtt_ready = True
+        return True
+
+    async def _fake_start_runtime_components(
+        self: MoonrakerOwlApp, *, preserve_print_state: bool = False
+    ) -> bool:
+        raise RuntimeError("klipper not ready")
+
+    async def _fake_start_health_server(self: MoonrakerOwlApp) -> None:
+        return None
+
+    async def _fake_start_health_publisher(
+        self: MoonrakerOwlApp, device_id: str
+    ) -> None:
+        return None
+
+    def _fake_subscribe_config_notifications(self: MoonrakerOwlApp) -> None:
+        return None
+
+    def _fake_start_moonraker_monitor(self: MoonrakerOwlApp) -> None:
+        return None
+
+    monkeypatch.setattr(
+        MoonrakerOwlApp, "_start_metadata_reporter", _fake_start_metadata_reporter
+    )
+    monkeypatch.setattr(MoonrakerOwlApp, "_connect_mqtt", _fake_connect_mqtt)
+    monkeypatch.setattr(
+        MoonrakerOwlApp, "_start_runtime_components", _fake_start_runtime_components
+    )
+    monkeypatch.setattr(
+        MoonrakerOwlApp, "_start_health_server", _fake_start_health_server
+    )
+    monkeypatch.setattr(
+        MoonrakerOwlApp, "_start_health_publisher", _fake_start_health_publisher
+    )
+    monkeypatch.setattr(
+        MoonrakerOwlApp,
+        "_subscribe_config_notifications",
+        _fake_subscribe_config_notifications,
+    )
+    monkeypatch.setattr(
+        MoonrakerOwlApp, "_start_moonraker_monitor", _fake_start_moonraker_monitor
+    )
+
+    started = await app._start_services()
+
+    assert started is False
+    assert isinstance(app._connection_coordinator, _StubConnectionCoordinator)
+    assert app._connection_coordinator.supervisor_starts == 1
