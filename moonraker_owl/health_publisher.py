@@ -86,6 +86,16 @@ class HealthPublisher:
         self._stop_event = asyncio.Event()
         self._last_publish_warn_at: Optional[float] = None
 
+    def set_publisher(self, publisher: Any) -> None:
+        """Rebind the telemetry publisher used for queue metrics.
+
+        The agent recreates its telemetry publisher after a degraded start
+        (boot-order race) or a runtime restart. Without rebinding, the health
+        snapshot would keep reading a stale/``None`` reference and report a
+        zero-depth queue forever.
+        """
+        self._publisher = publisher
+
     async def start(self) -> None:
         """Start the background publish loop (idempotent)."""
         if self._task is not None and not self._task.done():

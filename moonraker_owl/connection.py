@@ -248,6 +248,22 @@ class ConnectionCoordinator:
         """Whether currently connected to MQTT broker."""
         return self._state == ConnectionState.CONNECTED
 
+    @property
+    def is_supervising(self) -> bool:
+        """Whether the reconnect supervisor still owns reconnection.
+
+        True while the supervision task is running OR a bounded restart is
+        pending after an unexpected exit. False once shutdown was requested or
+        the coordinator gave up after exhausting restart attempts. Callers use
+        this to decide whether the MQTT infrastructure is already self-healing
+        (retry only the runtime) or must be rebuilt from scratch.
+        """
+        if self._stop_event.is_set():
+            return False
+        if self._supervisor_task is not None and not self._supervisor_task.done():
+            return True
+        return self._supervisor_restart_handle is not None
+
     def request_reconnect(self, reason: ReconnectReason) -> None:
         """Request a reconnection (thread-safe).
 

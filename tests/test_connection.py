@@ -1000,3 +1000,43 @@ async def test_start_supervisor_ignores_requests_after_stop_signaled(
 
     assert coordinator._supervisor_task is None
     assert "shutdown was signaled; ignoring" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_is_supervising_tracks_supervisor_lifecycle(coordinator_setup):
+    """is_supervising reflects whether the coordinator still owns reconnection."""
+    coordinator, _, _ = coordinator_setup()
+
+    assert coordinator.is_supervising is False
+
+    coordinator.start_supervisor()
+    assert coordinator.is_supervising is True
+
+    await coordinator.stop_supervisor()
+    assert coordinator.is_supervising is False
+
+
+@pytest.mark.asyncio
+async def test_is_supervising_true_while_restart_pending(coordinator_setup, monkeypatch):
+    """A bounded restart pending after an unexpected exit still counts as supervising."""
+    monkeypatch.setattr(
+        "moonraker_owl.connection._SUPERVISOR_RESTART_BACKOFF_INITIAL_SECONDS", 5.0
+    )
+    coordinator, _, _ = coordinator_setup()
+    loop = asyncio.get_running_loop()
+
+    async def boom():
+        raise RuntimeError("boom")
+
+    task = asyncio.create_task(boom())
+    await asyncio.sleep(0)
+    coordinator._supervisor_task = task
+    coordinator._supervisor_started_at = loop.time()
+    coordinator._handle_supervisor_exit(task)
+
+    # Task is gone but a restart is scheduled: still supervising.
+    assert coordinator._supervisor_restart_handle is not None
+    assert coordinator.is_supervising is True
+
+    await coordinator.stop_supervisor()
+    assert coordinator.is_supervising is False

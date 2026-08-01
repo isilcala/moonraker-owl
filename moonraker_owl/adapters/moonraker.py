@@ -119,7 +119,7 @@ class MoonrakerClient(PrinterAdapter):
 
         self._callbacks.append(callback)
 
-        if self._listener_task is not None:
+        if self._listener_task is not None and not self._listener_task.done():
             return
 
         if self._owns_session and self._session is None:

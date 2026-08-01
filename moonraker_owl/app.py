@@ -258,12 +258,39 @@ class MoonrakerOwlApp:
                 )
                 return
 
-            LOGGER.info("Attempting to restart services...")
-            # Check stopping flag before and after _start_services
-            # because _start_services resets _stopping to False internally
+            # Check stopping flag before and after the attempt because
+            # _start_services resets _stopping to False internally.
             stopping_before = self._stopping
             try:
-                started = await self._start_services()
+                # When the MQTT infrastructure (TokenManager, MQTT client,
+                # coordinator + reconnect supervisor) is already up and
+                # self-healing, only the runtime portion failed — a boot-order
+                # race where Klipper/Moonraker was still starting. Retry just
+                # that instead of a full _start_services(), which would tear
+                # down and rebuild the whole stack, churn the broker session,
+                # and briefly drop the reconnect supervisor.
+                coordinator = self._connection_coordinator
+                if coordinator is not None and coordinator.is_supervising:
+                    if (
+                        self._state == AgentState.DEGRADED
+                        and self._printer_backend is not None
+                    ):
+                        LOGGER.info(
+                            "MQTT infrastructure already up; retrying runtime "
+                            "components only"
+                        )
+                        started = await self._retry_runtime_components()
+                    else:
+                        # MQTT is transiently reconnecting (RECOVERING): the
+                        # coordinator and connection-restored path own recovery.
+                        # Don't tear it down — wait and re-check next iteration.
+                        LOGGER.debug(
+                            "Infrastructure self-healing in progress; deferring retry"
+                        )
+                        started = False
+                else:
+                    LOGGER.info("Attempting to restart services...")
+                    started = await self._start_services()
             except Exception:
                 # A raising startup attempt must never kill the retry loop;
                 # back off and try again.
@@ -283,6 +310,34 @@ class MoonrakerOwlApp:
                 "Service startup still incomplete; next retry in %.1f seconds",
                 delay,
             )
+
+    async def _retry_runtime_components(self) -> bool:
+        """Retry only the runtime portion (telemetry + command processor).
+
+        Used by the startup-retry loop when the MQTT infrastructure is already
+        up and self-healing but the runtime failed to start (boot-order race).
+        Mirrors the tail of ``_start_services``: on success it promotes the
+        agent to ACTIVE and re-triggers metadata reporting, without rebuilding
+        the connection stack.
+        """
+        try:
+            runtime_ready = await self._start_runtime_components()
+        except Exception:
+            LOGGER.exception("Runtime-only retry raised; will retry")
+            runtime_ready = False
+
+        if runtime_ready:
+            await self._transition_state(AgentState.ACTIVE, detail="runtime ready")
+            # Signal MetadataReporter that Moonraker is confirmed reachable.
+            if self._metadata_reporter is not None:
+                LOGGER.info("Triggering metadata report (runtime ready on retry)")
+                self._metadata_reporter.force_report_now()
+            return True
+
+        await self._transition_state(
+            AgentState.DEGRADED, detail="runtime initialisation incomplete"
+        )
+        return False
 
     async def _transition_state(
         self, state: AgentState, *, detail: Optional[str] = None
@@ -1057,6 +1112,12 @@ class MoonrakerOwlApp:
             )
             self._telemetry_publisher = telemetry
             self._status_listener_registered = False
+            # A degraded initial start creates the HealthPublisher with a None
+            # publisher; recovery paths that land here recreate telemetry, so
+            # rebind the health snapshot to the live publisher (else its queue
+            # metrics report zero depth forever).
+            if self._health_publisher is not None:
+                self._health_publisher.set_publisher(telemetry)
 
         # Create Agent-Initiated TimelapseUploader (replaces task:upload-timelapse)
         # Must be set BEFORE telemetry.start() so the orchestrator callback is

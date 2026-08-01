@@ -334,3 +334,16 @@ def test_interval_is_clamped_to_minimum() -> None:
     # so the health loop can never be driven faster than the contract floor.
     pub = HealthPublisher(mqtt_client=FakeMQTT(), device_id=DEVICE_ID, interval_seconds=0.001)
     assert pub._interval_seconds == _MIN_INTERVAL_SECONDS
+
+
+def test_set_publisher_rebinds_queue_metrics_source() -> None:
+    # A degraded start builds the publisher with publisher=None (zeroed queue
+    # metrics); set_publisher must repoint it at the live telemetry publisher so
+    # queue depth is reported again after a runtime restart.
+    pub = _make_publisher(publisher=None)
+    assert pub._publish_queue_metrics() == {"depth": 0, "maxsize": 0, "droppedTotal": 0}
+
+    pub.set_publisher(FakePublisher())
+
+    assert pub._publish_queue_metrics() == {"depth": 2, "maxsize": 100, "droppedTotal": 5}
+

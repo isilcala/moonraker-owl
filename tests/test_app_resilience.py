@@ -135,6 +135,7 @@ class _RecordingConnectionCoordinator:
 class _StubConnectionCoordinator:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.supervisor_starts = 0
+        self.is_supervising = False
 
     def register_disconnected_callback(self, callback: Any) -> None:
         return None
@@ -150,6 +151,7 @@ class _StubConnectionCoordinator:
 
     def start_supervisor(self) -> None:
         self.supervisor_starts += 1
+        self.is_supervising = True
 
 
 class _BlockingCloudConfigManager:
@@ -914,3 +916,285 @@ async def test_start_services_starts_supervisor_even_if_runtime_start_raises(
     assert started is False
     assert isinstance(app._connection_coordinator, _StubConnectionCoordinator)
     assert app._connection_coordinator.supervisor_starts == 1
+
+
+class _RuntimeTelemetryStub:
+    def __init__(self) -> None:
+        self.start_calls = 0
+        self.print_state_callback: Any = None
+
+    async def start(self, *, preserve_print_state: bool = False) -> None:
+        self.start_calls += 1
+
+    def register_status_listener(self, listener: Any) -> None:
+        return None
+
+    def set_print_state_callback(self, callback: Any) -> None:
+        self.print_state_callback = callback
+
+    def set_timelapse_uploader(self, uploader: Any) -> None:
+        return None
+
+    def set_thumbnail_uploader(self, uploader: Any) -> None:
+        return None
+
+
+class _RuntimeCommandStub:
+    def __init__(self) -> None:
+        self.start_calls = 0
+        self.pending_count = 0
+
+    async def start(self) -> None:
+        self.start_calls += 1
+
+    def on_print_state_changed(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+class _RuntimeBackendStub:
+    def __init__(self, telemetry: Any, processor: Any) -> None:
+        self._telemetry = telemetry
+        self._processor = processor
+
+    async def fetch_state(self, params: Any) -> dict:
+        return {}
+
+    def create_telemetry_publisher(
+        self, config: Any, mqtt: Any, *, job_registry: Any = None
+    ) -> Any:
+        return self._telemetry
+
+    async def create_command_processor(self, *args: Any, **kwargs: Any) -> Any:
+        return self._processor
+
+
+class _MetadataReporterStub:
+    def __init__(self) -> None:
+        self.force_report_calls = 0
+
+    def force_report_now(self) -> None:
+        self.force_report_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_startup_retry_loop_retries_runtime_only_when_infra_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When MQTT infra is up and self-healing, retry only the runtime portion.
+
+    Regression for the boot-order-race churn (staging 2026-08-01): a full
+    _start_services() on every retry tears down and rebuilds the whole stack
+    (new TokenManager/MQTT/coordinator), churning the broker session and
+    briefly dropping the reconnect supervisor. If the coordinator is already
+    supervising and only the runtime failed, retry just _start_runtime_components.
+    """
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.DEGRADED
+    app._printer_backend = _StubPrinterBackend()  # type: ignore[assignment]
+
+    coordinator = _StubConnectionCoordinator()
+    coordinator.is_supervising = True
+    app._connection_coordinator = coordinator  # type: ignore[assignment]
+
+    start_services_calls = 0
+    runtime_retry_calls = 0
+
+    async def _fake_start_services(self: MoonrakerOwlApp) -> bool:
+        nonlocal start_services_calls
+        start_services_calls += 1
+        return False
+
+    async def _fake_retry_runtime(self: MoonrakerOwlApp) -> bool:
+        nonlocal runtime_retry_calls
+        runtime_retry_calls += 1
+        return True
+
+    app._start_services = types.MethodType(_fake_start_services, app)  # type: ignore[method-assign]
+    app._retry_runtime_components = types.MethodType(_fake_retry_runtime, app)  # type: ignore[method-assign]
+
+    _real_sleep = asyncio.sleep
+
+    async def _fast_sleep(_delay: float, *args: Any, **kwargs: Any) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    await asyncio.wait_for(app._startup_retry_loop(), timeout=1.0)
+
+    assert runtime_retry_calls == 1
+    assert start_services_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_startup_retry_loop_full_restart_when_infra_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no supervising coordinator, the retry loop rebuilds the whole stack.
+
+    This is the MQTT-never-connected case: the runtime-only shortcut is unsafe
+    because there is no reconnect supervisor yet, so a full _start_services()
+    is required.
+    """
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.DEGRADED
+    app._connection_coordinator = None  # type: ignore[assignment]
+
+    start_services_calls = 0
+    runtime_retry_calls = 0
+
+    async def _fake_start_services(self: MoonrakerOwlApp) -> bool:
+        nonlocal start_services_calls
+        start_services_calls += 1
+        return True
+
+    async def _fake_retry_runtime(self: MoonrakerOwlApp) -> bool:
+        nonlocal runtime_retry_calls
+        runtime_retry_calls += 1
+        return False
+
+    app._start_services = types.MethodType(_fake_start_services, app)  # type: ignore[method-assign]
+    app._retry_runtime_components = types.MethodType(_fake_retry_runtime, app)  # type: ignore[method-assign]
+
+    _real_sleep = asyncio.sleep
+
+    async def _fast_sleep(_delay: float, *args: Any, **kwargs: Any) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    await asyncio.wait_for(app._startup_retry_loop(), timeout=1.0)
+
+    assert start_services_calls == 1
+    assert runtime_retry_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_startup_retry_loop_defers_while_recovering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervising coordinator mid-reconnect must not be torn down.
+
+    When MQTT is transiently down (state RECOVERING) the coordinator and the
+    connection-restored path own recovery. The retry loop must neither run a
+    full _start_services() (which would stop the supervisor) nor a runtime-only
+    retry — it should defer and re-check.
+    """
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.RECOVERING
+    app._printer_backend = _StubPrinterBackend()  # type: ignore[assignment]
+
+    coordinator = _StubConnectionCoordinator()
+    coordinator.is_supervising = True
+    app._connection_coordinator = coordinator  # type: ignore[assignment]
+
+    start_services_calls = 0
+    runtime_retry_calls = 0
+
+    async def _fake_start_services(self: MoonrakerOwlApp) -> bool:
+        nonlocal start_services_calls
+        start_services_calls += 1
+        return False
+
+    async def _fake_retry_runtime(self: MoonrakerOwlApp) -> bool:
+        nonlocal runtime_retry_calls
+        runtime_retry_calls += 1
+        return False
+
+    app._start_services = types.MethodType(_fake_start_services, app)  # type: ignore[method-assign]
+    app._retry_runtime_components = types.MethodType(_fake_retry_runtime, app)  # type: ignore[method-assign]
+
+    _real_sleep = asyncio.sleep
+    sleeps = 0
+
+    async def _fast_sleep(_delay: float, *args: Any, **kwargs: Any) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 2:
+            app._stopping = True
+        await _real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    await asyncio.wait_for(app._startup_retry_loop(), timeout=1.0)
+
+    assert start_services_calls == 0
+    assert runtime_retry_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_runtime_components_promotes_to_active_and_reports() -> None:
+    """A successful runtime-only retry promotes to ACTIVE and re-triggers metadata."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.DEGRADED
+    reporter = _MetadataReporterStub()
+    app._metadata_reporter = reporter  # type: ignore[assignment]
+
+    async def _fake_runtime(self: MoonrakerOwlApp, *, preserve_print_state: bool = False) -> bool:
+        return True
+
+    app._start_runtime_components = types.MethodType(_fake_runtime, app)  # type: ignore[method-assign]
+
+    result = await app._retry_runtime_components()
+
+    assert result is True
+    assert app._state == AgentState.ACTIVE
+    assert reporter.force_report_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_runtime_components_stays_degraded_on_failure() -> None:
+    """A failed runtime-only retry keeps the agent DEGRADED and reports nothing."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.DEGRADED
+    reporter = _MetadataReporterStub()
+    app._metadata_reporter = reporter  # type: ignore[assignment]
+
+    async def _fake_runtime(self: MoonrakerOwlApp, *, preserve_print_state: bool = False) -> bool:
+        return False
+
+    app._start_runtime_components = types.MethodType(_fake_runtime, app)  # type: ignore[method-assign]
+
+    result = await app._retry_runtime_components()
+
+    assert result is False
+    assert app._state == AgentState.DEGRADED
+    assert reporter.force_report_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_start_runtime_components_rebinds_health_publisher() -> None:
+    """Recreating the telemetry publisher must repoint the health snapshot.
+
+    A degraded initial start builds the HealthPublisher with publisher=None;
+    when a recovery path recreates the telemetry publisher, the health
+    publisher's queue metrics must follow the live instance instead of
+    reporting a stale/None reference forever.
+    """
+    telemetry = _RuntimeTelemetryStub()
+    processor = _RuntimeCommandStub()
+    backend = _RuntimeBackendStub(telemetry, processor)
+    app = MoonrakerOwlApp(build_config(), printer_backend=backend)  # type: ignore[arg-type]
+    app._loop = asyncio.get_running_loop()
+    app._mqtt_client = object()  # type: ignore[assignment]
+    app._command_processor = processor  # type: ignore[assignment]
+    app._telemetry_publisher = None
+
+    rebinds: list[Any] = []
+
+    class _HealthPublisherStub:
+        def set_publisher(self, publisher: Any) -> None:
+            rebinds.append(publisher)
+
+    app._health_publisher = _HealthPublisherStub()  # type: ignore[assignment]
+
+    ready = await app._start_runtime_components_locked()
+
+    assert ready is True
+    assert app._telemetry_publisher is telemetry
+    assert rebinds == [telemetry]
+
