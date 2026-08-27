@@ -271,15 +271,19 @@ class MoonrakerOwlApp:
                 # and briefly drop the reconnect supervisor.
                 coordinator = self._connection_coordinator
                 if coordinator is not None and coordinator.is_supervising:
-                    if (
-                        self._state == AgentState.DEGRADED
-                        and self._printer_backend is not None
-                    ):
-                        LOGGER.info(
-                            "MQTT infrastructure already up; retrying runtime "
-                            "components only"
-                        )
-                        started = await self._retry_runtime_components()
+                    if self._state == AgentState.DEGRADED:
+                        if self._printer_backend is None:
+                            LOGGER.info(
+                                "MQTT infrastructure is up but printer backend is missing; "
+                                "rebuilding services"
+                            )
+                            started = await self._start_services()
+                        else:
+                            LOGGER.info(
+                                "MQTT infrastructure already up; retrying runtime "
+                                "components only"
+                            )
+                            started = await self._retry_runtime_components()
                     else:
                         # MQTT is transiently reconnecting (RECOVERING): the
                         # coordinator and connection-restored path own recovery.

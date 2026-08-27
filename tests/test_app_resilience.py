@@ -1027,6 +1027,49 @@ async def test_startup_retry_loop_retries_runtime_only_when_infra_up(
 
 
 @pytest.mark.asyncio
+async def test_startup_retry_loop_rebuilds_services_when_backend_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervising MQTT coordinator is not enough if the printer backend was torn down."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.DEGRADED
+    app._printer_backend = None  # type: ignore[assignment]
+
+    coordinator = _StubConnectionCoordinator()
+    coordinator.is_supervising = True
+    app._connection_coordinator = coordinator  # type: ignore[assignment]
+
+    start_services_calls = 0
+    runtime_retry_calls = 0
+
+    async def _fake_start_services(self: MoonrakerOwlApp) -> bool:
+        nonlocal start_services_calls
+        start_services_calls += 1
+        return True
+
+    async def _fake_retry_runtime(self: MoonrakerOwlApp) -> bool:
+        nonlocal runtime_retry_calls
+        runtime_retry_calls += 1
+        return False
+
+    app._start_services = types.MethodType(_fake_start_services, app)  # type: ignore[method-assign]
+    app._retry_runtime_components = types.MethodType(_fake_retry_runtime, app)  # type: ignore[method-assign]
+
+    _real_sleep = asyncio.sleep
+
+    async def _fast_sleep(_delay: float, *args: Any, **kwargs: Any) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    await asyncio.wait_for(app._startup_retry_loop(), timeout=1.0)
+
+    assert start_services_calls == 1
+    assert runtime_retry_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_startup_retry_loop_full_restart_when_infra_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
