@@ -475,3 +475,45 @@ async def test_next_rpc_id_is_monotonic_and_locked():
     ids = await asyncio.gather(*[client._next_rpc_id() for _ in range(50)])
     assert ids == list(range(1, 51))
     assert len(set(ids)) == 50
+
+
+@pytest.mark.asyncio
+async def test_stop_resets_is_connected():
+    """stop() must clear the connected flag even without a failure path."""
+    config = MoonrakerConfig(url="http://127.0.0.1:7125", api_key="")
+    client = MoonrakerClient(config)
+    client._note_ws_connected()
+    assert client.is_connected is True
+
+    await client.stop()
+
+    assert client.is_connected is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_after_stop_raises_instead_of_creating_orphan_session():
+    """A post-stop fetch must fail loudly, not leak an unowned aiohttp session."""
+    config = MoonrakerConfig(url="http://127.0.0.1:7125", api_key="")
+    client = MoonrakerClient(config)
+
+    await client.stop()
+
+    with pytest.raises(RuntimeError, match="stopped"):
+        await client.fetch_printer_state({"webhooks": ["state"]})
+
+    assert client._session is None
+
+
+@pytest.mark.asyncio
+async def test_start_after_stop_raises():
+    """stop() is terminal; restarting requires a new client instance."""
+    config = MoonrakerConfig(url="http://127.0.0.1:7125", api_key="")
+    client = MoonrakerClient(config)
+
+    await client.stop()
+
+    async def on_message(payload):
+        pass
+
+    with pytest.raises(RuntimeError, match="stopped"):
+        await client.start(on_message)

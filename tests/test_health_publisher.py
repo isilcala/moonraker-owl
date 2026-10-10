@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -241,10 +242,11 @@ def test_build_envelope_increments_seq() -> None:
     assert pub.build_envelope()["$seq"] == 2
 
 
-def test_publish_once_uses_correct_topic_qos_retain_no_buffer() -> None:
+@pytest.mark.asyncio
+async def test_publish_once_uses_correct_topic_qos_retain_no_buffer() -> None:
     mqtt = FakeMQTT()
     pub = _make_publisher(mqtt_client=mqtt)
-    pub.publish_once()
+    await pub.publish_once()
 
     assert len(mqtt.published) == 1
     msg = mqtt.published[0]
@@ -256,13 +258,36 @@ def test_publish_once_uses_correct_topic_qos_retain_no_buffer() -> None:
     assert decoded["$type"] == "telemetry.health"
 
 
-def test_publish_failure_is_swallowed() -> None:
+@pytest.mark.asyncio
+async def test_publish_failure_is_swallowed() -> None:
     mqtt = FakeMQTT()
     mqtt.raise_on_publish = True
     pub = _make_publisher(mqtt_client=mqtt)
     # Must not raise even though the underlying publish raises.
-    pub.publish_once()
+    await pub.publish_once()
     assert mqtt.published == []
+
+
+@pytest.mark.asyncio
+async def test_publish_once_offloads_samplers_off_the_event_loop() -> None:
+    # The samplers shell out (vcgencmd); they must run in a worker thread so a
+    # slow probe never stalls the event loop (websocket pump, MQTT callbacks).
+    loop_thread = threading.get_ident()
+    sampler_threads: list[int] = []
+
+    def recording_network() -> NetworkSample:
+        sampler_threads.append(threading.get_ident())
+        return _fake_network()
+
+    def recording_host() -> HostSample:
+        sampler_threads.append(threading.get_ident())
+        return _fake_host()
+
+    pub = _make_publisher(network_sampler=recording_network, host_sampler=recording_host)
+    await pub.publish_once()
+
+    assert len(sampler_threads) == 2
+    assert all(thread != loop_thread for thread in sampler_threads)
 
 
 def test_build_envelope_tolerates_missing_sources() -> None:

@@ -2,7 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from moonraker_owl.core.idempotency import CommandIdempotencyGuard, ProcessedCommand
 

@@ -1,21 +1,9 @@
 """Tests for telemetry compression."""
 
-import gzip
-import json
-from pathlib import Path
 
-import pytest
 
 from moonraker_owl.config import (
-    CloudConfig,
-    CommandConfig,
     CompressionConfig,
-    LoggingConfig,
-    MoonrakerConfig,
-    OwlConfig,
-    ResilienceConfig,
-    TelemetryConfig,
-    TelemetryCadenceConfig,
 )
 
 

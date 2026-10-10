@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-import pytest
 
 from moonraker_owl.telemetry.orchestrator import TelemetryOrchestrator
 from moonraker_owl.telemetry.event_types import EventName

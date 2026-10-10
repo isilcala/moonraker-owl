@@ -2,7 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from moonraker_owl.core.job_registry import PrintJobRegistry, PrintJobMapping
 

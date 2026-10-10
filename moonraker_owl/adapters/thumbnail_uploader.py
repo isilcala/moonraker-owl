@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Optional
 
 import aiohttp
 
-from .s3_upload import S3UploadClient, detect_content_type
+from .s3_upload import S3UploadClient
 
 LOGGER = logging.getLogger(__name__)
 

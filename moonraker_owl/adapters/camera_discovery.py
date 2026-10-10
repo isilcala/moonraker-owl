@@ -18,7 +18,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Optional, List
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import aiohttp
 

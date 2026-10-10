@@ -8,7 +8,7 @@ import json
 import logging
 import random
 import time
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
@@ -58,6 +58,7 @@ class MoonrakerClient(PrinterAdapter):
         self._rpc_id_lock = asyncio.Lock()
         self._active_ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._ws_connected = False
+        self._closed = False
         self._consecutive_failures = 0
         self._poll_failures_total = 0
         self._outage_started_at: Optional[float] = None
@@ -114,6 +115,11 @@ class MoonrakerClient(PrinterAdapter):
     async def start(self, callback: CallbackType) -> None:
         """Start listening to Moonraker WebSocket notifications."""
 
+        if self._closed:
+            raise RuntimeError(
+                "MoonrakerClient has been stopped; create a new instance to reconnect"
+            )
+
         if callback in self._callbacks:
             raise ValueError("Callback already registered")
 
@@ -131,8 +137,18 @@ class MoonrakerClient(PrinterAdapter):
         await asyncio.sleep(0)
 
     async def stop(self) -> None:
-        """Stop listening and close the underlying resources."""
+        """Stop listening and close the underlying resources.
 
+        Terminal: the client is not reusable after stop(). ``_closed`` makes
+        any post-stop ``fetch_*``/``assess_health`` call fail loudly instead
+        of silently creating an orphaned aiohttp session that nothing will
+        ever close. No legitimate restart path reuses a stopped client —
+        Moonraker recovery keeps the live instance (its listen loop
+        reconnects internally) and shutdown discards it.
+        """
+
+        self._closed = True
+        self._ws_connected = False
         self._callbacks.clear()
         self._stop_event.set()
 
@@ -773,6 +789,11 @@ class MoonrakerClient(PrinterAdapter):
     # Internals
     # ------------------------------------------------------------------
     async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._closed:
+            raise RuntimeError(
+                "MoonrakerClient has been stopped; refusing to create an "
+                "orphaned HTTP session"
+            )
         if self._session is None:
             timeout = aiohttp.ClientTimeout(total=None)
             self._session = aiohttp.ClientSession(timeout=timeout)

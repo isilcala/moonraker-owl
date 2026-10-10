@@ -27,6 +27,12 @@ class TokenManagerKeyError(RuntimeError):
     """Raised when the device private key cannot be decoded or loaded."""
 
 
+class TokenRevokedError(RuntimeError):
+    """Device credentials permanently rejected (401/404: key revoked or
+    device deleted). Retrying can never succeed — the device must be
+    re-linked. Callers must stop renewal/reconnect loops instead of
+    treating this as a transient failure."""
+
 
 @dataclass(slots=True)
 class TokenCredentials:
@@ -49,6 +55,7 @@ class TokenManager:
         renewal_ratio: float = 0.85,  # Renew at 85% of token lifetime
         safety_buffer_seconds: int = 120,  # 2-minute safety buffer
         renewal_alert_after: int = 3,  # CRITICAL after N consecutive failures
+        on_revoked: Optional[Any] = None,
     ) -> None:
         self.device_id = device_id
         self.base_url = base_url
@@ -86,6 +93,8 @@ class TokenManager:
         self._stop_event = asyncio.Event()
         self._session: Optional[aiohttp.ClientSession] = None
         self._renewal_failures = 0
+        self._revoked = False
+        self._on_revoked = on_revoked
 
     async def start(self) -> None:
         """Start token manager and issue initial token."""
@@ -173,12 +182,14 @@ class TokenManager:
             url, json=payload, timeout=aiohttp.ClientTimeout(total=10.0)
         ) as response:
             if response.status == 401:
-                raise RuntimeError(
-                    "Token request rejected: invalid signature or timestamp"
+                raise TokenRevokedError(
+                    "Token request permanently rejected (401): invalid signature "
+                    "or revoked key. Re-link this device (run: moonraker-owl link)."
                 )
             if response.status == 404:
-                raise RuntimeError(
-                    "Token request rejected: device not found or key revoked"
+                raise TokenRevokedError(
+                    "Token request permanently rejected (404): device not found "
+                    "or key revoked. Re-link this device (run: moonraker-owl link)."
                 )
             if response.status == 429:
                 raise RuntimeError("Token request rejected: rate limit exceeded")
@@ -288,7 +299,32 @@ class TokenManager:
                 self._renewal_failures = 0
 
                 if on_renewed:
-                    await on_renewed()
+                    try:
+                        await on_renewed()
+                    except Exception:
+                        # A callback failure is NOT a renewal failure — the
+                        # token was renewed. Counting it would re-issue the
+                        # token and force a redundant MQTT reconnect cycle.
+                        LOGGER.exception("Token-renewed callback failed")
+
+            except TokenRevokedError as exc:
+                # Permanent rejection (key revoked / device deleted): retrying
+                # can never succeed. Stop the loop and surface a clear signal
+                # instead of spinning at 1h backoff forever.
+                self._revoked = True
+                LOGGER.critical(
+                    "Device credentials permanently rejected: %s "
+                    "Token renewal loop stopped; re-link the device to recover.",
+                    exc,
+                )
+                if self._on_revoked is not None:
+                    try:
+                        result = self._on_revoked()
+                        if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+                            await result
+                    except Exception:
+                        LOGGER.exception("on_revoked callback failed")
+                return
 
             except Exception as exc:
                 self._renewal_failures += 1
@@ -312,6 +348,13 @@ class TokenManager:
         """Consecutive token-renewal failures (0 when healthy)."""
 
         return self._renewal_failures
+
+    @property
+    def is_revoked(self) -> bool:
+        """True once the cloud permanently rejected device credentials
+        (401/404). The renewal loop has stopped; re-linking is required."""
+
+        return self._revoked
 
     def _time_to_expiry_seconds(self) -> Optional[float]:
         """Seconds until the current token expires, or None if no token yet."""
@@ -388,7 +431,6 @@ class TokenManager:
         now = datetime.now(timezone.utc)
         token_lifetime = (self._current_token.expires_at - self._current_token.issued_at).total_seconds()
         time_elapsed = (now - self._current_token.issued_at).total_seconds()
-        time_remaining = (self._current_token.expires_at - now).total_seconds()
 
         # Calculate renewal point: renewal_ratio of lifetime, minus safety buffer
         renewal_point = (token_lifetime * self.renewal_ratio) - self.safety_buffer_seconds

@@ -18,7 +18,6 @@ import pytest
 
 from moonraker_owl.core.idempotency import (
     CommandIdempotencyGuard,
-    ProcessedCommand,
 )
 
 

@@ -17,7 +17,7 @@ import random
 import stat
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -26,12 +26,7 @@ import aiohttp
 
 from . import constants
 from .config import (
-    CameraConfig,
-    CommandConfig,
-    CompressionConfig,
     OwlConfig,
-    TelemetryCadenceConfig,
-    TelemetryConfig,
 )
 from .version import __version__
 
@@ -191,6 +186,10 @@ class CloudConfigManager:
         self._callbacks: List[ConfigChangeCallback] = []
         self._pending_fetch_task: Optional[asyncio.Task[None]] = None
         self._stopped = False
+        # Serializes fetch(): the token-renewal path spawns a bare fetch() that
+        # bypasses schedule_fetch's coalescing and can race a notification-
+        # triggered fetch (duplicate GETs, double LKG writes, double callbacks).
+        self._fetch_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -247,12 +246,23 @@ class CloudConfigManager:
     async def fetch(self, *, force: bool = False) -> bool:
         """Fetch cloud config via HTTP GET with ETag.
 
-        Returns True if config was updated (200), False if unchanged (304)
-        or on error.
+        Returns True if config was updated (200), False if unchanged (304),
+        on error, or when another fetch is already in flight (callers like
+        the token-renewal path bypass schedule_fetch's coalescing).
 
         If *force* is False and a recent fetch occurred within _TTL_SKIP_SECONDS,
         the request is skipped to avoid unnecessary 304s during token renewal.
         """
+        if self._stopped:
+            return False
+
+        if self._fetch_lock.locked():
+            LOGGER.debug("Cloud config fetch already in progress; skipping")
+            return False
+        async with self._fetch_lock:
+            return await self._fetch_locked(force=force)
+
+    async def _fetch_locked(self, *, force: bool) -> bool:
         if self._stopped:
             return False
 
@@ -317,6 +327,13 @@ class CloudConfigManager:
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             LOGGER.warning("Cloud config fetch error: %s", exc)
             return False
+        except (json.JSONDecodeError, ValueError, TypeError, KeyError) as exc:
+            # A 200 response with a truncated/malformed body or dirty values
+            # must degrade to a plain fetch failure with a log — escaping here
+            # killed the (unawaited) deferred-fetch task silently and disabled
+            # the config-update channel until restart.
+            LOGGER.warning("Cloud config response unusable: %s", exc, exc_info=True)
+            return False
 
     def schedule_fetch(self, jitter_seconds: float = 0) -> None:
         """Schedule a deferred fetch with jitter, coalescing multiple calls.
@@ -361,6 +378,10 @@ class CloudConfigManager:
             await self.fetch(force=True)
         except asyncio.CancelledError:
             pass
+        except Exception:
+            # This task is never awaited; without a catch-all its failure is
+            # invisible ("Task exception was never retrieved").
+            LOGGER.exception("Deferred cloud config fetch failed")
 
     def _write_lkg(self, raw_data: Dict[str, Any], etag: Optional[str]) -> None:
         """Write LKG cache file with metadata."""

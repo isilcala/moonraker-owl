@@ -6,7 +6,6 @@ import asyncio
 import inspect
 import json
 import logging
-from dataclasses import field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
@@ -23,7 +22,6 @@ from ..core.idempotency import CommandIdempotencyGuard
 from ..core.job_registry import PrintJobRegistry
 
 from .types import (
-    CommandConfigurationError,
     CommandMessage,
     CommandProcessingError,
     MoonrakerCommandClient,
@@ -242,24 +240,31 @@ class CommandProcessor(
         LOGGER.info("Command processor subscribed to %s", self._command_subscription)
 
     async def stop(self) -> None:
-        if not self._handler_registered:
-            return
+        if self._handler_registered:
+            if self._cleanup_task is not None:
+                self._cleanup_task.cancel()
+                try:
+                    await self._cleanup_task
+                except asyncio.CancelledError:
+                    pass
+                self._cleanup_task = None
 
-        if self._cleanup_task is not None:
-            self._cleanup_task.cancel()
             try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-            self._cleanup_task = None
+                self._mqtt.unsubscribe(self._command_subscription)
+            except Exception:  # pragma: no cover - defensive cleanup
+                pass  # Cleanup - ignore unsubscribe errors
+            finally:
+                self._mqtt.set_message_handler(None)
+                self._handler_registered = False
 
-        try:
-            self._mqtt.unsubscribe(self._command_subscription)
-        except Exception:  # pragma: no cover - defensive cleanup
-            pass  # Cleanup - ignore unsubscribe errors
-        finally:
-            self._mqtt.set_message_handler(None)
-            self._handler_registered = False
+        # Close the HTTP clients this processor owns (the backend factory
+        # creates them specifically for the processor). Both clients recreate
+        # their aiohttp session lazily on next use, so closing here is safe
+        # for the stop/start recovery path that reuses this instance.
+        if self._s3_upload is not None:
+            await self._s3_upload.close()
+        if self._camera is not None:
+            await self._camera.close()
 
     async def _cleanup_loop(self) -> None:
         """Periodically expire stuck pending-state commands."""
@@ -341,6 +346,30 @@ class CommandProcessor(
                 message,
                 "failed",
                 details=failure_details or None,
+            )
+            self._finish_inflight(message.command_id)
+        except Exception:
+            # Catch-all for handler bugs and other unexpected failures. Without
+            # this the command leaks from _inflight and every cloud-side retry
+            # hits the silent duplicate drop above, with no terminal ACK ever
+            # sent (staging audit 2026-10).
+            LOGGER.exception(
+                "Unexpected error executing command %s (id=%s)",
+                message.command,
+                message.command_id[:8],
+            )
+            await self._publish_ack(
+                command_name,
+                message.command_id,
+                "failed",
+                stage="execution",
+                error_code="internal_error",
+                error_message="Unexpected agent error",
+            )
+            self._record_command_state(
+                message,
+                "failed",
+                details={"code": "internal_error"},
             )
             self._finish_inflight(message.command_id)
         else:
@@ -521,15 +550,28 @@ class CommandProcessor(
                     error_message=error_message,
                 )
                 self._record_command_state(pending.message, state, details=details)
-                self._finish_inflight(pending.command_id)
-            except (OSError, asyncio.TimeoutError) as exc:
+            except Exception:
                 LOGGER.exception(
                     "Error sending %s ACK for %s", status, pending.command_id[:8]
                 )
+            finally:
+                self._finish_inflight(pending.command_id)
 
-        self._loop.call_soon(
-            lambda: self._loop.create_task(send_ack())
-        )
+        try:
+            self._loop.call_soon(
+                lambda: self._loop.create_task(send_ack())
+            )
+        except RuntimeError:
+            # Shutdown race: the loop closed between the pending-state pop
+            # and this scheduling call. Swallow it — this runs on the
+            # synchronous telemetry ingest path and must not take down the
+            # orchestrator with an unrelated failure.
+            LOGGER.warning(
+                "Cannot send %s ACK for %s: event loop is closed",
+                status,
+                pending.command_id[:8],
+            )
+            self._finish_inflight(pending.command_id)
 
     @property
     def pending_state_count(self) -> int:
@@ -594,27 +636,43 @@ class CommandProcessor(
         Called during agent shutdown/restart to notify cloud that
         commands will not be completed.
         """
-        # Abandon regular inflight commands
+        # Abandon regular inflight commands. Per-item guard: a single failed
+        # ACK (e.g. MQTT down — the usual reason we're abandoning) must not
+        # strand the remaining commands without any notification.
         if self._inflight:
             items = list(self._inflight.values())
             self._inflight.clear()
 
+            ack_failures = 0
             for tracked in items:
-                await self._publish_ack(
-                    tracked.command_name,
-                    tracked.message.command_id,
-                    "failed",
-                    stage="execution",
-                    error_code="agent_restart",
-                    error_message=reason,
-                )
-                self._record_command_state(
-                    tracked.message,
-                    "abandoned",
-                    details={
-                        "reason": "agent_restart",
-                        "detail": reason,
-                    },
+                try:
+                    await self._publish_ack(
+                        tracked.command_name,
+                        tracked.message.command_id,
+                        "failed",
+                        stage="execution",
+                        error_code="agent_restart",
+                        error_message=reason,
+                    )
+                    self._record_command_state(
+                        tracked.message,
+                        "abandoned",
+                        details={
+                            "reason": "agent_restart",
+                            "detail": reason,
+                        },
+                    )
+                except Exception:
+                    ack_failures += 1
+                    LOGGER.exception(
+                        "Failed to abandon inflight command %s",
+                        tracked.message.command_id[:8],
+                    )
+            if ack_failures:
+                LOGGER.warning(
+                    "Abandoned %d inflight commands; %d ACK/record failures",
+                    len(items),
+                    ack_failures,
                 )
 
         # Abandon pending state commands
@@ -622,23 +680,37 @@ class CommandProcessor(
             pending_items = list(self._pending_state_commands.values())
             self._pending_state_commands.clear()
 
+            ack_failures = 0
             for pending in pending_items:
-                await self._publish_ack(
-                    pending.command_name,
-                    pending.command_id,
-                    "failed",
-                    stage="execution",
-                    error_code="agent_restart",
-                    error_message=reason,
-                )
-                self._record_command_state(
-                    pending.message,
-                    "abandoned",
-                    details={
-                        "reason": "agent_restart",
-                        "detail": reason,
-                        "expectedState": pending.expected_state,
-                    },
+                try:
+                    await self._publish_ack(
+                        pending.command_name,
+                        pending.command_id,
+                        "failed",
+                        stage="execution",
+                        error_code="agent_restart",
+                        error_message=reason,
+                    )
+                    self._record_command_state(
+                        pending.message,
+                        "abandoned",
+                        details={
+                            "reason": "agent_restart",
+                            "detail": reason,
+                            "expectedState": pending.expected_state,
+                        },
+                    )
+                except Exception:
+                    ack_failures += 1
+                    LOGGER.exception(
+                        "Failed to abandon pending-state command %s",
+                        pending.command_id[:8],
+                    )
+            if ack_failures:
+                LOGGER.warning(
+                    "Abandoned %d pending-state commands; %d ACK/record failures",
+                    len(pending_items),
+                    ack_failures,
                 )
 
     async def _execute(self, message: CommandMessage) -> Optional[Dict[str, Any]]:
@@ -723,6 +795,10 @@ class CommandProcessor(
     ) -> None:
         """Publish command acknowledgment to MQTT using $-prefix envelope.
 
+        Best-effort: terminal outcomes are recorded in the idempotency table
+        before publishing, and publish failures are logged but never raised,
+        so callers can rely on post-ACK bookkeeping always running.
+
         Args:
             command_name: The command name (e.g., "print:pause").
             command_id: Unique command identifier.
@@ -786,8 +862,12 @@ class CommandProcessor(
         }
 
         payload_bytes = json.dumps(document).encode("utf-8")
-        self._mqtt.publish(topic, payload_bytes, qos=1, retain=False)
 
+        # Record the terminal outcome in the idempotency table BEFORE
+        # publishing. If the publish then fails (MQTT briefly down), a
+        # cloud-side retry is still answered from the cached result via
+        # _replay_duplicate instead of falling into the silent inflight-drop
+        # path — and the buffered publish goes out on reconnect.
         if stage_value == "execution":
             self._remember_history(
                 effective_command_id,
@@ -795,4 +875,26 @@ class CommandProcessor(
                 stage=stage_value,
                 error_code=error_code,
                 error_message=error_message,
+            )
+
+        try:
+            self._mqtt.publish(
+                topic,
+                payload_bytes,
+                qos=1,
+                retain=False,
+                buffer_on_failure=True,
+            )
+        except Exception as exc:
+            # ACK publishing is best-effort and must never raise: callers rely
+            # on it so _finish_inflight and terminal-state recording always
+            # run. Disconnected publishes are buffered for replay on
+            # reconnect (buffer_on_failure), so reaching here means a real
+            # defect — log it loudly.
+            LOGGER.warning(
+                "Failed to publish %s ACK for command %s: %s",
+                status,
+                effective_command_id[:8],
+                exc,
+                exc_info=True,
             )

@@ -39,6 +39,10 @@ _PUBLISH_WARN_INTERVAL_SECONDS = 60.0
 # loop faster than this. Shared with the tests so the clamp contract has a single source of truth.
 _MIN_INTERVAL_SECONDS = 5.0
 
+# Sentinel distinguishing "caller did not pass a sample" (sample inline) from a
+# sampler result that is legitimately None (probe failed / unsupported host).
+_UNSET: Any = object()
+
 HEALTH_SCHEMA_VERSION = 2
 """Health payload schema version. v2 (ADR-0045) adds by-cause counters, network
 RSSI, host throttling, moonraker.pollFailures, and the recent-disconnect fallback
@@ -128,7 +132,7 @@ class HealthPublisher:
         # Publish an initial snapshot immediately on startup so the retained
         # health message is available to consumers right away, instead of only
         # after the first interval elapses (avoids an empty UI for ~1 minute).
-        self.publish_once()
+        await self.publish_once()
         while not self._stop_event.is_set():
             try:
                 await asyncio.wait_for(
@@ -138,12 +142,26 @@ class HealthPublisher:
                 break
             except asyncio.TimeoutError:
                 pass
-            self.publish_once()
+            await self.publish_once()
 
-    def publish_once(self) -> None:
-        """Build and publish a single health snapshot (best-effort)."""
+    async def publish_once(self) -> None:
+        """Build and publish a single health snapshot (best-effort).
+
+        The network/host samplers shell out (``vcgencmd`` on a Pi) and would
+        otherwise stall the event loop for up to a second per tick, freezing
+        the websocket pump and MQTT callbacks, so they run via
+        ``asyncio.to_thread``. Both default samplers are pure — they read
+        /proc|/sys and spawn a subprocess, return frozen dataclasses, and
+        touch no shared mutable state — so offloading them is race-free.
+        """
         try:
-            payload = self.build_envelope()
+            network_sample = await asyncio.to_thread(
+                self._safe_sample, self._network_sampler
+            )
+            host_sample = await asyncio.to_thread(self._safe_sample, self._host_sampler)
+            payload = self.build_envelope(
+                network_sample=network_sample, host_sample=host_sample
+            )
             self._mqtt_client.publish(
                 self._topic,
                 json.dumps(payload).encode("utf-8"),
@@ -154,8 +172,22 @@ class HealthPublisher:
         except Exception as exc:  # pragma: no cover - exercised via tests
             self._warn_publish_failure(exc)
 
-    def build_envelope(self) -> dict:
-        """Assemble the full telemetry.health envelope from current sources."""
+    def build_envelope(
+        self,
+        *,
+        network_sample: Any = _UNSET,
+        host_sample: Any = _UNSET,
+    ) -> dict:
+        """Assemble the full telemetry.health envelope from current sources.
+
+        ``network_sample``/``host_sample`` let an async caller that already
+        sampled off the event loop pass the results in; when omitted, the
+        samplers run inline (synchronously).
+        """
+        if network_sample is _UNSET:
+            network_sample = self._safe_sample(self._network_sampler)
+        if host_sample is _UNSET:
+            host_sample = self._safe_sample(self._host_sampler)
         envelope = {
             "$v": HEALTH_SCHEMA_VERSION,
             "$type": "telemetry.health",
@@ -166,19 +198,29 @@ class HealthPublisher:
             "kind": "full",
             "sessionId": None,
             "deviceId": str(self._device_id),
-            "payload": self._build_payload(),
+            "payload": self._build_payload(network_sample, host_sample),
         }
         self._seq += 1
         return envelope
 
-    def _build_payload(self) -> dict:
+    @staticmethod
+    def _safe_sample(sampler: Callable[[], Any]) -> Any:
+        """Invoke *sampler*, degrading any failure to None."""
+        try:
+            return sampler()
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    def _build_payload(
+        self, network_sample: Any, host_sample: Any
+    ) -> dict:
         return {
             "uptimeSeconds": max(0.0, self._clock() - self._started_at),
             "agentVersion": __version__,
             "mqtt": self._mqtt_metrics(),
             "counters": self._counter_metrics(),
-            "network": self._network_metrics(),
-            "host": self._host_metrics(),
+            "network": self._network_metrics(network_sample),
+            "host": self._host_metrics(host_sample),
             "publishQueue": self._publish_queue_metrics(),
             "moonraker": self._moonraker_metrics(),
             "token": self._token_metrics(),
@@ -233,13 +275,8 @@ class HealthPublisher:
             "offlineBufferLost": int(buffer.get("dropped_total", 0)),
         }
 
-    def _network_metrics(self) -> dict:
+    def _network_metrics(self, sample: Any) -> dict:
         """Local-network signal (RSSI + uplink classification). Null RSSI on a wired/unknown host."""
-        sample = None
-        try:
-            sample = self._network_sampler()
-        except Exception:  # pragma: no cover - defensive
-            sample = None
         if sample is None:
             return {"wifiRssiDbm": None, "interface": None, "linkType": None}
         return {
@@ -248,13 +285,8 @@ class HealthPublisher:
             "linkType": sample.link_type,
         }
 
-    def _host_metrics(self) -> dict:
+    def _host_metrics(self, sample: Any) -> dict:
         """Host hardware health (Pi throttling/under-voltage/temp). Null when unknown."""
-        sample = None
-        try:
-            sample = self._host_sampler()
-        except Exception:  # pragma: no cover - defensive
-            sample = None
         if sample is None:
             return {
                 "throttled": None,

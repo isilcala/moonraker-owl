@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 
-import pytest
 
 from moonraker_owl.telemetry.selectors import ObjectsPayloadResult, ObjectsSelector
 from moonraker_owl.telemetry.state_store import MoonrakerStateStore

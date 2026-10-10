@@ -93,6 +93,12 @@ class EventCollector:
         self._p0_queue: Deque[Event] = deque(maxlen=max_queue_size)
         self._p1_queue: Deque[Event] = deque(maxlen=max_queue_size)
 
+        # Overflow visibility: deque(maxlen) silently evicts the oldest event
+        # on append when full, so count drops and warn (rate-limited) instead
+        # of losing P0/P1 events invisibly during an event storm.
+        self._dropped_overflow_total = 0
+        self._last_overflow_warn_at = 0.0
+
         # Legacy pending list for backward compatibility
         self._pending: List[Dict[str, Any]] = []
 
@@ -112,18 +118,40 @@ class EventCollector:
             event: The event to record.
         """
         if event.priority == EventPriority.P0_CRITICAL:
+            self._note_overflow(self._p0_queue, "P0")
             self._p0_queue.append(event)
             LOGGER.debug(
                 "P0 event queued: %s",
                 event.event_name.value,
             )
         else:
+            self._note_overflow(self._p1_queue, "P1")
             self._p1_queue.append(event)
             LOGGER.debug(
                 "Event queued: %s (session=%s)",
                 event.event_name.value,
                 event.session_id[:8] if event.session_id else "none",
             )
+
+    def _note_overflow(self, queue: Deque[Event], label: str) -> None:
+        """Count and (rate-limited) warn when appending would evict the oldest event."""
+        if len(queue) < self._max_queue_size:
+            return
+        self._dropped_overflow_total += 1
+        now = time.monotonic()
+        if now - self._last_overflow_warn_at >= 60.0:
+            self._last_overflow_warn_at = now
+            LOGGER.warning(
+                "%s event queue full (%d); dropping oldest events (%d dropped total)",
+                label,
+                self._max_queue_size,
+                self._dropped_overflow_total,
+            )
+
+    @property
+    def dropped_overflow_total(self) -> int:
+        """Total events silently evicted by full priority queues (process lifetime)."""
+        return self._dropped_overflow_total
 
     def harvest(self) -> List[Event]:
         """Harvest events for publishing, respecting rate limits.

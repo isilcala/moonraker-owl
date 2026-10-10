@@ -134,8 +134,6 @@ class PrintSessionTracker:
         timelapse_macro = _coerce_section(store.get("gcode_macro TIMELAPSE_TAKE_FRAME"))
         history_event = _coerce_section(store.get("history_event"))
 
-        observed_at = store.latest_observed_at()
-
         history_id = _extract_history_id(print_stats) or _extract_history_id(
             history_event
         )
@@ -151,10 +149,6 @@ class PrintSessionTracker:
         job_status = _normalise_state(_extract_job_status(history_event))
         history_action = history_event.get("action") if history_event else None
         timelapse_paused = bool(_as_bool(timelapse_macro.get("is_paused")))
-
-        sd_active = bool(_as_bool(virtual_sdcard.get("is_active")))
-        sd_printing = bool(_as_bool(virtual_sdcard.get("is_printing")))
-        sd_paused = bool(_as_bool(virtual_sdcard.get("is_paused")))
 
         # Determine active job first - this affects session_id lifecycle
         has_active_job = self._has_active_job(

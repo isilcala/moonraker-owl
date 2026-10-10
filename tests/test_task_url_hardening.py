@@ -26,7 +26,7 @@ from moonraker_owl.commands.handlers.task_commands import (
     _calculate_download_timeout,
     _calculate_upload_timeout,
 )
-from moonraker_owl.commands.types import CommandMessage, CommandProcessingError
+from moonraker_owl.commands.types import CommandProcessingError
 
 from helpers import build_config
 
@@ -454,6 +454,7 @@ def _make_capture_processor(*, allow: list[str], camera_image: bytes):
             error_message=None,
         )
     )
+    s3_upload.close = AsyncMock()
 
     capture_result = MagicMock()
     capture_result.success = True
@@ -467,6 +468,7 @@ def _make_capture_processor(*, allow: list[str], camera_image: bytes):
 
     camera = MagicMock()
     camera.capture = AsyncMock(return_value=capture_result)
+    camera.close = AsyncMock()
 
     moonraker = FakeMoonraker()
     mqtt = FakeMQTT()

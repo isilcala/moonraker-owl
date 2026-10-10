@@ -9,7 +9,6 @@ Tests the unified reconnection mechanism that handles:
 
 import asyncio
 import logging
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -690,8 +689,6 @@ async def test_perpetual_retry_after_backoff_exhaustion(coordinator_setup):
     succeed_after = _BACKOFF_MAX_ATTEMPTS + 3  # fail all backoff + 3 perpetual rounds
     coordinator, mqtt_client, _ = coordinator_setup(connect_succeeds=False)
 
-    original_connect = mqtt_client.connect
-
     async def connect_eventually(**kwargs):
         mqtt_client.connect_call_count += 1
         if mqtt_client.connect_call_count >= succeed_after:
@@ -1040,3 +1037,26 @@ async def test_is_supervising_true_while_restart_pending(coordinator_setup, monk
 
     await coordinator.stop_supervisor()
     assert coordinator.is_supervising is False
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_abandons_reconnect_when_credentials_revoked(
+    coordinator_setup,
+):
+    """TokenRevokedError is permanent: abandon instead of retrying forever
+    with credentials that can never be accepted again (2026-10 audit)."""
+    from moonraker_owl.token_manager import TokenRevokedError
+
+    coordinator, mqtt_client, token_manager = coordinator_setup(
+        connect_succeeds=False
+    )
+
+    async def _revoked():
+        raise TokenRevokedError("key revoked")
+
+    token_manager.refresh_token_now = _revoked
+
+    await coordinator._execute_reconnect(ReconnectReason.AUTH_FAILURE)
+
+    assert coordinator.state == ConnectionState.DISCONNECTED
+    assert mqtt_client.connect_call_count == 0

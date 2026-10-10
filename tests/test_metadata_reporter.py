@@ -15,6 +15,7 @@ from moonraker_owl.metadata import (
     KlipperProvider,
     MetadataReporter,
     MetadataReporterConfig,
+    MetadataUploadRejectedError,
     MoonrakerProvider,
     MotionProvider,
     SensorInventoryProvider,
@@ -1176,7 +1177,7 @@ class TestForceReportNow:
 
     def test_force_ignored_when_not_running(self, reporter_config):
         """force_report_now should be a no-op when reporter is not started."""
-        reporter = MetadataReporter(
+        MetadataReporter(
             config=reporter_config,
             token_provider=make_token_provider(),
         )
@@ -1497,3 +1498,249 @@ class TestGCodeMacroProvider:
 
         names = [m["name"] for m in result["macros"]["available"]]
         assert names == ["ACTIVATE_PROBE", "CLEAN_NOZZLE", "ZHOP"]
+
+
+
+class TestHollowShellGuard:
+    """Empty-components metadata must never be uploaded (2026-10 audit).
+
+    The cloud replaces the stored metadata wholesale on every PUT (ADR-0032),
+    so a payload collected while all Moonraker-backed providers were down
+    would wipe the stored components/sensors/macros inventory and flip
+    HasCamera/HasTimelapse/AgentVersion to empty until the next report.
+    """
+
+    @pytest.mark.asyncio
+    async def test_report_once_skips_upload_when_no_components(self, reporter_config):
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+        reporter._initialize_providers()
+
+        # Simulate a Moonraker outage: every provider that talks to the
+        # printer fails; only the local system provider succeeds.
+        for provider in reporter._providers:
+            if provider.name == "system":
+                provider.detect = AsyncMock(
+                    return_value={"system": {"agentVersion": "1.0.0"}}
+                )
+            else:
+                provider.detect = AsyncMock(
+                    side_effect=aiohttp.ClientError("unreachable")
+                )
+
+        reporter._upload_metadata = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="no components"):
+            await reporter._report_once()
+
+        reporter._upload_metadata.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_report_once_uploads_when_components_present(self, reporter_config):
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+        reporter._initialize_providers()
+
+        for provider in reporter._providers:
+            provider.detect = AsyncMock(return_value={})
+        reporter._providers[1].detect = AsyncMock(
+            return_value={"components": {"moonraker": {"version": "v0.9.2"}}}
+        )
+
+        reporter._upload_metadata = AsyncMock()
+
+        await reporter._report_once()
+
+        reporter._upload_metadata.assert_called_once()
+        uploaded = reporter._upload_metadata.call_args[0][0]
+        assert "moonraker" in uploaded["components"]
+
+
+class TestPermanentUploadRejection:
+    """401/403/404 are permanent: end the retry round instead of backing off forever.
+
+    With the default max_retry_attempts=0 (infinite retries) a rejected
+    credential or missing device would otherwise spin every retry interval
+    until process restart, even though retrying can never succeed.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [401, 403, 404])
+    async def test_upload_permanent_status_raises_rejected(self, reporter_config, status):
+        """401/403/404 should raise MetadataUploadRejectedError."""
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+
+        mock_session = AsyncMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = status
+        mock_context = AsyncMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+        mock_session.put = MagicMock(return_value=mock_context)
+        reporter._session = mock_session
+
+        with pytest.raises(MetadataUploadRejectedError):
+            await reporter._upload_metadata({"system": {}, "components": {}})
+
+    @pytest.mark.asyncio
+    async def test_upload_server_error_is_transient(self, reporter_config):
+        """500 should raise a plain RuntimeError, not the permanent type."""
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+
+        mock_session = AsyncMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = 500
+        mock_resp.text = AsyncMock(return_value="internal server error")
+        mock_context = AsyncMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+        mock_session.put = MagicMock(return_value=mock_context)
+        reporter._session = mock_session
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await reporter._upload_metadata({"system": {}, "components": {}})
+        assert type(exc_info.value) is RuntimeError
+
+    @pytest.mark.asyncio
+    async def test_rejected_upload_ends_retry_round(self, reporter_config):
+        """A rejected upload should be tried once per round, even with infinite retries."""
+        reporter_config.max_retry_attempts = 0  # infinite — must not spin
+        reporter_config.initial_retry_delay = 0.01
+
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+
+        call_count = 0
+
+        async def rejected_report():
+            nonlocal call_count
+            call_count += 1
+            raise MetadataUploadRejectedError("Authentication failed (401)")
+
+        reporter._report_once = rejected_report
+
+        await reporter._report_with_retry()
+
+        assert call_count == 1
+        assert reporter.last_report_success is False
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_still_retries_with_backoff(self, reporter_config):
+        """Server/network errors should still follow exponential backoff."""
+        reporter_config.initial_retry_delay = 0.01
+        reporter_config.max_retry_delay = 0.05
+        reporter_config.max_retry_attempts = 3
+
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+
+        call_count = 0
+
+        async def failing_report():
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("Upload failed with status 500")
+
+        reporter._report_once = failing_report
+
+        await reporter._report_with_retry()
+
+        assert call_count == 3
+
+
+class TestReportLoopSupervision:
+    """An unexpected exception must not permanently kill the report task."""
+
+    @pytest.mark.asyncio
+    async def test_report_loop_recovers_after_unexpected_error(self, reporter_config, caplog):
+        """Crash -> ERROR log -> backoff -> loop continues instead of dying."""
+        reporter_config.initial_retry_delay = 0.05
+        reporter_config.max_retry_delay = 0.1
+        reporter_config.refresh_interval_seconds = 3600  # Long interval
+
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+
+        call_count = 0
+
+        async def flaky_report():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("unexpected boom")
+
+        # Patch at the level the loop calls so the exception escapes the
+        # retry logic (which swallows everything) and hits the supervisor.
+        reporter._report_with_retry = flaky_report
+
+        await reporter.start()
+        # Wait until the loop is waiting for the runtime-ready signal
+        await asyncio.sleep(0.1)
+        reporter.force_report_now()
+        await asyncio.sleep(0.3)
+
+        # Crash was logged and the task is still alive
+        assert any(
+            "Unexpected error in report loop" in record.message
+            for record in caplog.records
+        )
+        assert reporter.is_running
+
+        # The loop restarted: a new force signal triggers another report
+        reporter.force_report_now()
+        await asyncio.sleep(0.3)
+        assert call_count >= 2
+
+        await reporter.stop()
+
+
+
+class TestForceInterruptsBackoff:
+    """force_report_now during a retry backoff must wake the retry early
+    instead of being swallowed by the next cycle's force_event.clear()
+    (2026-10 audit — metadata:system-refresh delayed up to max_retry_delay)."""
+
+    @pytest.mark.asyncio
+    async def test_force_report_interrupts_retry_backoff(self, reporter_config):
+        reporter_config.initial_retry_delay = 30.0  # long enough to detect
+        reporter = MetadataReporter(
+            config=reporter_config,
+            token_provider=make_token_provider(),
+        )
+
+        attempts = 0
+
+        async def _flaky_report_once():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise aiohttp.ClientError("transient boom")
+
+        reporter._report_once = _flaky_report_once
+
+        started = asyncio.get_running_loop().time()
+        task = asyncio.create_task(reporter._report_with_retry())
+        await asyncio.sleep(0.05)  # first attempt fails; backoff begins
+
+        reporter._force_event.set()
+        await asyncio.wait_for(task, timeout=5.0)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert attempts == 2
+        assert elapsed < 5.0  # did not wait out the 30s backoff

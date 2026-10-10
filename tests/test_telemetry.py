@@ -27,7 +27,6 @@ from moonraker_owl.config import (
     DEFAULT_TELEMETRY_FIELDS,
     DEFAULT_TELEMETRY_EXCLUDE_FIELDS,
 )
-from moonraker_owl import constants
 from moonraker_owl.telemetry import (
     TelemetryConfigurationError,
     TelemetryPublisher,
@@ -139,7 +138,7 @@ class FakeMQTTClient:
         return grouped
 
 
-from helpers import build_config
+from helpers import build_config  # noqa: E402
 
 
 def _load_sample(name: str) -> Dict[str, Any]:
@@ -1394,7 +1393,6 @@ async def test_polling_fetches_unsubscribed_objects() -> None:
     topics = mqtt.by_topic()
     assert topics, f"Expected sensors replay topics, found: {topics}"
 
-    replay_messages = topics.get("owl/printers/device-123/sensors")
     polled_objects = next(
         (
             entry
@@ -2105,7 +2103,15 @@ async def test_publish_system_status_emits_error_snapshot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_status_listener_invoked_for_system_status() -> None:
+async def test_status_listener_not_invoked_for_system_status() -> None:
+    """Status listeners must NOT receive fabricated system-status payloads.
+
+    publish_system_status bypasses the ingest pipeline: the synthetic error
+    state is not real printer data, so feeding it to listeners would re-enter
+    the failure detector (app._handle_telemetry_status_update) with fabricated
+    input. Previously the fabricated payload went through _process_payload and
+    listeners were invoked — a self-referential feedback loop.
+    """
     sample = _load_sample("moonraker-sample-printing.json")
 
     moonraker = FakeMoonrakerClient(sample)
@@ -2122,16 +2128,14 @@ async def test_status_listener_invoked_for_system_status() -> None:
         captured.append(payload)
 
     publisher.register_status_listener(_listener)
+    captured.clear()
 
     await publisher.publish_system_status(
         printer_state="error",
         message="Moonraker unavailable",
     )
 
-    assert captured, "Expected listener to receive status payload"
-    snapshot = captured[-1]
-    status = snapshot.get("result", {}).get("status", {})
-    assert status.get("print_stats", {}).get("state") == "error"
+    assert not captured, "Fabricated system status must not reach status listeners"
 
     await publisher.stop()
 
@@ -2874,9 +2878,10 @@ async def test_status_listener_handles_future_return() -> None:
 
     publisher.register_status_listener(_listener)
 
-    await publisher.publish_system_status(
-        printer_state="error",
-        message="Moonraker unavailable",
+    # Drive a real status update through the ingest pipeline (fabricated
+    # system-status payloads deliberately bypass listeners).
+    await moonraker.emit(
+        {"result": {"status": {"webhooks": {"state": "error"}}}}
     )
 
     await asyncio.sleep(0.05)
@@ -3491,7 +3496,7 @@ def test_sensors_output_pin_defaults_pwm_false() -> None:
 # ── discover_moonraker_sensors / fetch_output_pin_pwm_config tests ──
 
 
-from moonraker_owl.telemetry.moonraker_bridge import (
+from moonraker_owl.telemetry.moonraker_bridge import (  # noqa: E402
     discover_moonraker_sensors,
     fetch_output_pin_pwm_config,
     is_discoverable_object,
@@ -3526,7 +3531,7 @@ def test_discover_non_thermal_devices_from_registered_objects() -> None:
     ]
 
     current_objects: dict = {}
-    added = discover_moonraker_sensors(
+    discover_moonraker_sensors(
         source, heater_info, current_objects, sensor_filter,
         registered_objects=registered,
     )
@@ -3711,3 +3716,151 @@ async def test_discover_and_subscribe_no_resubscribe_when_unchanged() -> None:
 
     assert changed is False
     assert moonraker.resubscribe_calls == before
+
+
+@pytest.mark.asyncio
+async def test_start_is_idempotent_under_concurrent_calls(monkeypatch) -> None:
+    """Concurrent start() calls must create exactly one worker task."""
+    sample = _load_sample("moonraker-sample-printing.json")
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(sensors_interval_seconds=0.1)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    run_count = 0
+    original_run = TelemetryPublisher._run
+
+    async def counting_run(self):
+        nonlocal run_count
+        run_count += 1
+        await original_run(self)
+
+    monkeypatch.setattr(TelemetryPublisher, "_run", counting_run)
+
+    await asyncio.gather(publisher.start(), publisher.start())
+    try:
+        assert run_count == 1
+        worker = publisher._worker
+        assert worker is not None and not worker.done()
+
+        # A sequential start() while already running is also a no-op.
+        await publisher.start()
+        assert run_count == 1
+        assert publisher._worker is worker
+    finally:
+        await publisher.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_tracked_background_tasks(monkeypatch) -> None:
+    """Fire-and-forget tasks are strongly referenced and cancelled on stop()."""
+    sample = _load_sample("moonraker-sample-printing.json")
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(sensors_interval_seconds=0.1)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+    await publisher.start()
+
+    block = asyncio.Event()
+
+    async def blocking_discovery() -> bool:
+        await block.wait()
+        return False  # pragma: no cover - cancelled before returning
+
+    monkeypatch.setattr(
+        publisher, "_discover_and_subscribe_sensors", blocking_discovery
+    )
+    publisher._schedule_sensor_rediscovery()
+    await asyncio.sleep(0)
+
+    tasks = set(publisher._background_tasks)
+    assert len(tasks) == 1
+
+    await publisher.stop()
+
+    assert all(task.cancelled() for task in tasks)
+    assert not publisher._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_background_tasks_discarded_after_completion() -> None:
+    """Completed fire-and-forget tasks are dropped from the tracking set."""
+    sample = _load_sample("moonraker-sample-printing.json")
+    moonraker = FakeMoonrakerClient(sample)
+    mqtt = FakeMQTTClient()
+    config = build_config(sensors_interval_seconds=0.1)
+
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    publisher._schedule_listener_awaitable(asyncio.sleep(0))
+    assert len(publisher._background_tasks) == 1
+
+    await asyncio.sleep(0.01)
+    assert not publisher._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_history_notification_enqueued_after_query_normally() -> None:
+    """Normal path: the queried snapshot is enqueued BEFORE the raw
+    notification, so the worker merges final print_stats before the history
+    event and the terminal event carries final print_duration/filament_used
+    (the terminal event is emitted exactly once)."""
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config()
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    history_payload = {
+        "jsonrpc": "2.0",
+        "method": "notify_history_changed",
+        "params": [{
+            "action": "finished",
+            "job": {"job_id": "0000ABCD", "filename": "job.gcode", "status": "completed"},
+        }],
+    }
+    queried_snapshot = {"result": {"status": {"print_stats": {"state": "complete"}}}}
+
+    async def _fetch(objects: Any = None, timeout: float = 5.0) -> Dict[str, Any]:
+        return queried_snapshot
+
+    moonraker.fetch_printer_state = _fetch  # type: ignore[method-assign]
+
+    await publisher._handle_moonraker_update(history_payload)
+
+    first = publisher._queue.get_nowait()
+    second = publisher._queue.get_nowait()
+    assert first is queried_snapshot
+    assert second is history_payload
+
+
+@pytest.mark.asyncio
+async def test_history_notification_survives_callback_cancellation() -> None:
+    """Cancel path: if the callback is cancelled mid-query (dispatcher
+    timeout on a slow Moonraker), the raw notification must STILL be
+    enqueued via the finally — the job_status terminal signal is never lost
+    (2026-10 audit)."""
+    moonraker = FakeMoonrakerClient({"result": {"status": {}}})
+    mqtt = FakeMQTTClient()
+    config = build_config()
+    publisher = TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
+
+    history_payload = {
+        "jsonrpc": "2.0",
+        "method": "notify_history_changed",
+        "params": [{
+            "action": "finished",
+            "job": {"job_id": "0000ABCD", "filename": "job.gcode", "status": "completed"},
+        }],
+    }
+
+    async def _cancelled_fetch(objects: Any = None, timeout: float = 5.0) -> Dict[str, Any]:
+        raise asyncio.CancelledError()
+
+    moonraker.fetch_printer_state = _cancelled_fetch  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await publisher._handle_moonraker_update(history_payload)
+
+    assert publisher._queue.get_nowait() is history_payload

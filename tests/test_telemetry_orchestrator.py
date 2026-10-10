@@ -873,6 +873,74 @@ class TestPrintEventPayloads:
         assert event.data["filamentUsedMm"] > 0
         assert 0 <= event.data["progressPercent"] <= 100
 
+    def test_transient_status_frame_never_emits_or_wedges_print_events(self) -> None:
+        """publish_system_status must not poison print-event detection.
+
+        Regression for the 2026-10 audit finding: the fabricated error payload
+        used to go through orchestrator.ingest(), emitting a bogus print:failed
+        (printing -> error) and setting _terminal_event_emitted, so the real
+        print:completed was never emitted after Moonraker recovered. The
+        transient frame path must leave event detection untouched.
+        """
+        orchestrator = self._setup_active_job()
+
+        fabricated = {
+            "result": {
+                "status": {
+                    "print_stats": {"state": "error", "message": "Moonraker unavailable"},
+                    "display_status": {"message": "Moonraker unavailable"},
+                    "webhooks": {"state": "error"},
+                }
+            }
+        }
+
+        frame = orchestrator.build_transient_status_frame(fabricated)
+        assert frame is not None
+        assert frame.payload["lifecycle"]["phase"] == "Error"
+
+        # No print:failed (or any print event) was emitted by the override,
+        # and the store was restored.
+        stray = [
+            e for e in orchestrator.events.harvest()
+            if e.event_name.value.startswith("print:")
+        ]
+        assert stray == [], f"Transient status frame emitted events: {stray}"
+
+        # The real completion still produces print:completed afterwards.
+        orchestrator.ingest({
+            "result": {
+                "status": {
+                    "print_stats": {
+                        "state": "complete",
+                        "filename": "test_model.gcode",
+                        "print_duration": 4200.0,
+                        "filament_used": 1600.0,
+                        "message": "",
+                    },
+                    "virtual_sdcard": {"progress": 1.0},
+                },
+            },
+        })
+        orchestrator.ingest({
+            "jsonrpc": "2.0",
+            "method": "notify_history_changed",
+            "params": [{
+                "action": "finished",
+                "job": {
+                    "job_id": "0000ABCD",
+                    "filename": "test_model.gcode",
+                    "status": "completed",
+                },
+            }],
+        })
+
+        events = orchestrator.events.harvest()
+        completed = [e for e in events if e.event_name.value == "print:completed"]
+        assert completed, (
+            f"print:completed suppressed after transient system status; got: "
+            f"{[e.event_name.value for e in events]}"
+        )
+
     def test_print_cancelled_event_has_all_statistics(self) -> None:
         """print:cancelled event should include printDuration, filamentUsedMm, progressPercent."""
         orchestrator = self._setup_active_job()
@@ -1122,3 +1190,56 @@ def test_timelapse_polling_via_job_status_only_on_completed(baseline_snapshot: d
         "Timelapse polling SHOULD be enabled for completed job via job_status"
     )
 
+
+
+def test_preserved_reset_keeps_pending_events() -> None:
+    """A preserved reset (planned token renewal) must keep the unpublished
+    event backlog — the print state machine is preserved, so events detected
+    just before the restart must still publish after it (2026-10 audit)."""
+    now = datetime(2025, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+
+    orchestrator.ingest({
+        "result": {
+            "status": {
+                "print_stats": {
+                    "state": "printing",
+                    "filename": "job.gcode",
+                    "print_duration": 1.0,
+                    "filament_used": 0.0,
+                    "message": "",
+                },
+            },
+        },
+    })
+
+    snapshot = orchestrator.store.export_state()
+    orchestrator.reset(snapshot=snapshot)
+
+    names = [e.event_name.value for e in orchestrator.events.harvest()]
+    assert "print:started" in names
+
+
+def test_full_reset_still_clears_pending_events() -> None:
+    now = datetime(2025, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
+    clock = IncrementingClock(now, step=timedelta(seconds=1))
+    orchestrator = TelemetryOrchestrator(clock=clock)
+
+    orchestrator.ingest({
+        "result": {
+            "status": {
+                "print_stats": {
+                    "state": "printing",
+                    "filename": "job.gcode",
+                    "print_duration": 1.0,
+                    "filament_used": 0.0,
+                    "message": "",
+                },
+            },
+        },
+    })
+
+    orchestrator.reset()
+
+    assert orchestrator.events.harvest() == []

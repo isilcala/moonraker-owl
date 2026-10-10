@@ -187,7 +187,12 @@ class TelemetryOrchestrator:
         self.status_selector.reset()
         self.sensors_selector.reset()
         self.objects_selector.reset()
-        self.events.reset()
+        if snapshot is None:
+            # Full reset (agent restart): drop queued events. A preserved reset
+            # (planned token renewal) keeps them — the print state machine is
+            # preserved across the restart, so the not-yet-published event
+            # backlog must survive too instead of being silently discarded.
+            self.events.reset()
         self.session_tracker = PrintSessionTracker()
         self.heater_monitor = HeaterMonitor()
         self._sensors_mode = "idle"
@@ -414,6 +419,42 @@ class TelemetryOrchestrator:
                 )
 
         return frames
+
+    def build_transient_status_frame(
+        self, status_override: Dict[str, Any]
+    ) -> Optional[ChannelPayload]:
+        """Build a status frame from a temporary store override.
+
+        Used by ``publish_system_status``: the fabricated override is applied
+        to a store snapshot that is restored immediately afterwards, and
+        neither ``_detect_state_changes`` nor the event collector is touched.
+        A synthetic error state must never emit ``print:failed`` or poison
+        ``_last_print_state`` / ``_terminal_event_emitted`` — doing so closed
+        real print jobs with a bogus terminal failure and suppressed the
+        eventual ``print:completed`` (2026-10 audit).
+        """
+        snapshot = self.store.export_state()
+        try:
+            self.store.ingest(status_override)
+            session = self.session_tracker.compute(self.store)
+            observed_at = self._clock()
+            status_payload = self.status_selector.build(
+                self.store, session, self.heater_monitor, observed_at
+            )
+        finally:
+            self.store.restore_state(snapshot)
+
+        if not status_payload:
+            return None
+        cadence = status_payload.setdefault("cadence", {})
+        cadence["watchWindowActive"] = self._sensors_mode != "idle"
+        return ChannelPayload(
+            channel="status",
+            payload=status_payload,
+            session_id=session.session_id,
+            observed_at=observed_at,
+            forced=True,
+        )
 
     # -------------------------------------------------------------------------
     # Event Detection Methods

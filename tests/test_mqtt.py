@@ -95,6 +95,9 @@ class FakeMqttClient:
     def message_callback_add(self, topic, callback):
         self._events.setdefault("callbacks_added", []).append(topic)
 
+    def message_callback_remove(self, topic):
+        self._events.setdefault("callbacks_removed", []).append(topic)
+
     def unsubscribe(self, topic):
         self._events.setdefault("unsubscribed", []).append(topic)
         return self._subscribe_rc, 1
@@ -662,6 +665,31 @@ async def test_unsubscribe_drops_tracked_subscription(mqtt_client):
 
 
 @pytest.mark.asyncio
+async def test_unsubscribe_removes_per_topic_callback(mqtt_client):
+    """A handler-backed unsubscribe must also drop the paho message callback."""
+    client, events = mqtt_client
+
+    async def handler(topic, payload):
+        return None
+
+    client.subscribe_with_handler("owl/state/#", handler, qos=1)
+    assert "owl/state/#" in events["callbacks_added"]
+
+    client.unsubscribe("owl/state/#")
+    assert client.subscription_stats()["tracked"] == 0
+    assert "owl/state/#" in events["callbacks_removed"]
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_without_handler_skips_callback_remove(mqtt_client):
+    client, events = mqtt_client
+
+    client.subscribe("owl/cmd/#", qos=1)
+    client.unsubscribe("owl/cmd/#")
+    assert "callbacks_removed" not in events
+
+
+@pytest.mark.asyncio
 async def test_reconnect_tears_down_prior_client(mqtt_client):
     """A second connect without disconnect stops the previous paho client."""
     client, events = mqtt_client
@@ -712,3 +740,43 @@ def test_run_coro_on_loop_closes_coro_when_loop_closed():
     # Submitting again on the now-closed coroutine raises (already closed).
     with pytest.raises(RuntimeError):
         coro.send(None)
+
+
+@pytest.mark.asyncio
+async def test_paho_callbacks_dispatch_event_sets_via_loop_bridge():
+    """asyncio.Event.set() is not thread-safe: the paho-thread callbacks must
+    route it through _call_soon_on_loop like every other dispatch (2026-10
+    audit — the only three unbridged calls in the class)."""
+    from unittest.mock import Mock
+
+    config = CloudConfig(
+        base_url="https://api.owl.dev",
+        broker_host="broker.owl.dev",
+        broker_port=1883,
+        username="tenant:device",
+        password="token",
+    )
+    client = MQTTClient(config, client_id="printer-bridge")
+    client._loop = asyncio.get_running_loop()
+    client._connected_event = asyncio.Event()
+    client._disconnect_event = asyncio.Event()
+
+    scheduled: list = []
+    client._call_soon_on_loop = lambda callback, *args: scheduled.append(callback)
+
+    flags = SimpleNamespace(session_present=False)
+    client._on_connect(Mock(), None, flags, 0)
+    assert client._connected_event.set in scheduled
+    assert not client._connected_event.is_set()  # deferred to the loop
+
+    scheduled.clear()
+    client._on_disconnect(Mock(), None, Mock(), 0)
+    assert client._disconnect_event.set in scheduled
+    assert not client._disconnect_event.is_set()
+
+    # End-to-end through the real bridge: the waiter wakes promptly.
+    client2 = MQTTClient(config, client_id="printer-bridge-2")
+    client2._loop = asyncio.get_running_loop()
+    client2._connected_event = asyncio.Event()
+    client2._on_connect(Mock(), None, flags, 0)
+    await asyncio.wait_for(client2._connected_event.wait(), timeout=1.0)

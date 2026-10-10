@@ -18,15 +18,15 @@ from .cadence import (
 from .event_types import Event, EventName, EventPriority, EventSeverity
 from .events import EventCollector, RateLimitConfig
 from .orchestrator import ChannelPayload, TelemetryOrchestrator
-from .polling import DEFAULT_POLL_SPECS, PollSpec
+from .polling import DEFAULT_POLL_SPECS as DEFAULT_POLL_SPECS, PollSpec
 from .selectors import SensorFilter
 from .state_store import MoonrakerStateStore
 from .telemetry_state import TelemetryHasher
 
 # -- bridge re-exports -------------------------------------------------------
 from .moonraker_bridge import (
-    TelemetrySource,
-    discover_moonraker_sensors,
+    TelemetrySource as TelemetrySource,
+    discover_moonraker_sensors as discover_moonraker_sensors,
 )
 
 # -- publisher re-exports ----------------------------------------------------
@@ -37,8 +37,8 @@ from .publisher import (
     build_subscription_manifest,
     is_heater_object,
     heater_has_target,
-    _normalise_fields,
-    _normalise_field,
+    _normalise_fields as _normalise_fields,
+    _normalise_field as _normalise_field,
 )
 
 __all__ = [

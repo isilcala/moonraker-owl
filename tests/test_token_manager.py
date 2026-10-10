@@ -2,9 +2,8 @@
 
 import asyncio
 import base64
-import json
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 import aiohttp
@@ -910,3 +909,90 @@ async def test_start_renewal_loop_is_idempotent(ed25519_keypair):
     assert manager._renewal_task is first
 
     await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_renewal_loop_stops_permanently_on_revoked(ed25519_keypair):
+    """401/404 is permanent: the renewal loop must stop, flag is_revoked and
+    fire on_revoked instead of spinning at 1h backoff forever (2026-10 audit)."""
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(status=404, text="Device not found")
+
+    app = web.Application()
+    app.router.add_post("/api/v1/devices/token", handler)
+
+    async with TestServer(app) as server:
+        revoked_calls = 0
+
+        def _on_revoked():
+            nonlocal revoked_calls
+            revoked_calls += 1
+
+        manager = TokenManager(
+            device_id="device-123",
+            private_key_b64=ed25519_keypair["private_key_b64"],
+            base_url=str(server.make_url("/")),
+            on_revoked=_on_revoked,
+        )
+        manager._session = aiohttp.ClientSession()
+        manager._current_token = TokenCredentials(
+            jwt="jwt",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            issued_at=datetime.now(timezone.utc),
+        )
+        manager._calculate_renewal_interval = lambda: 0.01
+
+        await asyncio.wait_for(manager._renewal_loop(None), timeout=5.0)
+
+        assert manager.is_revoked
+        assert manager.renewal_failures == 0
+        assert revoked_calls == 1
+
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_renewal_callback_failure_is_not_counted_as_renewal_failure(
+    ed25519_keypair,
+):
+    """A failing on_renewed callback must not re-issue the token or count as a
+    renewal failure — the renewal itself succeeded (2026-10 audit)."""
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.json_response({
+            "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test.sig",
+            "issuedAt": datetime.now(timezone.utc).isoformat(),
+            "expiresIn": 3600,
+            "tokenType": "Bearer",
+        })
+
+    app = web.Application()
+    app.router.add_post("/api/v1/devices/token", handler)
+
+    async with TestServer(app) as server:
+        manager = TokenManager(
+            device_id="device-123",
+            private_key_b64=ed25519_keypair["private_key_b64"],
+            base_url=str(server.make_url("/")),
+        )
+        manager._session = aiohttp.ClientSession()
+        manager._current_token = TokenCredentials(
+            jwt="jwt",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            issued_at=datetime.now(timezone.utc),
+        )
+        manager._calculate_renewal_interval = lambda: 0.01
+
+        async def _bad_callback():
+            raise RuntimeError("callback boom")
+
+        task = asyncio.create_task(manager._renewal_loop(_bad_callback))
+        await asyncio.sleep(0.05)  # several renewal ticks
+        manager._stop_event.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+        assert manager.renewal_failures == 0
+        assert not manager.is_revoked
+
+        await manager.stop()

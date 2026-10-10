@@ -7,6 +7,8 @@ import contextlib
 import json
 import logging
 import os
+import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -87,6 +89,11 @@ _ALLOWED_TRANSITIONS: dict[AgentState, set[AgentState]] = {
         AgentState.STOPPING,
     },
     AgentState.RECOVERING: {
+        # _start_services() can be re-entered from RECOVERING (startup retry
+        # loop) and re-runs the full COLD_START -> AWAITING_* -> ACTIVE chain.
+        AgentState.COLD_START,
+        AgentState.AWAITING_MQTT,
+        AgentState.AWAITING_MOONRAKER,
         AgentState.ACTIVE,
         AgentState.DEGRADED,
         AgentState.STOPPING,
@@ -162,7 +169,6 @@ class MoonrakerOwlApp:
         # and processor.start() can never run concurrently on the shared
         # publisher/processor instances (see _start_runtime_components).
         self._runtime_start_lock: Optional[asyncio.Lock] = None
-        self._component_restart_in_progress = False
         self._connection_recovery_epoch = 0
         self._connection_restore_requested_epoch = 0
         self._connection_restore_completed_epoch = 0
@@ -170,6 +176,9 @@ class MoonrakerOwlApp:
         self._connection_restore_task: Optional[asyncio.Task[None]] = None
         # Track last reconnection reason for state preservation decisions
         self._last_reconnect_reason: Optional[ReconnectReason] = None
+        # Sliding window of MQTT-5 rc=142 (session taken over) disconnects,
+        # used to hard-back-off and alert on duplicate-agent ping-pong.
+        self._session_takeover_times: "deque[float]" = deque()
         # Shared registry for PrintJob ID mapping (populated by job:registered commands)
         self._job_registry = PrintJobRegistry()
         # Metadata reporter for device capability reporting (ADR-0032)
@@ -492,7 +501,13 @@ class MoonrakerOwlApp:
             # short-circuits instead of feeding events into the dead coordinator.
             self._connection_coordinator = None
 
-        # 2. Disconnect MQTT client (fires on_disconnect callback, but
+        # 2. Stop the health publisher BEFORE disconnecting MQTT: its periodic
+        #    tick publishes to the broker, so leaving it running across the
+        #    retry gap just spams "publish failed (rc=4)" warnings.
+        if self._health_publisher is not None:
+            await self._stop_health_publisher()
+
+        # 3. Disconnect MQTT client (fires on_disconnect callback, but
         #    coordinator is None so _on_mqtt_disconnect is a no-op).
         if self._mqtt_client is not None:
             try:
@@ -501,7 +516,7 @@ class MoonrakerOwlApp:
                 pass
             self._mqtt_client = None
 
-        # 3. Stop token-manager renewal loop.
+        # 4. Stop token-manager renewal loop.
         if self._token_manager is not None:
             try:
                 await self._token_manager.stop()
@@ -509,17 +524,15 @@ class MoonrakerOwlApp:
                 pass
             self._token_manager = None
 
-        # 4. Stop remaining optional services that hold sockets / aiohttp
-        #    sessions (avoids "Unclosed client session" warnings).
+        # 5. Stop remaining optional services that hold sockets / aiohttp
+        #    sessions (avoids "Unclosed client session" warnings). These are
+        #    HTTP/S3-based, so they are unaffected by the MQTT disconnect.
         if self._metadata_reporter is not None:
             try:
                 await self._metadata_reporter.stop()
             except Exception:
                 pass
             self._metadata_reporter = None
-
-        if self._health_publisher is not None:
-            await self._stop_health_publisher()
 
         if self._cloud_config_manager is not None:
             try:
@@ -542,7 +555,7 @@ class MoonrakerOwlApp:
                 pass
             self._thumbnail_uploader = None
 
-        # 5. Release the health-server port so the new attempt can bind it.
+        # 6. Release the health-server port so the new attempt can bind it.
         await self._stop_health_server()
 
     def _ensure_printer_backend(self) -> None:
@@ -608,6 +621,7 @@ class MoonrakerOwlApp:
                 device_id=device_id,
                 private_key_b64=self._config.cloud.device_private_key,
                 base_url=self._config.cloud.base_url,
+                on_revoked=self._on_credentials_revoked,
             )
             await self._token_manager.start()
             LOGGER.info("TokenManager initialized successfully")
@@ -1402,7 +1416,6 @@ class MoonrakerOwlApp:
                     continue
 
                 restore_reason = self._connection_restore_reason
-                self._component_restart_in_progress = True
                 try:
                     try:
                         await self._do_connection_restored(
@@ -1415,7 +1428,6 @@ class MoonrakerOwlApp:
                             recovery_epoch,
                         )
                 finally:
-                    self._component_restart_in_progress = False
                     self._connection_restore_completed_epoch = max(
                         self._connection_restore_completed_epoch,
                         recovery_epoch,
@@ -1620,16 +1632,74 @@ class MoonrakerOwlApp:
             # MQTT v5: rc=134 = Bad user name or password, rc=135 = Not authorized
             if rc in (5, 134, 135):
                 reason = ReconnectReason.AUTH_FAILURE
+            elif rc == 142:
+                # Session taken over: another client connected with the same
+                # client_id (a second agent instance for this device).
+                # Reconnecting immediately makes the two instances kick each
+                # other in a permanent ping-pong — back off hard instead.
+                self._handle_session_takeover()
+                return
             else:
                 reason = ReconnectReason.CONNECTION_LOST
 
             self._connection_coordinator.request_reconnect(reason)
 
+    def _handle_session_takeover(self) -> None:
+        """Hard back-off + alerting for rc=142 (duplicate client_id) disconnects."""
+        now = time.monotonic()
+        times = self._session_takeover_times
+        times.append(now)
+        while times and now - times[0] > 600:
+            times.popleft()
+
+        count = len(times)
+        delay = min(300.0, 10.0 * (2 ** (count - 1)))
+        if count >= 3:
+            LOGGER.critical(
+                "MQTT session taken over %d times within 10 minutes — another "
+                "agent instance is using this device's client_id. Reconnecting "
+                "in %.0fs; stop the duplicate instance to end the ping-pong.",
+                count,
+                delay,
+            )
+        else:
+            LOGGER.warning(
+                "MQTT session taken over by another client with the same "
+                "client_id; reconnecting in %.0fs",
+                delay,
+            )
+
+        loop = self._loop
+        coordinator = self._connection_coordinator
+        if loop is None or coordinator is None:
+            return
+
+        def _request() -> None:
+            if self._stopping or self._connection_coordinator is not coordinator:
+                return
+            coordinator.request_reconnect(ReconnectReason.CONNECTION_LOST)
+
+        loop.call_later(delay, _request)
+
     def _on_mqtt_connect(self, rc: int) -> None:
         if self._stopping:
             return
         self._mqtt_ready = True
+        # A stable connection ends the session-takeover ping-pong window.
+        self._session_takeover_times.clear()
         self._schedule_health_update("mqtt", True, None)
+
+    async def _on_credentials_revoked(self) -> None:
+        """Called by TokenManager when the cloud permanently rejects credentials."""
+        await self._health.update(
+            "mqtt",
+            False,
+            "device credentials revoked — re-link required (moonraker-owl link)",
+        )
+        await self._transition_state(
+            AgentState.DEGRADED,
+            detail="credentials revoked; re-link required",
+        )
 
     def _on_unrecoverable_connection_supervisor_failure(
         self, restart_attempts: int

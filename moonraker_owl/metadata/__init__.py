@@ -31,11 +31,16 @@ from .providers import (
     SensorInventoryProvider,
     SystemInfoProvider,
 )
-from .reporter import MetadataReporter, MetadataReporterConfig
+from .reporter import (
+    MetadataReporter,
+    MetadataReporterConfig,
+    MetadataUploadRejectedError,
+)
 
 __all__ = [
     "MetadataReporter",
     "MetadataReporterConfig",
+    "MetadataUploadRejectedError",
     "CapabilityProvider",
     "BaseProvider",
     "SystemInfoProvider",

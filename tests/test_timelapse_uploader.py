@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock
 
 import pytest
 
-from moonraker_owl.adapters.s3_upload import S3UploadClient, UploadResult
+from moonraker_owl.adapters.s3_upload import UploadResult
 from moonraker_owl.adapters.timelapse_uploader import (
     MAX_UPLOAD_RETRIES,
-    NoJobMatchError,
-    TierGatingError,
     TimelapseUploader,
-    UploadAuthorization,
-    _AlreadyUploadedError,
 )
 
 

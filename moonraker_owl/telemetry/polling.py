@@ -6,7 +6,8 @@ environment sensors).
 
 Design principles:
 - Declarative polling specs rather than imperative loops
-- Isolated from the main telemetry publisher
+- Exponential backoff (capped) + rate-limited failure logging when Moonraker
+  is unhealthy
 - Graceful cancellation on shutdown
 """
 
@@ -144,11 +145,21 @@ class PollingScheduler:
 
         for spec in self._poll_specs:
             manifest = build_manifest(spec.fields, ())
-            filtered = {
-                key: value
-                for key, value in manifest.items()
-                if key and key not in self._subscribed_objects
-            }
+
+            if spec.force_poll:
+                # Include all objects from the manifest, even if already
+                # subscribed (critical state that must stay synchronized).
+                filtered = {
+                    key: value
+                    for key, value in manifest.items()
+                    if key
+                }
+            else:
+                filtered = {
+                    key: value
+                    for key, value in manifest.items()
+                    if key and key not in self._subscribed_objects
+                }
 
             if not filtered:
                 continue
@@ -165,6 +176,15 @@ class PollingScheduler:
                     interval=interval,
                     initial_delay=initial_delay,
                 )
+            )
+
+        # Log poll groups for debugging
+        for group in self._poll_groups:
+            LOGGER.debug(
+                "Poll group '%s': interval=%.1fs objects=%s",
+                group.name,
+                group.interval,
+                list(group.objects.keys()),
             )
 
     def start(self) -> None:

@@ -12,6 +12,7 @@ from typing import Any, Mapping, Optional
 
 try:
     import aiohttp
+    from aiohttp import WSMessage
 except ImportError as exc:  # pragma: no cover - import guard
     raise SystemExit(
         "The aiohttp package is required. Install it via 'python -m pip install aiohttp'."

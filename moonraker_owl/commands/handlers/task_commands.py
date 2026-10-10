@@ -394,27 +394,24 @@ class TaskCommandsMixin:
                             suffix=".gcode", delete=False
                         )
                         tmp_path = tmp_fd.name
-                        try:
-                            sha256 = hashlib.sha256()
-                            total_bytes = 0
-                            with tmp_fd:
-                                async for chunk in response.content.iter_chunked(64 * 1024):
-                                    tmp_fd.write(chunk)
-                                    sha256.update(chunk)
-                                    total_bytes += len(chunk)
-                                    # Audit A-02: enforce hard cap on
-                                    # actual streamed bytes. A malicious
-                                    # server can ignore Content-Length
-                                    # and stream forever; abort early.
-                                    if total_bytes > MAX_DOWNLOAD_BYTES:
-                                        raise CommandProcessingError(
-                                            f"download exceeded hard cap of "
-                                            f"{MAX_DOWNLOAD_BYTES} bytes",
-                                            code="download_too_large",
-                                            command_id=message.command_id,
-                                        )
-                        except Exception:
-                            raise
+                        sha256 = hashlib.sha256()
+                        total_bytes = 0
+                        with tmp_fd:
+                            async for chunk in response.content.iter_chunked(64 * 1024):
+                                tmp_fd.write(chunk)
+                                sha256.update(chunk)
+                                total_bytes += len(chunk)
+                                # Audit A-02: enforce hard cap on
+                                # actual streamed bytes. A malicious
+                                # server can ignore Content-Length
+                                # and stream forever; abort early.
+                                if total_bytes > MAX_DOWNLOAD_BYTES:
+                                    raise CommandProcessingError(
+                                        f"download exceeded hard cap of "
+                                        f"{MAX_DOWNLOAD_BYTES} bytes",
+                                        code="download_too_large",
+                                        command_id=message.command_id,
+                                    )
 
             download_ms = int((_time.monotonic() - start_time) * 1000)
 

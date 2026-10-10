@@ -38,20 +38,14 @@ from paho.mqtt.properties import Properties
 
 from .. import constants
 from ..adapters import MQTTConnectionError
-from ..config import CompressionConfig, OwlConfig
+from ..config import OwlConfig
 from ..core import deep_merge
 from ..identifiers import uuid7
 from ..serialization import json_default
 from ..tracing import create_traceparent
 from .cadence import (
     ChannelCadenceController,
-    ChannelDecision,
-    ChannelRuntimeState,
-    ChannelSchedule,
-    TelemetryCadenceError,
 )
-from .event_types import Event, EventName, EventPriority, EventSeverity
-from .events import EventCollector, RateLimitConfig
 from .moonraker_bridge import (
     TelemetrySource,
     discover_moonraker_sensors,
@@ -60,9 +54,8 @@ from .moonraker_bridge import (
     heater_has_target,
 )
 from .orchestrator import ChannelPayload, TelemetryOrchestrator
-from .polling import DEFAULT_POLL_SPECS, PollSpec
+from .polling import DEFAULT_POLL_SPECS, PollSpec, PollingScheduler
 from .selectors import SensorFilter
-from .state_store import MoonrakerStateStore
 from .telemetry_state import TelemetryHasher
 
 if TYPE_CHECKING:
@@ -88,14 +81,6 @@ class TelemetryConfigurationError(RuntimeError):
 @dataclass
 class _ChannelPublishState:
     sequence: int = 0
-
-
-@dataclass
-class _PollGroup:
-    name: str
-    objects: dict[str, Optional[list[str]]]
-    interval: float
-    initial_delay: float
 
 
 @dataclass
@@ -203,14 +188,21 @@ class TelemetryPublisher:
         self._static_manifest_keys = frozenset(self._subscription_objects)
         self._source.set_subscription_objects(self._subscription_objects)
 
-        self._poll_specs = tuple(poll_specs or DEFAULT_POLL_SPECS)
-        self._poll_groups = self._build_poll_groups()
-        self._poll_tasks: list[asyncio.Task[None]] = []
-
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=max(queue_size, 1))
         self._event = asyncio.Event()
         self._stop_event = asyncio.Event()
+
+        # Declarative polling for objects not covered by subscriptions; the
+        # scheduler owns exponential backoff + rate-limited failure logging.
+        self._poll_scheduler = PollingScheduler(
+            fetch_state=self._source.fetch_printer_state,
+            enqueue=self._enqueue,
+            stop_event=self._stop_event,
+            poll_specs=poll_specs or DEFAULT_POLL_SPECS,
+            subscribed_objects=set(self._subscription_objects),
+        )
+        self._poll_scheduler.build_poll_groups(build_subscription_manifest)
         # Visibility for the intake queue: count dropped snapshots and rate-limit
         # the warning so an overloaded agent reports backpressure without spamming.
         self._queue_dropped_total = 0
@@ -226,6 +218,14 @@ class TelemetryPublisher:
         self._active_rate_request: Optional[_RateRequest] = None
         self._last_printer_state: Optional[str] = None
         self._resubscribe_task: Optional[asyncio.Task[None]] = None
+        # Serializes start()/stop() so concurrent lifecycle calls cannot leak a
+        # worker (two racing start() calls would each build a worker consuming
+        # the same queue, and stop() would only cancel one of them).
+        self._lifecycle_lock = asyncio.Lock()
+        # Strong references for fire-and-forget background tasks — the event
+        # loop only holds weak refs, so untracked tasks can be GC'd mid-flight.
+        # Drained and cancelled on stop().
+        self._background_tasks: set[asyncio.Task[None]] = set()
         # Cache the last listener state we logged so debug output only fires on transitions.
         self._last_listener_state: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = None
         self._klippy_ready_applied = False
@@ -350,34 +350,39 @@ class TelemetryPublisher:
                 to avoid spurious print:started events when the print is still
                 in progress.
         """
-        await self._dispose_worker(remove_callback=True)
+        async with self._lifecycle_lock:
+            worker = self._worker
+            if worker is not None and not worker.done():
+                LOGGER.debug("Telemetry publisher already running; start() no-op")
+                return
+            await self._dispose_worker(remove_callback=True)
 
-        self._loop = asyncio.get_running_loop()
-        self._stop_event.clear()
-        self._reset_runtime_state(preserve_print_state=preserve_print_state)
+            self._loop = asyncio.get_running_loop()
+            self._stop_event.clear()
+            self._reset_runtime_state(preserve_print_state=preserve_print_state)
 
-        # Discover available heaters and sensors before subscribing
-        await self._discover_and_subscribe_sensors()
+            # Discover available heaters and sensors before subscribing
+            await self._discover_and_subscribe_sensors()
 
-        await self._prime_initial_state()
+            await self._prime_initial_state()
 
-        callback_registered = False
-        try:
-            await self._source.start(self._handle_moonraker_update)
-        except ValueError as exc:
-            message = str(exc)
-            if "callback already registered" not in message.lower():
-                raise
-            # Normal re-entry scenario - callback already registered
-            callback_registered = True
-        else:
-            callback_registered = True
+            callback_registered = False
+            try:
+                await self._source.start(self._handle_moonraker_update)
+            except ValueError as exc:
+                message = str(exc)
+                if "callback already registered" not in message.lower():
+                    raise
+                # Normal re-entry scenario - callback already registered
+                callback_registered = True
+            else:
+                callback_registered = True
 
-        self._callback_registered = callback_registered
+            self._callback_registered = callback_registered
 
-        self._worker = asyncio.create_task(self._run())
-        self._start_pollers()
-        self._start_timelapse_poller()
+            self._worker = asyncio.create_task(self._run())
+            self._poll_scheduler.start()
+            self._start_timelapse_poller()
 
     async def _discover_and_subscribe_sensors(self) -> bool:
         """Discover available heaters/sensors and update subscriptions.
@@ -450,20 +455,22 @@ class TelemetryPublisher:
         return bool(changed)
 
     async def stop(self) -> None:
-        self._stop_event.set()
-        self._event.set()
+        async with self._lifecycle_lock:
+            self._stop_event.set()
+            self._event.set()
 
-        await self._cancel_pollers()
-        await self._cancel_timelapse_poller()
+            await self._poll_scheduler.stop()
+            await self._cancel_timelapse_poller()
 
-        await self._dispose_worker(remove_callback=True)
-        # Removed: Agent no longer sets retained flag, Nexus snapshot provides authoritative state
-        self._cancel_pending_timer()
-        self._pending_channels.clear()
-        resubscribe_task = self._resubscribe_task
-        if resubscribe_task is not None:
-            resubscribe_task.cancel()
-            self._resubscribe_task = None
+            await self._dispose_worker(remove_callback=True)
+            # Removed: Agent no longer sets retained flag, Nexus snapshot provides authoritative state
+            self._cancel_pending_timer()
+            self._pending_channels.clear()
+            resubscribe_task = self._resubscribe_task
+            if resubscribe_task is not None:
+                resubscribe_task.cancel()
+                self._resubscribe_task = None
+            await self._cancel_background_tasks()
 
     async def request_print_state_query(self) -> None:
         """Request an immediate print_stats query to refresh state.
@@ -520,19 +527,30 @@ class TelemetryPublisher:
         await self._enqueue(snapshot)
 
     async def _handle_moonraker_update(self, payload: Dict[str, Any]) -> None:
-        # Query-on-notification for print_stats (ADR-0003 pattern).
-        # Moonraker's notify_status_update does NOT reliably push state changes.
-        # Testing confirmed that Moonraker sometimes omits state=printing entirely,
-        # jumping directly from standby to error. The notify_history_changed event
-        # (action:added) is the only reliable indicator of print start.
-        await self._query_print_stats_on_job_start(payload)
-        
-        # Query print_stats on klippy ready to get actual state after recovery.
-        # The state_store does NOT reset print_stats to standby (to avoid spurious
-        # printStarted events), so we must query to refresh the actual state.
-        await self._query_print_stats_on_klippy_ready(payload)
-        
-        await self._enqueue(payload)
+        try:
+            # Query-on-notification for print_stats (ADR-0003 pattern).
+            # Moonraker's notify_status_update does NOT reliably push state changes.
+            # Testing confirmed that Moonraker sometimes omits state=printing entirely,
+            # jumping directly from standby to error. The notify_history_changed event
+            # (action:added) is the only reliable indicator of print start.
+            await self._query_print_stats_on_job_start(payload)
+
+            # Query print_stats on klippy ready to get actual state after recovery.
+            # The state_store does NOT reset print_stats to standby (to avoid spurious
+            # printStarted events), so we must query to refresh the actual state.
+            await self._query_print_stats_on_klippy_ready(payload)
+        finally:
+            # Enqueue the raw notification LAST on the normal path: the queried
+            # snapshot then reaches the worker first, so terminal events carry
+            # the final print_duration/filament_used (the terminal event is
+            # emitted exactly once — a snapshot merged afterwards can never
+            # correct it). The finally guarantees the enqueue even when this
+            # callback is cancelled mid-query (dispatcher timeout on a slow
+            # Moonraker, most likely at print completion): the job_status
+            # terminal signal — the most reliable end-of-print source — is
+            # never lost, at the acceptable cost of slightly stale stats on
+            # that rare path.
+            await self._enqueue(payload)
 
     async def _query_print_stats_on_job_start(self, payload: Dict[str, Any]) -> None:
         """Query print_stats on history events (job start/finish).
@@ -683,69 +701,23 @@ class TelemetryPublisher:
             "dropped_total": self._queue_dropped_total,
         }
 
-    def _build_poll_groups(self) -> list[_PollGroup]:
-        if not self._poll_specs:
-            return []
+    def _track_background_task(self, task: asyncio.Task[None]) -> None:
+        """Hold a strong reference to a fire-and-forget task until it completes."""
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
-        subscribed = set(self._subscription_objects.keys())
-        groups: list[_PollGroup] = []
+    async def _cancel_background_tasks(self) -> None:
+        """Cancel all tracked fire-and-forget tasks (called from stop())."""
+        # Snapshot: done_callbacks discard from the live set as tasks finish.
+        tasks = list(self._background_tasks)
+        self._background_tasks = set()
 
-        for spec in self._poll_specs:
-            manifest = build_subscription_manifest(spec.fields, ())
-            
-            # Check if this spec should force polling even for subscribed objects
-            force_poll = getattr(spec, 'force_poll', False)
-            
-            if force_poll:
-                # Include all objects from the manifest, even if already subscribed
-                filtered = {
-                    key: value
-                    for key, value in manifest.items()
-                    if key
-                }
-            else:
-                # Filter out already-subscribed objects (original behavior)
-                filtered = {
-                    key: value
-                    for key, value in manifest.items()
-                    if key and key not in subscribed
-                }
+        for task in tasks:
+            task.cancel()
 
-            if not filtered:
-                continue
-
-            interval = spec.interval_seconds if spec.interval_seconds > 0 else 60.0
-            initial_delay = (
-                spec.initial_delay_seconds if spec.initial_delay_seconds > 0 else 0.0
-            )
-
-            groups.append(
-                _PollGroup(
-                    name=spec.name,
-                    objects=filtered,
-                    interval=interval,
-                    initial_delay=initial_delay,
-                )
-            )
-
-        # Log poll groups for debugging
-        for group in groups:
-            LOGGER.debug(
-                "Poll group '%s': interval=%.1fs objects=%s",
-                group.name,
-                group.interval,
-                list(group.objects.keys()),
-            )
-
-        return groups
-
-    def _start_pollers(self) -> None:
-        if self._poll_tasks or not self._poll_groups:
-            return
-
-        for group in self._poll_groups:
-            task = asyncio.create_task(self._poll_loop(group))
-            self._poll_tasks.append(task)
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     def _start_timelapse_poller(self) -> None:
         """Start the timelapse polling fallback task."""
@@ -818,48 +790,6 @@ class TelemetryPublisher:
             except Exception:
                 LOGGER.exception("Timelapse poll loop error")
                 await asyncio.sleep(self._timelapse_poll_interval)
-
-    async def _cancel_pollers(self) -> None:
-        if not self._poll_tasks:
-            return
-
-        for task in self._poll_tasks:
-            task.cancel()
-
-        for task in self._poll_tasks:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-        self._poll_tasks.clear()
-
-    async def _poll_loop(self, group: _PollGroup) -> None:
-        if not group.objects:
-            return
-
-        delay = max(group.initial_delay, 0.0)
-        if delay:
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
-                return
-            except asyncio.TimeoutError:
-                pass
-
-        while not self._stop_event.is_set():
-            try:
-                payload = await self._source.fetch_printer_state(group.objects)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # pragma: no cover - defensive logging
-                pass  # Polling failure handled by circuit breaker
-            else:
-                await self._enqueue(payload)
-
-            interval = max(group.interval, 0.1)
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
-                break
-            except asyncio.TimeoutError:
-                continue
 
     async def _run(self) -> None:
         loop = self._loop or asyncio.get_running_loop()
@@ -1022,8 +952,6 @@ class TelemetryPublisher:
         raw_json: Optional[str] = None
         if include_raw:
             raw_json = json.dumps(payload, default=json_default)
-
-        now_monotonic = time.monotonic()
 
         deferred = False
         min_delay: Optional[float] = None
@@ -1965,19 +1893,41 @@ class TelemetryPublisher:
             }
         }
 
-        snapshot = self._orchestrator.store.export_state()
-        try:
-            await self._process_payload(
-                status_payload,
-                overrides={
-                    "status": _PendingChannel(
-                        forced=True,
-                        respect_cadence=False,
-                    )
-                },
-            )
-        finally:
-            self._orchestrator.store.restore_state(snapshot)
+        # Bypass the ingest pipeline: the fabricated state is not real printer
+        # data, so it must never reach event detection (which would emit a
+        # bogus print:failed and wedge _terminal_event_emitted), the klippy
+        # handler, status listeners, or the cadence scheduler. Only the store
+        # snapshot is borrowed to render the frame, then restored.
+        frame = self._orchestrator.build_transient_status_frame(status_payload)
+        if frame is None:
+            return
+
+        topic = self._channel_topics.get("status")
+        if topic is None:
+            return
+
+        # Route through the cadence controller (forced) so it records the
+        # published error content; otherwise the genuine recovery status —
+        # unchanged since bootstrap — would be suppressed until the next
+        # heartbeat and the cloud would keep showing a stale error.
+        decision = self._cadence_controller.evaluate(
+            "status",
+            frame.payload,
+            explicit_force=True,
+            respect_cadence=False,
+            allow_force_publish=False,
+        )
+        if not decision.should_publish:
+            return
+
+        envelope = self._wrap_envelope(
+            "status",
+            frame,
+            include_raw=False,
+            raw_json=None,
+        )
+        # Agent never uses retained messages - Nexus snapshot provides authority
+        self._publish("status", topic, envelope, retain=False)
 
     def register_status_listener(
         self,
@@ -2124,7 +2074,7 @@ class TelemetryPublisher:
             # object set changed (P1-13), so no explicit resubscribe is needed
             # here.
 
-        loop.create_task(_run())
+        self._track_background_task(loop.create_task(_run()))
 
     def _schedule_resubscribe(self, reason: str) -> None:
         if not hasattr(self._source, "resubscribe"):
@@ -2164,7 +2114,7 @@ class TelemetryPublisher:
                 await self._prime_initial_state()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # pragma: no cover - defensive logging
+            except Exception as exc:  # pragma: no cover - defensive logging
                 LOGGER.warning(
                     "Failed to refresh Moonraker snapshot after %s: %s",
                     reason,
@@ -2200,7 +2150,7 @@ class TelemetryPublisher:
                 LOGGER.warning("Status listener awaitable raised", exc_info=True)
 
         try:
-            loop.create_task(_runner())
+            self._track_background_task(loop.create_task(_runner()))
         except Exception:  # pragma: no cover - defensive logging
             pass  # Task scheduling failed - no recovery possible
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 
 from moonraker_owl import host_metrics
-from moonraker_owl.host_metrics import HostSample, NetworkSample
+from moonraker_owl.host_metrics import HostSample
 
 _PROC_NET_WIRELESS_SAMPLE = """\
 Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE

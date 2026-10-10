@@ -16,7 +16,9 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Awaitable, Callable, Deque, List, Optional, Union
+from typing import TYPE_CHECKING, Awaitable, Callable, Deque, List, Optional
+
+from .token_manager import TokenRevokedError
 
 if TYPE_CHECKING:
     from .adapters.mqtt import MQTTClient
@@ -658,6 +660,16 @@ class ConnectionCoordinator:
             try:
                 LOGGER.info("Refreshing JWT token due to auth failure")
                 await self._token_manager.refresh_token_now()
+            except TokenRevokedError as exc:
+                # Permanent rejection: reconnecting with these credentials can
+                # never succeed. Abandon and let the operator re-link.
+                LOGGER.critical(
+                    "Device credentials permanently rejected (%s); abandoning "
+                    "reconnection — re-link the device to recover.",
+                    exc,
+                )
+                self._state = ConnectionState.DISCONNECTED
+                return
             except Exception as exc:
                 LOGGER.error("Failed to refresh token: %s", exc)
                 # Continue with reconnection anyway - token might still be valid
@@ -734,6 +746,13 @@ class ConnectionCoordinator:
                             self._mqtt_client.last_connect_rc,
                         )
                         await self._token_manager.refresh_token_now()
+                    except TokenRevokedError as exc:
+                        LOGGER.critical(
+                            "Device credentials permanently rejected (%s); "
+                            "abandoning reconnection — re-link the device to recover.",
+                            exc,
+                        )
+                        return False
                     except Exception as refresh_exc:
                         LOGGER.error(
                             "Failed to refresh token during reconnection: %s",

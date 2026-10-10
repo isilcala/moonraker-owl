@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from moonraker_owl.commands import _parse_command, CommandMessage
+from moonraker_owl.commands import _parse_command
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "contracts"
 
@@ -309,8 +309,7 @@ class TestLwtPayloadStructure:
 # Value validation: verify field values match expected formats
 # ---------------------------------------------------------------------------
 
-import re
-from datetime import datetime as _dt
+import re  # noqa: E402
 
 
 _UUID_RE = re.compile(

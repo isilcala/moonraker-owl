@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, Optional
 
 import aiohttp
 
-from .s3_upload import S3UploadClient, UploadResult
+from .s3_upload import S3UploadClient
 
 LOGGER = logging.getLogger(__name__)
 
@@ -413,7 +413,7 @@ class TimelapseUploader:
             result = await self._s3_client.upload(
                 presigned_url=presigned_url,
                 data=preview_data,
-                s3_key=f"timelapse-preview",
+                s3_key="timelapse-preview",
                 content_type="image/jpeg",
             )
 

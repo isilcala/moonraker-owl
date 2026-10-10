@@ -233,7 +233,6 @@ async def test_query_file_list_filters_thumbs_and_non_gcode(config):
 
     ack = json.loads(mqtt.published[1][1].decode("utf-8"))
     result = ack["payload"]["result"]
-    all_paths = [i["path"] for i in result["items"]]
     # Flatten: directories have no path with .thumbs
     for item in result["items"]:
         assert not item.get("path", "").startswith(".thumbs/")
@@ -518,7 +517,9 @@ def test_register_command_rejects_duplicate_without_override(config) -> None:
         processor.register_command(existing, lambda m: None)
 
     # override=True allows replacement.
-    sentinel = lambda m: {"replaced": True}
+    def sentinel(m):
+        return {"replaced": True}
+
     processor.register_command(existing, sentinel, override=True)
     assert processor._dispatch[existing] is sentinel
 

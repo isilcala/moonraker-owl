@@ -5,7 +5,6 @@ Validates allowlist/denylist semantics, core-sensor guarantees, and edge cases.
 
 from __future__ import annotations
 
-import pytest
 
 from moonraker_owl.config import CORE_SENSORS
 from moonraker_owl.telemetry.selectors import SensorFilter

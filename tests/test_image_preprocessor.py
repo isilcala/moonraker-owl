@@ -9,9 +9,9 @@ import pytest
 
 # Skip all tests if Pillow is not available
 PIL = pytest.importorskip("PIL")
-from PIL import Image
+from PIL import Image  # noqa: E402
 
-from moonraker_owl.adapters.image_preprocessor import (
+from moonraker_owl.adapters.image_preprocessor import (  # noqa: E402
     ImagePreprocessor,
     PreprocessResult,
     PILLOW_AVAILABLE,

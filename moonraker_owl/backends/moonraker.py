@@ -9,8 +9,6 @@ running Moonraker. It handles:
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -88,6 +86,13 @@ class MoonrakerBackend(PrinterBackend):
 
     async def stop(self) -> None:
         """Stop the Moonraker connection and release resources."""
+        # Close the camera discovery session if auto-discovery ran; the
+        # backend owns the instance created in _resolve_snapshot_url. The
+        # reference is kept: close() is idempotent and the session is
+        # recreated lazily if discovery runs again.
+        if self._camera_discovery is not None:
+            await self._camera_discovery.close()
+
         if not self._started:
             return
 

@@ -133,7 +133,7 @@ class MQTTClient:
                     attempt=attempt,
                 )
                 return  # Connection successful
-            except MQTTConnectionError as exc:
+            except MQTTConnectionError:
                 # Check if this is an authentication failure
                 # MQTT v3.1.1: rc=5 = Not authorized
                 # MQTT v5: rc=134 = Bad user name or password, rc=135 = Not authorized
@@ -486,7 +486,12 @@ class MQTTClient:
         if not self._client:
             raise RuntimeError("MQTT client not connected")
 
-        self._subscriptions.pop(topic, None)
+        sub = self._subscriptions.pop(topic, None)
+        if sub is not None and sub.handler is not None:
+            # Drop the per-topic callback too: paho keeps message_callback_add
+            # registrations after UNSUBSCRIBE, so a stale handler would keep
+            # firing while any wildcard subscription still matches *topic*.
+            self._client.message_callback_remove(topic)
         result, _ = self._client.unsubscribe(topic)
         if result != mqtt.MQTT_ERR_SUCCESS:
             raise MQTTConnectionError(f"Unsubscribe failed with rc={result}")
@@ -615,7 +620,10 @@ class MQTTClient:
             )
             self._connected = True
             if self._connected_event:
-                self._connected_event.set()
+                # asyncio.Event.set() is not thread-safe: it wakes waiters via
+                # loop.call_soon, which must not run on the paho network
+                # thread. Bridge it like every other dispatch in this class.
+                self._call_soon_on_loop(self._connected_event.set)
             self._call_soon_on_loop(self._replay_subscriptions)
             self._call_soon_on_loop(self._replay_offline_buffer)
             for handler in self._connect_handlers:
@@ -624,7 +632,7 @@ class MQTTClient:
             LOGGER.error("MQTT connection failed with rc=%s", reason)
             self._connected = False
             if self._connected_event:
-                self._connected_event.set()
+                self._call_soon_on_loop(self._connected_event.set)
 
     def _on_disconnect(
         self,
@@ -639,7 +647,8 @@ class MQTTClient:
         self._last_disconnect_rc = reason
         LOGGER.info("Disconnected from MQTT broker (rc=%s)", reason)
         if self._disconnect_event:
-            self._disconnect_event.set()
+            # Not thread-safe from the paho thread — bridge via the loop.
+            self._call_soon_on_loop(self._disconnect_event.set)
         self._connected = False
         for handler in self._disconnect_handlers:
             self._call_soon_on_loop(handler, reason)

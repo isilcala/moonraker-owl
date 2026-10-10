@@ -144,6 +144,7 @@ class FakeMQTT:
         retain: bool = False,
         *,
         properties=None,
+        buffer_on_failure: bool = False,
     ):
         self.published.append((topic, payload, qos, retain))
 
@@ -1932,11 +1933,12 @@ def test_hot_cold_path_classifiers() -> None:
 @pytest.mark.asyncio
 async def test_capture_image_returns_camera_unavailable_when_no_camera(config):
     """task:capture-image should fail with camera_unavailable when camera=None."""
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     moonraker = FakeMoonraker()
     mqtt = FakeMQTT()
     fake_s3 = MagicMock()
+    fake_s3.close = AsyncMock()
     processor = CommandProcessor(config, moonraker, mqtt, s3_upload=fake_s3, camera=None)
 
     await processor.start()
@@ -2522,3 +2524,213 @@ async def test_set_output_pin_plain_name_passthrough(config):
     await processor.stop()
 
 
+
+
+class _FailingMQTT(FakeMQTT):
+    """MQTT stub whose publish always fails (broker unreachable)."""
+
+    def publish(self, *args: Any, **kwargs: Any) -> None:
+        from moonraker_owl.adapters.mqtt import MQTTConnectionError
+
+        raise MQTTConnectionError("Publish failed with rc=4")
+
+
+@pytest.mark.asyncio
+async def test_ack_publish_failure_still_completes_bookkeeping(config):
+    """MQTT down during ACKs must not leak inflight or lose the terminal state.
+
+    Regression for the 2026-10 audit finding: _publish_ack used to raise
+    MQTTConnectionError out of _handle_message, so _finish_inflight never ran
+    and every cloud-side retry hit the silent duplicate drop in
+    _handle_message — the command was stuck with no terminal ACK forever.
+    Now the terminal outcome is recorded before publishing, the publish is
+    best-effort, and a retry is answered from the idempotency cache.
+    """
+    moonraker = FakeMoonraker()
+    mqtt = _FailingMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    calls: list[str] = []
+
+    async def _handler(message: CommandMessage) -> Dict[str, Any]:
+        calls.append(message.command_id)
+        return {"ok": True}
+
+    processor.register_command("test:noop", _handler)
+    await processor.start()
+
+    message = {"$id": "cmd-offline", "payload": {"command": "test:noop"}}
+    await mqtt.emit("owl/printers/device-123/commands/test:noop", message)
+
+    # Command executed and bookkeeping completed despite every ACK failing.
+    assert calls == ["cmd-offline"]
+    assert processor.pending_count == 0
+    cached = processor._idempotency.get_cached_result("cmd-offline")
+    assert cached is not None
+    assert cached.status == "completed"
+
+    # Cloud-side retry must be answered from the cache, not re-executed.
+    await mqtt.emit("owl/printers/device-123/commands/test:noop", message)
+    assert calls == ["cmd-offline"]
+    assert processor.pending_count == 0
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_handler_error_records_terminal_failure(config):
+    """A handler bug (non-CommandProcessingError) must close the command.
+
+    The catch-all in _handle_message sends a failed ACK, records the terminal
+    state for duplicate replay, and releases the inflight slot.
+    """
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    calls = 0
+
+    async def _handler(message: CommandMessage) -> Dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("kaboom")
+
+    processor.register_command("test:boom", _handler)
+    await processor.start()
+
+    message = {"$id": "cmd-boom", "payload": {"command": "test:boom"}}
+    await mqtt.emit("owl/printers/device-123/commands/test:boom", message)
+
+    assert calls == 1
+    assert processor.pending_count == 0
+
+    failure_acks = [
+        json.loads(payload.decode("utf-8"))
+        for _, payload, _, _ in mqtt.published
+        if json.loads(payload.decode("utf-8"))["payload"]["status"] == "failed"
+    ]
+    assert failure_acks
+    assert failure_acks[0]["payload"]["reason"]["code"] == "internal_error"
+
+    cached = processor._idempotency.get_cached_result("cmd-boom")
+    assert cached is not None
+    assert cached.status == "failed"
+
+    # Retry replays the cached failure instead of re-executing the handler.
+    await mqtt.emit("owl/printers/device-123/commands/test:boom", message)
+    assert calls == 1
+
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_abandon_inflight_continues_past_ack_failures(config):
+    """A failed abandon ACK must not strand the remaining commands silently."""
+    moonraker = FakeMoonraker()
+    mqtt = _FailingMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    processor._begin_inflight(
+        "print:pause", CommandMessage("cmd-a", "print:pause", {})
+    )
+    processor._begin_inflight(
+        "print:resume", CommandMessage("cmd-b", "print:resume", {})
+    )
+    processor._begin_pending_state(
+        "print:cancel", CommandMessage("cmd-c", "print:cancel", {}), "cancelled"
+    )
+
+    await processor.abandon_inflight("mqtt down")
+
+    assert processor.pending_count == 0
+    assert processor.pending_state_count == 0
+
+    await processor.stop()
+
+
+class _RecordingClient:
+    """Close-tracking stub for processor-owned HTTP clients."""
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.closed = False
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_command_processor_stop_closes_owned_clients(config):
+    """stop() must close the S3/camera clients the processor owns."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    s3_upload = _RecordingClient()
+    camera = _RecordingClient()
+    processor = CommandProcessor(
+        config, moonraker, mqtt, s3_upload=s3_upload, camera=camera
+    )
+
+    await processor.start()
+    await processor.stop()
+
+    assert s3_upload.closed is True
+    assert camera.closed is True
+    assert s3_upload.close_calls == 1
+    assert camera.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_command_processor_stop_tolerates_missing_clients(config):
+    """stop() with no injected clients must not raise."""
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+
+    await processor.start()
+    await processor.stop()
+    await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_schedule_ack_tolerates_closed_event_loop(config, caplog):
+    """A loop closed mid-shutdown must not propagate out of the sync ingest path."""
+    import logging
+
+    moonraker = FakeMoonraker()
+    mqtt = FakeMQTT()
+    processor = CommandProcessor(config, moonraker, mqtt)
+    await processor.start()
+
+    message = {
+        "$id": "cmd-loop-closed",
+        "payload": {"command": "print:pause"},
+    }
+    await mqtt.emit("owl/printers/device-123/commands/print:pause", message)
+    assert processor.pending_state_count == 1
+
+    # Simulate the shutdown race: the stored loop is already closed when the
+    # print-state notification arrives on the telemetry ingest path.
+    closed_loop = asyncio.new_event_loop()
+    closed_loop.close()
+    running_loop = processor._loop
+    processor._loop = closed_loop
+    try:
+        with caplog.at_level(
+            logging.WARNING, logger="moonraker_owl.commands.processor"
+        ):
+            processor.on_print_state_changed("paused")
+    finally:
+        processor._loop = running_loop
+
+    assert processor.pending_state_count == 0
+    assert processor.pending_count == 0
+    warnings = [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and "event loop is closed" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "cmd-loop" in warnings[0].getMessage()
+
+    await processor.stop()

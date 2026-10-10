@@ -529,6 +529,56 @@ def test_allowed_transitions_covers_all_states() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recovering_allows_startup_chain_transitions() -> None:
+    """_start_services() can re-run COLD_START -> AWAITING_* -> ACTIVE from RECOVERING."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+
+    for target in (
+        AgentState.COLD_START,
+        AgentState.AWAITING_MQTT,
+        AgentState.AWAITING_MOONRAKER,
+        AgentState.ACTIVE,
+    ):
+        app._state = AgentState.RECOVERING
+        await app._transition_state(target)
+        assert app._state == target
+
+
+@pytest.mark.asyncio
+async def test_teardown_stops_health_publisher_before_mqtt_disconnect() -> None:
+    """Producers must stop before the channel: the health publisher's periodic
+    tick publishes to MQTT, so it must be stopped before the client disconnects."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+
+    calls: list[str] = []
+
+    class _OrderRecorder:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        async def stop_supervisor(self) -> None:
+            calls.append(self._name)
+
+        async def stop(self) -> None:
+            calls.append(self._name)
+
+        async def disconnect(self) -> None:
+            calls.append(self._name)
+
+    app._connection_coordinator = _OrderRecorder("coordinator")
+    app._health_publisher = _OrderRecorder("health_publisher")
+    app._mqtt_client = _OrderRecorder("mqtt_client")
+
+    await app._teardown_partially_started_services()
+
+    assert calls == ["coordinator", "health_publisher", "mqtt_client"]
+    assert app._health_publisher is None
+    assert app._mqtt_client is None
+
+
+@pytest.mark.asyncio
 async def test_spawn_background_tracks_and_clears_task() -> None:
     """A spawned background task is tracked until completion then discarded."""
     app = MoonrakerOwlApp(build_config())
@@ -1349,3 +1399,41 @@ async def test_start_runtime_components_rebinds_health_publisher() -> None:
     assert app._telemetry_publisher is telemetry
     assert rebinds == [telemetry]
 
+
+
+@pytest.mark.asyncio
+async def test_session_takeover_backs_off_instead_of_ping_pong(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rc=142 (duplicate client_id) must hard-back-off with escalating delay
+    instead of instantly reconnecting into a session-takeover ping-pong."""
+    app = MoonrakerOwlApp(build_config())
+    app._loop = asyncio.get_running_loop()
+    coordinator = _RecordingConnectionCoordinator()
+    app._connection_coordinator = coordinator  # type: ignore[assignment]
+
+    scheduled: list[tuple[float, Any]] = []
+    loop = asyncio.get_running_loop()
+    real_call_later = loop.call_later
+
+    def _spy(delay: float, callback: Any, *args: Any) -> Any:
+        scheduled.append((delay, callback))
+        return real_call_later(0, lambda: None)  # inert handle
+
+    monkeypatch.setattr(loop, "call_later", _spy)
+
+    app._on_mqtt_disconnect(142)
+    assert coordinator.requests == []  # no immediate reconnect request
+    assert scheduled[-1][0] == pytest.approx(10.0)
+
+    app._on_mqtt_disconnect(142)
+    assert scheduled[-1][0] == pytest.approx(20.0)
+
+    # The delayed request eventually reaches the coordinator.
+    scheduled[-1][1]()
+    assert coordinator.requests == [ReconnectReason.CONNECTION_LOST]
+
+    # A stable connection resets the escalation window.
+    app._on_mqtt_connect(0)
+    app._on_mqtt_disconnect(142)
+    assert scheduled[-1][0] == pytest.approx(10.0)

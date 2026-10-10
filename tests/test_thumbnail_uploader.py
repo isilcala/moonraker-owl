@@ -15,11 +15,7 @@ import pytest
 from moonraker_owl.adapters.s3_upload import UploadResult
 from moonraker_owl.adapters.thumbnail_uploader import (
     MAX_UPLOAD_RETRIES,
-    NoJobMatchError,
-    TierGatingError,
     ThumbnailUploader,
-    ThumbnailUploadAuth,
-    _AlreadyUploadedError,
 )
 
 

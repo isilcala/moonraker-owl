@@ -30,6 +30,16 @@ from .providers import (
 LOGGER = logging.getLogger(__name__)
 
 
+class MetadataUploadRejectedError(RuntimeError):
+    """Cloud permanently rejected the metadata upload (401/403/404).
+
+    Retrying with the same credentials/resource within the current retry
+    round can never succeed, so the retry loop must end the round instead
+    of backing off forever. The next periodic cycle (or force_report_now)
+    may still try again.
+    """
+
+
 @dataclass(slots=True)
 class MetadataReporterConfig:
     """Configuration for MetadataReporter."""
@@ -102,6 +112,7 @@ class MetadataReporter:
         self._force_event = asyncio.Event()
         self._last_report_success = False
         self._retry_delay = config.initial_retry_delay
+        self._runtime_ready = False
 
     async def start(self) -> None:
         """Start the metadata reporter.
@@ -118,6 +129,7 @@ class MetadataReporter:
             return
 
         self._stop_event.clear()
+        self._runtime_ready = False
         self._initialize_providers()
         self._report_task = asyncio.create_task(self._report_loop())
         LOGGER.info(
@@ -182,15 +194,49 @@ class MetadataReporter:
         self._providers.clear()
 
     async def _report_loop(self) -> None:
-        """Background loop for periodic metadata reporting.
+        """Supervise the report cycle, restarting it after unexpected errors.
 
-        The loop does NOT fire an immediate initial report.  Instead it
+        A single unexpected exception must not kill the background task
+        permanently — otherwise force_report_now would only warn and
+        metadata would never be reported again until process restart.
+        Failures are logged and the cycle restarts after a backoff delay.
+        """
+        backoff = self._config.initial_retry_delay
+        while not self._stop_event.is_set():
+            try:
+                await self._run_report_cycle()
+                return
+            except asyncio.CancelledError:
+                LOGGER.debug("Report loop cancelled")
+                raise
+            except Exception as exc:
+                LOGGER.error(
+                    "Unexpected error in report loop: %s; restarting in %.0fs",
+                    exc,
+                    backoff,
+                    exc_info=True,
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=backoff,
+                    )
+                    # Stop requested during backoff
+                    return
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(backoff * 2, self._config.max_retry_delay)
+
+    async def _run_report_cycle(self) -> None:
+        """Run one report cycle: initial report, then periodic refresh.
+
+        The cycle does NOT fire an immediate initial report.  Instead it
         waits for the first ``force_report_now()`` signal which is
         emitted by the application once Moonraker connectivity has been
         verified.  This avoids uploading empty metadata if providers
         run before the printer backend is ready.
         """
-        try:
+        if not self._runtime_ready:
             # Wait for first trigger before initial report — ensures
             # Moonraker is reachable before we collect metadata.
             LOGGER.info("Waiting for runtime-ready signal before first metadata report")
@@ -210,33 +256,30 @@ class MetadataReporter:
                 return
 
             LOGGER.info("Runtime-ready signal received, collecting initial metadata")
+            self._runtime_ready = True
+
+        await self._report_with_retry()
+
+        # Periodic refresh
+        while not self._stop_event.is_set():
+            # Wait for either: stop, force-refresh, or periodic timeout
+            self._force_event.clear()
+            stop_task = asyncio.create_task(self._stop_event.wait())
+            force_task = asyncio.create_task(self._force_event.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {stop_task, force_task},
+                    timeout=self._config.refresh_interval_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                stop_task.cancel()
+                force_task.cancel()
+
+            if self._stop_event.is_set():
+                break
+
             await self._report_with_retry()
-
-            # Periodic refresh
-            while not self._stop_event.is_set():
-                # Wait for either: stop, force-refresh, or periodic timeout
-                self._force_event.clear()
-                stop_task = asyncio.create_task(self._stop_event.wait())
-                force_task = asyncio.create_task(self._force_event.wait())
-                try:
-                    done, _ = await asyncio.wait(
-                        {stop_task, force_task},
-                        timeout=self._config.refresh_interval_seconds,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                finally:
-                    stop_task.cancel()
-                    force_task.cancel()
-
-                if self._stop_event.is_set():
-                    break
-
-                await self._report_with_retry()
-        except asyncio.CancelledError:
-            LOGGER.debug("Report loop cancelled")
-            raise
-        except Exception as exc:
-            LOGGER.error("Unexpected error in report loop: %s", exc, exc_info=True)
 
     def force_report_now(self) -> None:
         """Trigger an immediate metadata report, breaking the periodic wait.
@@ -266,6 +309,17 @@ class MetadataReporter:
                 await self._report_once()
                 self._last_report_success = True
                 return
+            except MetadataUploadRejectedError as exc:
+                # Permanent rejection (401/403/404): retrying within this
+                # round cannot succeed. End the round; the next periodic
+                # cycle or force_report_now may still try again.
+                self._last_report_success = False
+                LOGGER.error(
+                    "Metadata upload permanently rejected, ending retry round "
+                    "(next periodic cycle will try again): %s",
+                    exc,
+                )
+                return
             except Exception as exc:
                 self._last_report_success = False
                 max_attempts = self._config.max_retry_attempts
@@ -285,16 +339,26 @@ class MetadataReporter:
                     exc,
                 )
 
-                # Wait before retry
+                # Wait before retry — wake early on stop OR a force request:
+                # a metadata:system-refresh arriving mid-backoff would
+                # otherwise be swallowed by the next cycle's force_event.clear()
+                # and delayed by up to max_retry_delay.
+                stop_task = asyncio.create_task(self._stop_event.wait())
+                force_task = asyncio.create_task(self._force_event.wait())
                 try:
-                    await asyncio.wait_for(
-                        self._stop_event.wait(),
+                    await asyncio.wait(
+                        {stop_task, force_task},
                         timeout=self._retry_delay,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-                    # Stop requested during wait
+                finally:
+                    stop_task.cancel()
+                    force_task.cancel()
+
+                if self._stop_event.is_set():
                     return
-                except asyncio.TimeoutError:
-                    pass
+                if force_task.done() and not force_task.cancelled():
+                    LOGGER.info("Metadata report forced during backoff; retrying now")
 
                 # Exponential backoff
                 self._retry_delay = min(
@@ -308,9 +372,20 @@ class MetadataReporter:
 
         metadata = await self._collect_metadata()
 
-        if not metadata:
-            LOGGER.warning("No metadata collected, skipping upload")
-            return
+        if not metadata.get("components"):
+            # The components section is only populated by providers that talk
+            # to Moonraker/Klipper, so an empty dict means every one of them
+            # failed (printer offline/upgrading) and the payload is a hollow
+            # shell. The cloud replaces the stored metadata wholesale on every
+            # PUT (ADR-0032), so uploading the shell would wipe the stored
+            # components/sensors/macros inventory and flip HasCamera /
+            # HasTimelapse / AgentVersion to empty until the next successful
+            # report (up to 24h later). Treat it as a collection failure and
+            # let the retry loop run instead.
+            raise RuntimeError(
+                "Metadata collection produced no components (Moonraker "
+                "unreachable?); skipping upload to avoid wiping cloud inventory"
+            )
 
         LOGGER.debug("Uploading metadata: %s", metadata)
         await self._upload_metadata(metadata)
@@ -414,7 +489,9 @@ class MetadataReporter:
             metadata: Aggregated metadata dictionary.
 
         Raises:
-            Exception: If upload fails.
+            MetadataUploadRejectedError: If the cloud permanently rejects
+                the upload (401/403/404).
+            Exception: If upload fails transiently.
         """
         # Get token
         token = self._token_provider()
@@ -458,11 +535,13 @@ class MetadataReporter:
                         LOGGER.debug("Metadata upload successful")
                         return
                     elif response.status == 401:
-                        raise RuntimeError("Authentication failed (401)")
+                        raise MetadataUploadRejectedError("Authentication failed (401)")
                     elif response.status == 403:
-                        raise RuntimeError("Authorization failed (403)")
+                        raise MetadataUploadRejectedError("Authorization failed (403)")
                     elif response.status == 404:
-                        raise RuntimeError(f"Device not found: {self._config.device_id}")
+                        raise MetadataUploadRejectedError(
+                            f"Device not found: {self._config.device_id}"
+                        )
                     else:
                         body = await response.text()
                         raise RuntimeError(

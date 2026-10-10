@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
-import pytest
 
 from moonraker_owl.telemetry.event_types import (
     Event,
@@ -1577,3 +1574,50 @@ class TestOrchestratorEventDetection:
             f"Got events: {[e.event_name.value for e in stale_events]}"
         )
 
+
+
+
+class TestQueueOverflowVisibility:
+    """deque(maxlen) silently evicts the oldest event when full; the collector
+    must count drops and warn instead of losing events invisibly (2026-10
+    audit — a klippy flap storm could drop P0s without a trace)."""
+
+    @staticmethod
+    def _spy_warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        # Spy on the module logger instead of caplog: configure_logging()
+        # removes root handlers, so caplog capture depends on test ordering.
+        from moonraker_owl.telemetry import events as events_module
+
+        warnings: list[str] = []
+
+        def _spy(msg: str, *args: object, **kwargs: object) -> None:
+            warnings.append(msg % args if args else msg)
+
+        monkeypatch.setattr(events_module.LOGGER, "warning", _spy)
+        return warnings
+
+    def test_overflow_drops_are_counted_and_warned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        warnings = self._spy_warnings(monkeypatch)
+        collector = EventCollector(max_queue_size=3)
+
+        for _ in range(5):
+            collector.record(Event(event_name=EventName.PRINT_STARTED, message="m"))
+
+        assert collector.dropped_overflow_total == 2
+        assert any("queue full" in message for message in warnings), (
+            "expected a rate-limited overflow warning"
+        )
+
+    def test_overflow_warning_is_rate_limited(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        warnings = self._spy_warnings(monkeypatch)
+        collector = EventCollector(max_queue_size=1)
+
+        for _ in range(10):
+            collector.record(Event(event_name=EventName.KLIPPY_ERROR, message="m"))
+
+        assert len([m for m in warnings if "queue full" in m]) == 1
+        assert collector.dropped_overflow_total == 9

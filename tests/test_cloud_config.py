@@ -7,13 +7,11 @@ import json
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from moonraker_owl.cloud_config import (
     CloudConfigManager,
-    CloudConfigState,
     _snake_dict,
     apply_cloud_config,
 )
@@ -562,7 +560,6 @@ def test_refresh_base_config_propagates_sensor_filter():
     from helpers import build_config
     from test_telemetry import FakeMoonrakerClient, FakeMQTTClient
     from moonraker_owl.telemetry import TelemetryPublisher
-    from moonraker_owl.telemetry.selectors import SensorFilter
 
     config = build_config()
     moonraker = FakeMoonrakerClient({"result": {"status": {}}})
@@ -641,3 +638,70 @@ def test_refresh_base_config_resets_cadence_and_queues_republish():
     assert publisher._pending_channels["sensors"].forced is True
     assert "status" in publisher._pending_channels
     assert publisher._pending_channels["status"].forced is True
+
+
+class _MalformedJsonResponse(FakeResponse):
+    """200 response whose body raises JSONDecodeError (truncated payload)."""
+
+    async def json(self) -> Any:
+        raise json.JSONDecodeError("Expecting value", doc="", pos=0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_malformed_200_body_degrades_to_plain_failure(tmp_path: Path):
+    """A 200 with a broken body must not kill the (unawaited) deferred-fetch
+    task — it degrades to a logged False like any other fetch failure."""
+    config = _make_config(tmp_path)
+    session = FakeSession()
+    session.add_response(_MalformedJsonResponse(200))
+
+    mgr = CloudConfigManager(
+        config=config,
+        device_id="dev-1",
+        base_url="https://owl.example.com",
+        token_provider=lambda: "jwt-tok",
+        lkg_path=tmp_path / "cloud-config.json",
+        http_session=session,
+    )
+
+    result = await mgr.fetch(force=True)
+
+    assert result is False
+    # Must also survive when driven through the fire-and-forget path.
+    session.add_response(_MalformedJsonResponse(200))
+    await mgr._deferred_fetch(0)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_fetch_returns_false_instead_of_racing(tmp_path: Path):
+    """A second fetch while one is in flight must skip instead of racing
+    (token-renewal spawns a bare fetch() that bypasses schedule_fetch's
+    coalescing — 2026-10 audit)."""
+    config = _make_config(tmp_path)
+    session = FakeSession()
+    gate = asyncio.Event()
+
+    class _GatedResponse(FakeResponse):
+        async def json(self) -> Any:
+            await gate.wait()
+            return SAMPLE_CLOUD_RESPONSE
+
+    session.add_response(_GatedResponse(200, headers={"ETag": "sha256-gated"}))
+
+    mgr = CloudConfigManager(
+        config=config,
+        device_id="dev-1",
+        base_url="https://owl.example.com",
+        token_provider=lambda: "jwt-tok",
+        lkg_path=tmp_path / "cloud-config.json",
+        http_session=session,
+    )
+
+    first = asyncio.create_task(mgr.fetch(force=True))
+    await asyncio.sleep(0.02)  # first fetch is in flight inside the lock
+
+    assert await mgr.fetch(force=True) is False
+
+    gate.set()
+    assert await first is True
+    assert len(session.requests) == 1

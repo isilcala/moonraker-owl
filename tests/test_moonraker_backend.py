@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,7 +12,6 @@ from moonraker_owl.backends.moonraker import (
     _extract_str,
     _normalise_state,
 )
-from moonraker_owl.core import PrinterHealthAssessment
 
 
 class TestMoonrakerBackendHealthAnalysis:
@@ -213,6 +211,35 @@ class TestMoonrakerBackendLifecycle:
         mock_client.stop.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_stop_closes_camera_discovery(
+        self, backend: MoonrakerBackend, mock_client: AsyncMock
+    ) -> None:
+        """Stop should close the camera discovery session if one was created."""
+        discovery = MagicMock()
+        discovery.close = AsyncMock()
+        backend._camera_discovery = discovery
+
+        callback = AsyncMock()
+        await backend.start(callback)
+        await backend.stop()
+
+        discovery.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_closes_camera_discovery_without_start(
+        self, backend: MoonrakerBackend, mock_client: AsyncMock
+    ) -> None:
+        """Discovery is closed even if the backend was never started."""
+        discovery = MagicMock()
+        discovery.close = AsyncMock()
+        backend._camera_discovery = discovery
+
+        await backend.stop()
+
+        discovery.close.assert_awaited_once()
+        mock_client.stop.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_assess_health_connection_error(
         self, backend: MoonrakerBackend, mock_client: AsyncMock
     ) -> None:
@@ -312,7 +339,7 @@ class TestFactoryMethods:
         with patch(
             "moonraker_owl.backends.moonraker.TelemetryPublisher"
         ) as MockPublisher:
-            result = backend.create_telemetry_publisher(mock_owl_config, mock_mqtt)
+            backend.create_telemetry_publisher(mock_owl_config, mock_mqtt)
 
             MockPublisher.assert_called_once_with(
                 mock_owl_config, backend._client, mock_mqtt, job_registry=None
@@ -332,7 +359,7 @@ class TestFactoryMethods:
         ) as MockS3Client, patch.object(
             backend, "_resolve_snapshot_url", new_callable=AsyncMock, return_value=None
         ):
-            result = await backend.create_command_processor(
+            await backend.create_command_processor(
                 mock_owl_config, mock_mqtt, mock_telemetry
             )
 
@@ -364,7 +391,7 @@ class TestFactoryMethods:
 
         with patch(
             "moonraker_owl.backends.moonraker.CommandProcessor"
-        ) as MockProcessor, patch(
+        ), patch(
             "moonraker_owl.backends.moonraker.S3UploadClient"
         ), patch(
             "moonraker_owl.backends.moonraker.CameraClient"
