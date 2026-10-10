@@ -545,10 +545,28 @@ class MoonrakerOwlApp:
         # 5. Release the health-server port so the new attempt can bind it.
         await self._stop_health_server()
 
+    def _ensure_printer_backend(self) -> None:
+        """Recreate the printer backend if a failure path tore it down.
+
+        The backend owns the local Moonraker connection and must outlive
+        cloud-side (MQTT) startup failures, but it is otherwise created only
+        in ``__init__``. Without this guard a torn-down backend stranded every
+        startup retry: the loop logged "printer backend is missing; rebuilding
+        services" forever while ``_start_runtime_components_locked`` bailed on
+        the None check, and the agent never returned to ACTIVE (staging
+        incident 2026-10: printer flapped Online/Offline every 60s with no
+        telemetry until the process was restarted).
+        """
+        if self._printer_backend is None:
+            LOGGER.info("Printer backend missing; recreating from config")
+            self._printer_backend = MoonrakerBackend(self._config.moonraker)
+
     async def _start_services(self) -> bool:
         # Tear down any resources left over from a previous failed attempt
         # to prevent session-takeover storms and port conflicts.
         await self._teardown_partially_started_services()
+
+        self._ensure_printer_backend()
 
         await self._transition_state(AgentState.COLD_START, detail="initialising")
 
@@ -682,10 +700,10 @@ class MoonrakerOwlApp:
 
         mqtt_connected = await self._connect_mqtt()
         if not mqtt_connected:
+            # The printer backend is local-printer infrastructure and must
+            # survive a cloud-side connect failure; tearing it down here once
+            # stranded the agent in an unrecoverable degraded loop.
             await self._transition_state(AgentState.DEGRADED, detail="mqtt unavailable")
-            if self._printer_backend is not None:
-                await self._printer_backend.stop()
-                self._printer_backend = None
             return False
 
         # Subscribe to cloud config notification topics (ADR-0040)
@@ -1091,6 +1109,7 @@ class MoonrakerOwlApp:
     async def _start_runtime_components_locked(
         self, *, preserve_print_state: bool = False
     ) -> bool:
+        self._ensure_printer_backend()
         if self._printer_backend is None or self._mqtt_client is None:
             return False
 

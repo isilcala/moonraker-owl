@@ -11,6 +11,7 @@ from typing import Any, Optional
 import pytest
 
 from moonraker_owl.app import AgentState, MoonrakerOwlApp, _ALLOWED_TRANSITIONS
+from moonraker_owl.backends import MoonrakerBackend
 from moonraker_owl.connection import ReconnectReason
 from helpers import build_config
 
@@ -220,7 +221,11 @@ async def test_start_services_registers_contract_compliant_lwt(
     started = await app._start_services()
 
     assert started is False
-    assert backend.stop_calls == 1
+    # An MQTT connect failure must not tear down the printer backend: it is
+    # local-printer infrastructure whose lifecycle is independent of the
+    # cloud connection (regression: staging 2026-10 degraded loop).
+    assert backend.stop_calls == 0
+    assert app._printer_backend is backend
     assert isinstance(app._mqtt_client, _StubMqttClient)
     assert app._mqtt_client.last_will is not None
     assert app._device_id is not None
@@ -241,6 +246,55 @@ async def test_start_services_registers_contract_compliant_lwt(
     assert document["payload"]["lifecycle"]["phase"] == "Offline"
     assert document["payload"]["lifecycle"]["isShutdown"] is False
     assert document["payload"]["cadence"]["heartbeatSeconds"] == config.telemetry_cadence.status_heartbeat_seconds
+
+
+@pytest.mark.asyncio
+async def test_ensure_printer_backend_recreates_only_when_missing() -> None:
+    """The backend is recreated when torn down, never replaced while alive."""
+    app = MoonrakerOwlApp(build_config())
+
+    existing = app._printer_backend
+    app._ensure_printer_backend()
+    assert app._printer_backend is existing
+
+    app._printer_backend = None  # type: ignore[assignment]
+    app._ensure_printer_backend()
+    assert isinstance(app._printer_backend, MoonrakerBackend)
+
+
+@pytest.mark.asyncio
+async def test_start_services_recreates_torn_down_printer_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A torn-down backend must not strand startup retries in a degraded loop.
+
+    Regression for staging 2026-10: once _printer_backend became None, the
+    retry loop logged "printer backend is missing; rebuilding services" every
+    60s, but the backend was only ever created in __init__ — the agent flapped
+    Online/Offline with no telemetry until the process was restarted.
+    """
+    config = build_config()
+    config.cloud.device_private_key = "test-private-key"
+    app = MoonrakerOwlApp(config)
+    app._printer_backend = None  # type: ignore[assignment]  # simulate teardown
+
+    monkeypatch.setattr("moonraker_owl.app.TokenManager", _StubTokenManager)
+    monkeypatch.setattr("moonraker_owl.app.CloudConfigManager", _StubCloudConfigManager)
+    monkeypatch.setattr("moonraker_owl.app.MQTTClient", _StubMqttClient)
+
+    async def _fake_start_metadata_reporter(self: MoonrakerOwlApp, device_id: str) -> None:
+        return None
+
+    async def _fake_connect_mqtt(self: MoonrakerOwlApp) -> bool:
+        return False
+
+    monkeypatch.setattr(MoonrakerOwlApp, "_start_metadata_reporter", _fake_start_metadata_reporter)
+    monkeypatch.setattr(MoonrakerOwlApp, "_connect_mqtt", _fake_connect_mqtt)
+
+    started = await app._start_services()
+
+    assert started is False  # MQTT still down, but the backend is back
+    assert isinstance(app._printer_backend, MoonrakerBackend)
 
 
 @pytest.mark.asyncio
@@ -1111,6 +1165,60 @@ async def test_startup_retry_loop_full_restart_when_infra_down(
 
     assert start_services_calls == 1
     assert runtime_retry_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_startup_retry_loop_recovers_active_via_real_start_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end regression for staging 2026-10: with the backend torn down,
+    the retry loop driving the real _start_services() must recreate the
+    backend and reach ACTIVE — not spin in "rebuilding services" forever.
+    External I/O (MQTT/Moonraker) is stubbed; the recovery wiring is real.
+    """
+    config = build_config()
+    config.cloud.device_private_key = "test-private-key"
+    app = MoonrakerOwlApp(config)
+    app._loop = asyncio.get_running_loop()
+    app._state = AgentState.DEGRADED
+    app._printer_backend = None  # type: ignore[assignment]  # simulate teardown
+    app._connection_coordinator = None  # type: ignore[assignment]
+
+    monkeypatch.setattr("moonraker_owl.app.TokenManager", _StubTokenManager)
+    monkeypatch.setattr("moonraker_owl.app.CloudConfigManager", _StubCloudConfigManager)
+    monkeypatch.setattr("moonraker_owl.app.MQTTClient", _StubMqttClient)
+    monkeypatch.setattr(
+        "moonraker_owl.app.ConnectionCoordinator", _StubConnectionCoordinator
+    )
+
+    async def _noop_async(self: MoonrakerOwlApp, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def _fake_connect_mqtt(self: MoonrakerOwlApp) -> bool:
+        return True
+
+    async def _fake_runtime(self: MoonrakerOwlApp, **kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(MoonrakerOwlApp, "_start_metadata_reporter", _noop_async)
+    monkeypatch.setattr(MoonrakerOwlApp, "_connect_mqtt", _fake_connect_mqtt)
+    monkeypatch.setattr(MoonrakerOwlApp, "_subscribe_config_notifications", lambda self: None)
+    monkeypatch.setattr(MoonrakerOwlApp, "_start_runtime_components", _fake_runtime)
+    monkeypatch.setattr(MoonrakerOwlApp, "_start_health_server", _noop_async)
+    monkeypatch.setattr(MoonrakerOwlApp, "_start_moonraker_monitor", lambda self: None)
+    monkeypatch.setattr(MoonrakerOwlApp, "_start_health_publisher", _noop_async)
+
+    _real_sleep = asyncio.sleep
+
+    async def _fast_sleep(_delay: float, *args: Any, **kwargs: Any) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    await asyncio.wait_for(app._startup_retry_loop(), timeout=1.0)
+
+    assert isinstance(app._printer_backend, MoonrakerBackend)
+    assert app._state == AgentState.ACTIVE
 
 
 @pytest.mark.asyncio
