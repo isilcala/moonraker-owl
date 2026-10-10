@@ -1666,8 +1666,21 @@ class TestReportLoopSupervision:
     """An unexpected exception must not permanently kill the report task."""
 
     @pytest.mark.asyncio
-    async def test_report_loop_recovers_after_unexpected_error(self, reporter_config, caplog):
+    async def test_report_loop_recovers_after_unexpected_error(
+        self, reporter_config, monkeypatch
+    ):
         """Crash -> ERROR log -> backoff -> loop continues instead of dying."""
+        from moonraker_owl.metadata import reporter as reporter_module
+
+        errors: list[str] = []
+
+        def _spy(msg: str, *args: object, **kwargs: object) -> None:
+            errors.append(msg % args if args else msg)
+
+        # Spy on the module logger instead of caplog (ambient logging state
+        # differs across environments — see test_events.py overflow tests).
+        monkeypatch.setattr(reporter_module.LOGGER, "error", _spy)
+
         reporter_config.initial_retry_delay = 0.05
         reporter_config.max_retry_delay = 0.1
         reporter_config.refresh_interval_seconds = 3600  # Long interval
@@ -1696,10 +1709,7 @@ class TestReportLoopSupervision:
         await asyncio.sleep(0.3)
 
         # Crash was logged and the task is still alive
-        assert any(
-            "Unexpected error in report loop" in record.message
-            for record in caplog.records
-        )
+        assert any("Unexpected error in report loop" in m for m in errors)
         assert reporter.is_running
 
         # The loop restarted: a new force signal triggers another report

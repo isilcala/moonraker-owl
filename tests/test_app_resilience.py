@@ -483,8 +483,22 @@ async def test_moonraker_failure_force_trip_bypasses_threshold() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_state_transition_is_rejected(caplog: pytest.LogCaptureFixture) -> None:
+async def test_invalid_state_transition_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Test that invalid transitions are rejected and logged as errors."""
+    from moonraker_owl import app as app_module
+
+    errors: list[str] = []
+
+    def _spy(msg: str, *args: object, **kwargs: object) -> None:
+        errors.append(msg % args if args else msg)
+
+    # Spy on the module logger instead of caplog: caplog capture depends on
+    # ambient logging state, which differs across environments (CI failure
+    # 2026-10 — see TestQueueOverflowVisibility in test_events.py).
+    monkeypatch.setattr(app_module.LOGGER, "error", _spy)
+
     config = build_config()
     app = MoonrakerOwlApp(config)
     app._loop = asyncio.get_running_loop()
@@ -497,11 +511,7 @@ async def test_invalid_state_transition_is_rejected(caplog: pytest.LogCaptureFix
 
     # State should remain COLD_START
     assert app._state == AgentState.COLD_START
-    assert any(
-        "Invalid state transition: cold_start -> active" in r.message
-        for r in caplog.records
-        if r.levelname == "ERROR"
-    )
+    assert any("Invalid state transition: cold_start -> active" in m for m in errors)
 
 
 @pytest.mark.asyncio

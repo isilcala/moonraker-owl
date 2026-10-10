@@ -129,7 +129,7 @@ class TestIdempotencyPersistence:
         assert mode == 0o600, f"expected 0600, got {oct(mode)}"
 
     def test_unwritable_directory_does_not_crash(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+        self, tmp_path: Path
     ) -> None:
         """If persistence fails (e.g. read-only FS), command processing must still succeed."""
         # Point at a path inside a regular file (impossible directory).
@@ -167,9 +167,7 @@ class TestSensorsRateFloor:
         mqtt = FakeMQTTClient()
         return TelemetryPublisher(config, moonraker, mqtt, poll_specs=())
 
-    def test_watch_below_floor_is_clamped(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_watch_below_floor_is_clamped(self) -> None:
         publisher = self._make_publisher(floor=0.5)
 
         publisher.apply_sensors_rate(
